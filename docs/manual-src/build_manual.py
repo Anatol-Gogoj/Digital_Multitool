@@ -484,13 +484,19 @@ body.append(section("psu", "DC Supply — BK 9174B",
                     caution_keep=[0, 1, 2, 3]))
 body.append(section("dmm", "Digital Multimeter — BK 5493C",
                     caution_keep=[0, 1, 2]))
-body.append(section("logging", "Continuous Logging", caution_keep=[0, 1, 2]))
+# The last index on the Logging, Webcam and SLDEA lists is the plain-ASCII
+# folder name caution (New folder..., #394, v1.4.4), appended to each.
+body.append(section("logging", "Continuous Logging",
+                    caution_keep=[0, 1, 2, 5]))
 body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
-body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
+# The Webcam tab outgrew the capture window in v1.4.4 (the PREVIEW OFF
+# splash, #385), so its capture rows are annotated on the scrolled shot.
+body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4, 6],
+                    more_imgs=("tab_webcam_bottom",)))
 # Index 9 is the flat or missing baseline stop (#348, v1.4.3). It was
 # appended rather than inserted: these keep lists are indexes, and an insert
 # at 2 silently swapped which cautions this box shows.
-body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4, 9],
+body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4, 9, 10],
                     more_imgs=("tab_sldea_bottom",)))
 
 ct = content["tools"]

@@ -1500,6 +1500,111 @@ flag source-scan test remain.
   as a pass, so that guard has not been running; the new leg tests pin
   `78315cc` instead, which every clone has.
 
+## The N-sigma breakdown rule runs in shadow on every LIVE run, beside the fixed watchdog (2026-10-08)
+
+**TL;DR:** A second breakdown rule now runs on every LIVE run whose
+monitor reads run. It trips, in its own record only, when the current sits
+5 sigma or 20 µA (whichever is larger) from where this run's current has
+been, for 2 reads in a row (`#219`). It acts on nothing: the 100 µA / 3 s
+watchdog still stops runs. Replayed on the 18 single-layer runs with
+current on file, it made no false trip, let the three self-clearing
+transients pass, and caught two of the three breakdowns, one that the
+fixed rule missed and one 44 s sooner. None of those breakdowns has
+telemetry, so the rule has not yet met one at its live read rate. Every
+away read, a lone one included, is listed in run.log once the SG is
+zeroed, so the owner can decide later whether a single away read is a
+breakdown. It stays in shadow until the §N1 probe and a bench campaign
+say it should act.
+
+**Observation** (replay on the 18 single-layer runs with current copied
+from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
+run.log only).
+
+- 6 runs have telemetry.csv (about 2 Hz). 12 are snapshot-only, two reads
+  per landing seconds to a minute apart; they were replayed as settled
+  landing reads, which understates what the live rule sees. The two
+  2026-08-05 runs recorded no current. Three more runs in the same share
+  folder are multilayer devices filed there by mistake; they are not
+  evidence here.
+- Labels were set from the samples themselves:
+  - 3 breakdowns, all snapshot-only: `SLDEA_20260723_152205`,
+    `SLDEA_20260723_155425` and `SLDEA_20260723_233451`.
+  - 3 self-clearing transients: `SLDEA_20260729_104531`'s -153 µA
+    snapshot, `P3_7_2.3mL_20260729`'s -64 µA snapshot, and one -24 µA read
+    on a ramp in an operator run.
+  - 1 borderline: `SLDEA_20260806_151857`'s two reads 14.5 µA off its
+    -16 µA level.
+  - 11 healthy.
+- Today's rule missed 152205 and 155425, caught 233451 52 s after its
+  onset, and made no false trip.
+- The N-sigma rule (N 5, floor 20 µA, 2 in a row, window 40) made no false
+  trip and tripped on no transient. It caught 152205 (+7 s) and 233451
+  (+8 s). It missed 155425, whose event is the run's last snapshot, where
+  no two-in-a-row rule can see it. It did not trip on the 08-06 dip.
+- The floor decides, not N. From N 3 to 8 nothing in the sweep changes,
+  because sigma stays at its 0.5 µA floor on MEAN reads. A 10 µA floor
+  false-trips healthy P3_5 (an 11.1 µA wobble), 12.5 µA trips the 08-06
+  dip, 15 to 25 µA does neither, and 30 µA misses 152205.
+- What the single-layer runs cannot show. None of their three
+  breakdowns has telemetry, so the rule has been replayed on a real
+  breakdown only at snapshot spacing, never at 2 Hz. None shows a
+  slow-onset fault, which the rule's window would follow by design (the
+  suite pins it: 20 µA of creep over 400 reads is never away). Both rest
+  on the rule's design and on synthetic reads, not on runs.
+- The desk prototype of the same morning judged reads before it had a
+  location. On a run without a 0 kV baseline its window never filled and it
+  could not trip, so its first real-run sweep was vacuous.
+
+**Decision (owner, 2026-10-08, "shadow mode now"; `#219`).**
+
+1. `sldea_profile.NSigmaWatchdog`, with `NSIGMA_DEFAULTS`: N 5, floor
+   20 µA, 2 reads in a row, window 40 quiet landing reads, bar doubled on
+   ramps and in a landing's first second, off-screen counted as away. 20 µA
+   is the middle of the zero-false range and the after-the-fact detector's
+   own `breakdown_dev_ua`, so the live and post-hoc verdicts draw one line.
+   No single-read spike tier.
+2. It runs in shadow on every LIVE run whose monitor reads run (the
+   watchdog armed, or telemetry on). It reads only what the monitor tick
+   already reads, after the fixed watchdog has decided. No new instrument
+   I/O.
+3. It acts on nothing. A would-trip writes one telemetry.csv event row,
+   with no current on it so no reader counts that read twice. After the SG
+   is zeroed, one run.log line and setup.txt's `Watchdog shadow (end):`
+   line give its outcome. Any exception inside it disables only the
+   shadow.
+4. setup.txt's `Watchdog shadow:` line, under `#406`'s watchdog line, names
+   the rule and its parameters. DRY runs and runs with no current reads say
+   OFF and run no shadow.
+5. It is not armed on a refused 0 kV baseline, by the fixed watchdog's own
+   bound (`credible_baseline_ua`).
+6. The fixed rule stays beside it as the backstop. The N-sigma window
+   follows slow drift, so a fault that grows slowly enough would be taken
+   as normal; the fixed rule's 0 kV baseline does not move. No
+   single-layer run on file shows that case: the backstop rests on the
+   design and on the owner's decision.
+7. Every away read is logged, a lone one included (owner, 2026-10-08),
+   so the owner can judge single-read excursions before any spike rule
+   is decided. The rule keeps each away read in memory: its time, kV and
+   reading, the location it was judged against, the deviation, the bar,
+   whether it fell on a ramp, a settling landing or a landing, and how
+   many in a row. It counts all of them and keeps the first 100
+   (`NSIGMA_AWAY_LOG_MAX`). After the SG is zeroed, run.log gets one
+   entry: a count line, then one line per kept read. A run with no away
+   read gets no entry. Nothing about it is written from the run loop: a
+   file write or a Tk hand-off there per away read could hold up the
+   loop that services ■ Abort and the ramp to zero (`#405`). For the same
+   reason telemetry.csv gets no row per away read; its periodic rows
+   already carry the current at the telemetry rate.
+
+**Before it may act.** The §N1 probe's quiet-rig sigma per measurement
+token; a bench campaign of LIVE runs in shadow with no false would-trip and
+every confirmed event caught, which would also be the first real
+breakdowns it sees at its live read rate; the owner's call on whether a
+self-clearing excursion (one read far off, or a short burst past the
+scope's screen) should stop a run; and a peak token (`#189`) if
+millisecond arcs are to be seen at all. Letting it act changes breakdown
+semantics and gets a dated entry of its own.
+
 ## Calibration questions name their buttons and open over the calibration window (2026-10-05)
 
 **TL;DR:** the questions that follow a hand calibration (mostly met when
@@ -3174,6 +3279,110 @@ bands would remove the only uncertainty display on that figure, and the
 budget includes pre/post pair scatter (`SLDEA_MEASUREMENT.md` §2.2), so it
 is a policy choice and not a bug fix. The bands drawn there are now the
 right width in both units.
+
+## Every run names its breakdown watchdog's state before the HV and in its records; the watchdog stays ticked by default (2026-10-08)
+
+**TL;DR:** "Energize HV?" now names the breakdown watchdog's state, ON with
+its rule or OFF with the reason, and run.log's start line and setup.txt's
+`Breakdown watchdog:` line record it in every run (`#406`). The box stays
+ticked by default. Its 100 µA / 3 s rule misses small breakdowns
+(`#219`), but it is the only thing that stops a LIVE run on a
+breakdown, and replayed on the single-layer runs on file it stops none
+that was not breaking down: healthy runs stayed within 15.0 µA of their
+baseline.
+
+**Observation.**
+
+- The trip rule is |I - baseline| ≥ Trip (µA) held for Confirm (s) of
+  consecutive reads at about 2 Hz. Both numbers are typed by hand, with
+  defaults of 100 µA and 3 s (`#219`).
+- It misses small or short breakdowns:
+  - `SLDEA_20260723_152205`: 4 frames confirmed on 26 µA and 79 µA
+    deviations against a 0.9 µA run-median baseline, both under the
+    default trip.
+  - `SLDEA_20260723_233451`: the -207 µA staircase, which the live
+    watchdog missed in real time.
+  - The 2026-08-04 ground-truth batch: every confirmed breakdown was a
+    deviation of 11 to 192 µA, so the smallest sit below the default. The
+    step-change detector caught them after the fact (`#158`, shipped in
+    `#195`).
+  - The two 07-23 runs are retired from the measurement campaign but kept
+    as the breakdown fixture: a geometry error does not touch a current
+    trace (2026-08-06 comment on `#219`).
+- On the runs on file it makes no false stop. The 18 single-layer runs
+  with current on the lab share were summarized and replayed on
+  2026-10-08 for `#219` (labels set from each run's own samples; the two
+  2026-08-05 runs recorded no current):
+  - The 11 healthy runs stayed within 15.0 µA of their baseline:
+    `P3_5_2.5mL_0729` 15.0 µA, `P3_6_2.5mL_20260729` 14.6 µA, the other
+    nine 6.9 µA or less. The borderline `SLDEA_20260806_151857` reached
+    14.5 µA.
+  - The three self-clearing transients reached 24.4 µA (one read on a
+    ramp in an operator run), 48.4 µA (`P3_7_2.3mL_20260729`, one
+    snapshot) and 137.4 µA (`SLDEA_20260729_104531`, one snapshot, then
+    healthy to 10 kV).
+  - The three breakdowns reached 58.5 µA (`SLDEA_20260723_155425`),
+    79.3 µA (152205) and 208.5 µA (233451).
+  - Replayed on all 18, the 100 µA / 3 s rule trips only on 233451, 52 s
+    after its onset. 12 of the 18 are snapshot-only, with reads seconds to
+    a minute apart, so the replay cannot say how long 104531's 137.4 µA
+    lasted; that run went on to 10 kV.
+- It is the only thing that stops a run on a breakdown. `#219`'s N-sigma
+  rule runs in shadow and acts on nothing, so with the box unticked a
+  LIVE run that breaks down keeps ramping until its end or ■ Abort. By
+  its rule the watchdog trips on a sustained short (100 µA or more from
+  the baseline, or the scope's off-screen sentinel, for 3 s). That is the
+  rule's design, not an observation: the one trip on single-layer data is
+  the replay's on 233451, and that run's live watchdog missed it.
+- Nothing recorded the watchdog's state. The run-start line named its rule
+  only when armed and said nothing otherwise; setup.txt and
+  "Energize HV?" never mentioned it. A run started with the box unticked
+  (a preset saved unticked loads unticked) left no line saying that
+  nothing watched it.
+- The owner's direction of 2026-08-07 (`#219`): our breakdown current
+  transients last milliseconds, so a sustained-over-threshold rule is
+  mismatched at its core. The trip should be N sigma from the run's own
+  running mean, with N's default set from the quiet-rig spread that the
+  §N probe measures. That work waits on §N1 at the bench.
+
+**Decision (owner, 2026-10-08; `#406`).** An unticked default was decided
+first that day and reversed the same day. The evidence first cited for
+the reversal came from multilayer devices filed among the SLDEA runs by
+mistake; the owner discounted it, and the decision rests on the
+single-layer runs above.
+
+1. The box stays ticked by default until `#219`'s N-sigma rule replaces
+   the typed trip. A preset saved unticked still loads unticked, and one
+   that predates the box leaves it ticked, with the usual "not in this
+   preset" note.
+2. "Energize HV?" names the state inside the same dialog: no new
+   question, the same title, and No is still the default. Armed:
+   "Breakdown watchdog: ON. The run stops itself when the current stays
+   100 µA or more away from the baseline it learns at 0 kV, for 3 s of
+   consecutive reads." Unticked: "Breakdown watchdog: OFF. Nothing stops
+   this run on a breakdown; only ■ Abort or the end of the run does."
+   Ticked with no scope: OFF, "no scope to read the current".
+3. run.log's start line always carries a watchdog tag. The armed wording
+   is unchanged (`[watchdog: dev ≥100 µA for 3s, baseline learned at
+   0 kV]`); otherwise it is `[watchdog: OFF (box unticked)]`,
+   `(no scope to read the current)` or `(dry run, no HV)`.
+4. setup.txt carries `Breakdown watchdog: ON, trips when |I - baseline| >=
+   100 uA for 3 s of consecutive reads (...)` or `Breakdown watchdog: OFF
+   (<reason>)`, under the I_Out line. It is ASCII, so the runner's
+   locale-encoded write cannot refuse it. Runs from before this change
+   have no such line, so "OFF" and "not recorded" stay apart.
+5. One function, `sldea_profile.watchdog_record`, words all three from the
+   one reading that sldea_run hands the worker, taken before
+   "Energize HV?". The dialog cannot name a watchdog the run does not get.
+
+**What it costs.** Nothing changes for a ticked run. An operator who
+unticks the box still can, and that LIVE run keeps ramping through a
+breakdown or a short until its end or ■ Abort, with the Trek's own current
+limit as the only automatic stop. The difference is that it is now said
+before the HV and written into the run's own files.
+
+**Not done here.** Setting the trip from real runs (`#219`), and the trip
+logic and spike capture (`#189`).
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

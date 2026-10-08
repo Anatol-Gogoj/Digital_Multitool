@@ -67,6 +67,29 @@ def chrome_scale():
     return max(1.0, dpi / 96.0)
 
 
+def _fit_on_screen(root):
+    """Keep the main window wholly on screen, or stop the capture.
+
+    Windows does not always honour the requested +40+30: on a 1080 px
+    screen (v1.4.4 build, 2026-10-08) the window landed at y=208 once and
+    y=52 the next time, and every tab shot lost its bottom rows to black
+    below the screen's edge. A window placed too low is moved to the top;
+    one that still does not fit stops the run, because annotate.py would
+    otherwise draw callouts on black."""
+    sh = root.winfo_screenheight()
+    l, t, r, b = _win_rect(root)
+    if b > sh or t < 0:
+        root.geometry(f"+{root.winfo_x()}+0")
+        root.update_idletasks()
+        root.update()
+        time.sleep(0.5)
+        l, t, r, b = _win_rect(root)
+    if b > sh or t < 0:
+        sys.exit(f"capture.py FAILED -- the window ({l}, {t})-({r}, {b}) "
+                 f"does not fit the {sh} px screen. Use a taller display "
+                 "(README.md, Regenerating).")
+
+
 def _win_rect(widget):
     """Visual rect of the top-level window holding `widget` (DWM bounds)."""
     hwnd = ctypes.windll.user32.GetAncestor(widget.winfo_id(), 2)  # GA_ROOT
@@ -162,6 +185,7 @@ def main():
     root.update_idletasks()
     root.update()
     time.sleep(0.8)
+    _fit_on_screen(root)
 
     def _extras():
         l, t, _, _ = _win_rect(root)

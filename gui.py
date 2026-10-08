@@ -3191,12 +3191,22 @@ LOGGING:
         wdf = ttk.LabelFrame(f, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=8)
         wdf.pack(fill='x', padx=10, pady=(0, 8))
+        # Ticked by default (owner decision 2026-10-08, #406): the 100 uA /
+        # 3 s rule misses small breakdowns (#219), but it is the only
+        # thing that stops a LIVE run on a breakdown, and replayed on the
+        # single-layer runs on file it stops none that was not breaking
+        # down (healthy runs stayed within 15 uA of their baseline). A
+        # preset saved unticked still loads unticked, so "Energize HV?",
+        # run.log and setup.txt name the state either way
+        # (sldea_profile.watchdog_record).
         self.sldea_wd_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
                     "breakdown captures a frame, ramps to 0 kV and aborts. "
-                    "Ignored on dry runs.").pack(side=tk.LEFT)
+                    "Unticked, only ■ Abort or the end of the run stops a "
+                    "run that breaks down; Energize HV? says which. Ignored "
+                    "on dry runs.").pack(side=tk.LEFT)
         ttk.Label(wdf, text="Trip (µA):").pack(side=tk.LEFT, padx=(14, 2))
         wd_ua = ttk.Entry(wdf, width=7)
         wd_ua.insert(0, '100')
@@ -4451,6 +4461,19 @@ LOGGING:
             if vid_on is None:
                 return
             vid_detect = bool(vid_on and self.sldea_vid_detect.get())
+            # Breakdown watchdog (live only), read ONCE, here, so "Energize
+            # HV?" below names exactly the watchdog the worker is handed
+            # (#406). Only claim it is armed when it actually will be: the
+            # worker needs a scope to read the current (audit 2026-07-25).
+            wd_ticked = bool(self.sldea_wd_on.get())
+            wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            try:
+                wd_ua = float(self.sldea_vars['wd_ua'].get())
+                wd_s = float(self.sldea_vars['wd_s'].get())
+            except (KeyError, ValueError):
+                wd_ua, wd_s = 100.0, 3.0
+            wd_setup, wd_log, wd_dialog = sldea_profile.watchdog_record(
+                wd_ticked, wd_on, dry, wd_ua, wd_s)
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -4491,7 +4514,8 @@ LOGGING:
                         "Energize HV?",
                         f"LIVE run — this drives the Trek up to "
                         f"{max(p.levels):g} kV via SG CH{sgch}"
-                        f".\n\n{p.summary()}\n\nProceed?", default='no'):
+                        f".\n\n{p.summary()}\n\n{wd_dialog}\n\nProceed?",
+                        default='no'):
                     return
             vch = int(self.sldea_vars['vch'].get())
             ich = int(self.sldea_vars['ich'].get())
@@ -4609,19 +4633,11 @@ LOGGING:
                 return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-            # Breakdown watchdog (live only). Only claim it is armed when it
-            # actually will be: the worker needs a scope to read the current
-            # (audit 2026-07-25 — the old banner printed either way).
-            wd_on = (self.sldea_wd_on.get() and not dry
-                     and self.scope is not None)
-            if self.sldea_wd_on.get() and not dry and self.scope is None:
+            # Breakdown watchdog: wd_on, wd_ua and wd_s were read above,
+            # before "Energize HV?" (#406).
+            if wd_ticked and not dry and self.scope is None:
                 self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
                                 "without breakdown protection")
-            try:
-                wd_ua = float(self.sldea_vars['wd_ua'].get())
-                wd_s = float(self.sldea_vars['wd_s'].get())
-            except (KeyError, ValueError):
-                wd_ua, wd_s = 100.0, 3.0
             # Telemetry needs the scope, not HV: a dry run logs its monitor
             # readings too, which is how the rig gets checked before the
             # Trek is energized. clamp_telemetry_hz absorbs an empty or
@@ -4635,6 +4651,11 @@ LOGGING:
             if self.sldea_tel_on.get() and self.scope is None:
                 self._sldea_log("telemetry requested but NO SCOPE — no "
                                 "monitor log for this run")
+            # The #219 N-sigma rule runs in shadow on a LIVE run whose
+            # monitor reads run; its setup.txt line, decided here from the
+            # same wd_on and tel_on the worker is handed.
+            shadow_setup = sldea_profile.shadow_record(
+                not dry, bool(wd_on or tel_on))
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
@@ -4691,8 +4712,7 @@ LOGGING:
             self._sldea_elapsed = 0.0
             self._sldea_log(
                 f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
-                + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
-                   f"baseline learned at 0 kV]" if wd_on else "")
+                + f"  [{wd_log}]"
                 + (f"  [telemetry: {tel_hz:g} Hz → "
                    f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else "")
                 + (f"  [video: {vid_fps:g} fps → "
@@ -4717,7 +4737,9 @@ LOGGING:
                             picture_override=picture_override,
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
-                            film_thickness_um=film_thickness_um),
+                            film_thickness_um=film_thickness_um,
+                            watchdog_setup=wd_setup,
+                            watchdog_shadow=shadow_setup),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
@@ -5466,7 +5488,8 @@ LOGGING:
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
-                      vid_detect=False, film_thickness_um=None):
+                      vid_detect=False, film_thickness_um=None,
+                      watchdog_setup=None, watchdog_shadow=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5482,7 +5505,18 @@ LOGGING:
 
         `film_thickness_um` is the film thickness box as sldea_run checked
         it (`#398`): the number, '' when the operator declined, None with
-        no box. It only reaches setup.txt (sldea_profile.setup_text)."""
+        no box. It only reaches setup.txt (sldea_profile.setup_text).
+
+        `watchdog_setup` is sldea_run's setup.txt line for the watchdog it
+        armed or not (sldea_profile.watchdog_record, #406); None writes no
+        line. It only reaches setup.txt: arming still reads wd_on.
+
+        `watchdog_shadow` is sldea_run's setup.txt line for the #219
+        N-sigma rule (sldea_profile.shadow_record). With it, a LIVE run
+        whose monitor reads run feeds the rule those same reads in SHADOW:
+        it acts on nothing, and its outcome and every away read it saw are
+        written after the SG is zeroed. None (a caller that predates it)
+        runs no shadow."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5493,6 +5527,11 @@ LOGGING:
         vid_stop = None               # words, when its codec check stopped it
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
+        shadow = None                 # #219 N-sigma rule, shadow (below)
+        shadow_rule = None            # ...the same rule, kept after an error
+        shadow_end = None             # its outcome when it could not run
+        shadow_base = (None, None)    # 0 kV baseline (median, sigma) for it
+        shadow_refused = None         # ...or the baseline the bound refused
         # the folder the SLDEA tab's line showed and sldea_run checked (#402)
         rundir = sldea_profile.run_folder(outdir, runname, started)
         framedir = os.path.join(rundir, 'frames')
@@ -5520,7 +5559,9 @@ LOGGING:
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
-                    film_thickness_um=film_thickness_um))
+                    film_thickness_um=film_thickness_um,
+                    watchdog=watchdog_setup,
+                    watchdog_shadow=watchdog_shadow))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
@@ -5802,18 +5843,27 @@ LOGGING:
                     n = len(base)
                     med = (base[n // 2] if n % 2 else
                            0.5 * (base[n // 2 - 1] + base[n // 2]))
+                    # The reads' spread too, for the #219 shadow: its
+                    # sigma before the run has landing reads of its own.
+                    # (Not `dev`: that is the camera device above, which
+                    # the recorder's restamp lambda reads when it runs.)
+                    spread = sorted(abs(v - med) for v in base)
+                    mad = (spread[n // 2] if n % 2 else
+                           0.5 * (spread[n // 2 - 1] + spread[n // 2]))
                     # Credibility bound (sldea_profile.credible_baseline_ua):
                     # a large 'rest level' at 0 kV is a standing fault
                     # current, and anchoring the deviation trip to it would
                     # normalize the fault. The absolute rule then trips on
                     # it — the correct outcome.
                     if sldea_profile.credible_baseline_ua(med, wd_ua):
+                        shadow_base = (med, 1.4826 * mad)
                         watchdog.baseline_ua = med
                         self._sldea_log(
                             f"watchdog baseline {med:.1f} µA "
                             f"(median of {n} reads at 0 kV); trip "
                             f"|I−baseline| ≥ {wd_ua:g} µA for {wd_s:g}s")
                     else:
+                        shadow_refused = med
                         self._sldea_log(
                             f"⚠ watchdog baseline {med:.1f} µA is not a "
                             f"credible 0 kV rest level — keeping absolute "
@@ -5823,6 +5873,25 @@ LOGGING:
                         f"watchdog baseline unavailable ({len(base)}/8 "
                         f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
                         f"for {wd_s:g}s")
+            # #219: the N-sigma rule in SHADOW on a LIVE run whose monitor
+            # reads run (the watchdog armed, or telemetry on): the same
+            # wd_on and tel_on sldea_run worded its setup.txt line from,
+            # so a run whose line says OFF gets no shadow and no end line.
+            # It is fed only what the monitor tick below already reads and
+            # acts on nothing. Not armed on a refused 0 kV baseline: a
+            # deviation rule anchored to a standing fault current would
+            # take the fault as normal (the reason BreakdownWatchdog
+            # refuses it).
+            if watchdog_shadow is not None and not dry and (wd_on or tel_on):
+                if watchdog is None and tel is None:
+                    shadow_end = "not run: no current reads this run"
+                elif shadow_refused is not None:
+                    shadow_end = (f"not armed: the 0 kV baseline "
+                                  f"{shadow_refused:.1f} uA was refused "
+                                  f"(a standing fault current)")
+                else:
+                    shadow = shadow_rule = sldea_profile.NSigmaWatchdog(
+                        base_loc=shadow_base[0], base_sigma=shadow_base[1])
             self._sldea_voff_logged = False   # V_Out clip: log once per run
             self._sldea_ioff_logged = False   # I_Out clip: log once per run
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
@@ -5976,6 +6045,30 @@ LOGGING:
                                           else (None, None)))
                         self._sldea_stop = True
                         break
+                    # The #219 shadow, on the same read, AFTER the watchdog
+                    # decided: it cannot delay a trip, and it acts on
+                    # nothing. A would-trip is one telemetry event row now
+                    # (no current on it, so no reader counts the read twice)
+                    # and one run.log line after the SG is zeroed. Every
+                    # away read, a lone one included, is only kept in the
+                    # rule's memory here (capped) and written after the SG
+                    # is zeroed: no file or Tk call on this loop for it. Any
+                    # error stops only the shadow, never this loop.
+                    if shadow is not None and not shadow.tripped:
+                        try:
+                            if (shadow.update(el, p.kv_at(el), ua,
+                                              offscreen=ioff)
+                                    and tel is not None):
+                                tel.event(
+                                    el, datetime.now().isoformat(
+                                        timespec='milliseconds'),
+                                    p.kv_at(el), "SHADOW N-sigma "
+                                    + shadow.outcome_text())
+                        except Exception as e:
+                            shadow_end = (f"stopped by an error at "
+                                          f"{el:.1f} s: "
+                                          f"{type(e).__name__}: {e}")
+                            shadow = None
                     # Periodic telemetry row, off the current already read.
                     # V_Out costs a SECOND locked round-trip, so it is
                     # sub-sampled (>= 1 s) — nominal_kV carries the exact
@@ -6221,6 +6314,35 @@ LOGGING:
                     except Exception:
                         pass
                     tel.close()
+                # The #219 shadow's away reads, after the SG is zeroed: a
+                # count line and one line per listed read, as ONE run.log
+                # entry, so one file write and one Tk hand-off however many
+                # there are (the rule caps the list). None at all on a run
+                # that never left the bar. A record, so it never leaves
+                # this block.
+                if shadow_rule is not None:
+                    try:
+                        away = shadow_rule.away_lines()
+                        if away:
+                            self._sldea_log(
+                                "SHADOW away reads (N-sigma, acts on "
+                                "nothing): " + "\n  ".join(away))
+                    except Exception:
+                        pass
+                # The #219 shadow's outcome, after the SG is zeroed: one
+                # run.log line and one setup.txt line, whatever it saw. A
+                # record like the telemetry, so it never leaves this block.
+                if shadow is not None or shadow_end is not None:
+                    try:
+                        text = (shadow.outcome_text() if shadow is not None
+                                else shadow_end)
+                        self._sldea_log(f"SHADOW N-sigma (acts on "
+                                        f"nothing): {text}")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(f"Watchdog shadow (end): {text}\n")
+                    except Exception:
+                        pass
                 # Video after that, the same kind of record: stop() gives up
                 # after its timeout, and moving the file into the run folder
                 # (gigabytes, usually to the share) plus the optional

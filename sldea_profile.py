@@ -1392,6 +1392,304 @@ class BreakdownWatchdog:
         return False
 
 
+def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
+    """(setup_line, log_tag, dialog_text): the breakdown watchdog a run
+    starts with, worded for setup.txt, run.log and "Energize HV?" (#406).
+
+    `armed` is what sldea_run hands the worker (the box ticked, a LIVE
+    run, a scope to read the current from), and all three texts are built
+    from it, so none of them can claim something the run does not do. The
+    box starts ticked, but an operator can untick it, and a preset saved
+    unticked loads unticked. Before #406 no line anywhere said that
+    nothing watched such a run, so OFF is said as plainly as ON.
+    setup_line is an ASCII `Key: value` line, because the worker writes
+    setup.txt in the locale encoding. The armed log tag is the run.log
+    wording runs have carried since 2026-08-04, unchanged, so old and new
+    logs read alike."""
+    if armed:
+        return (f"Breakdown watchdog: ON, trips when |I - baseline| >= "
+                f"{trip_ua:g} uA for {confirm_s:g} s of consecutive reads "
+                f"(baseline learned at 0 kV; absolute |I| if that baseline "
+                f"is refused)",
+                f"watchdog: dev ≥{trip_ua:g} µA for {confirm_s:g}s, "
+                f"baseline learned at 0 kV",
+                f"Breakdown watchdog: ON. The run stops itself when the "
+                f"current stays {trip_ua:g} µA or more away from the "
+                f"baseline it learns at 0 kV, for {confirm_s:g} s of "
+                f"consecutive reads.")
+    if dry:
+        why = "dry run, no HV"
+    elif not ticked:
+        why = "box unticked"
+    else:
+        why = "no scope to read the current"
+    return (f"Breakdown watchdog: OFF ({why})",
+            f"watchdog: OFF ({why})",
+            "Breakdown watchdog: OFF"
+            + ("" if why == "box unticked" else f" ({why})")
+            + ". Nothing stops this run on a breakdown; only ■ Abort or "
+              "the end of the run does.")
+
+
+# The #219 N-sigma rule's defaults, chosen on the 18 single-layer runs
+# replayed on 2026-10-08 (SLDEA_DECISIONS.md, "The N-sigma breakdown rule
+# runs in shadow"): no false trip on any healthy run and none on the three
+# self-clearing transients. Of the three breakdowns, all snapshot-only,
+# two were caught; the third sits on its run's last snapshot.
+NSIGMA_DEFAULTS = {
+    'n_sigma': 5.0,         # the bar is n_sigma x sigma ...
+    'dev_min': 20.0,        # ... or this many uA, whichever is larger
+    'window': 40,           # quiet reads behind location and sigma (20 s)
+    'k_consec': 2,          # away reads in a row that would trip it
+    'sigma_floor': 0.5,     # uA; sigma is never taken below this
+    'guard': 2,             # newest quiet reads left out of the window
+    'w_min': 10,            # quiet reads before the window is trusted
+    'settle_s': 1.0,        # a landing's first second is judged as a ramp
+    'ramp_factor': 2.0,     # the bar on ramps and while a landing settles
+}
+
+# Away reads the shadow lists in run.log, per run (#219). Every away read is
+# counted; the first this many are listed, one line each, written once after
+# the SG is zeroed. A cap, so a run that wobbles across the bar from start
+# to end cannot grow the list, or that one write, without bound: 100 lines
+# are about 13 KB.
+NSIGMA_AWAY_LOG_MAX = 100
+
+
+class NSigmaWatchdog:
+    """The #219 breakdown rule: away when the current sits N sigmas from
+    where THIS run's current has been. Pure, like BreakdownWatchdog: feed
+    reads, read the state; no clock, thread, instrument or file.
+
+    It runs in SHADOW (owner, 2026-10-08): the LIVE worker feeds it the
+    very reads the monitor tick already takes and records what it would
+    have done, and it acts on nothing; BreakdownWatchdog still stops runs.
+    It also keeps every away read, a lone one included (`away`, `n_away`,
+    `away_lines`), so the owner can decide later whether a single away
+    read is a breakdown (2026-10-08).
+
+    Location and sigma are the median and 1.4826 x the median absolute
+    deviation of the last `window` QUIET reads, the newest `guard` of them
+    left out so an excursion that is just starting cannot pull its own
+    reference. A quiet read is readable, taken at a landing (nominal kV
+    unchanged since the read before) at least `settle_s` after the landing
+    began, and not itself away: an excursion never becomes the new normal,
+    while slow leakage drift is followed. Median and MAD, not mean and
+    standard deviation, so the event's own reads cannot drag the location
+    or widen sigma.
+
+    A read is AWAY when it is the scope's off-screen sentinel, or when
+    |I - location| >= max(n_sigma x sigma, dev_min) at a settled landing,
+    or that bar times `ramp_factor` on a ramp or while a landing settles
+    (charging current and leakage settling). `k_consec` away reads in a
+    row would trip it; an unreadable read neither extends nor breaks the
+    streak, as in BreakdownWatchdog. sigma is never below `sigma_floor`.
+    There is no single-read spike tier (owner, 2026-10-08): on MEAN reads
+    a lone excursion has been the self-clearing kind (104531, P3_7).
+
+    Before `w_min` quiet reads exist the 0 kV baseline (`base_loc`,
+    `base_sigma`: the runner's reads before the ramp) stands in. With no
+    baseline, settled landing reads seed the window unjudged until it
+    holds `w_min` of them; a fault present from the first landing is then
+    taken as normal, which the fixed rule beside it still catches. (The
+    desk prototype of 2026-10-08 judged reads before it had anything to
+    judge them by, so without a baseline its window never filled.)"""
+
+    def __init__(self, n_sigma=None, window=None, k_consec=None,
+                 dev_min=None, sigma_floor=None, guard=None, w_min=None,
+                 settle_s=None, ramp_factor=None, base_loc=None,
+                 base_sigma=None, away_max=None):
+        d = NSIGMA_DEFAULTS
+        self.n_sigma = float(d['n_sigma'] if n_sigma is None else n_sigma)
+        self.window = int(d['window'] if window is None else window)
+        self.k_consec = int(d['k_consec'] if k_consec is None else k_consec)
+        self.dev_min = float(d['dev_min'] if dev_min is None else dev_min)
+        self.sigma_floor = float(d['sigma_floor'] if sigma_floor is None
+                                 else sigma_floor)
+        self.guard = int(d['guard'] if guard is None else guard)
+        self.w_min = int(d['w_min'] if w_min is None else w_min)
+        self.settle_s = float(d['settle_s'] if settle_s is None else settle_s)
+        self.ramp_factor = float(d['ramp_factor'] if ramp_factor is None
+                                 else ramp_factor)
+        self.base_loc = None if base_loc is None else float(base_loc)
+        self.base_sigma = None if base_sigma is None else float(base_sigma)
+        self._quiet = []              # newest last, at most window + guard
+        self._stats_cache = None      # (location, sigma) of _quiet, or None
+        self._prev_kv = None
+        self._landing_t = None
+        self._streak = 0
+        self.n_reads = 0              # reads with a value or the sentinel
+        self.tripped = False
+        self.how = ''
+        self.trip = None              # dict: t, kv, ua, dev, bar, loc, sigma
+        self.peak = None              # largest judged departure, same keys
+        # The first away_max away reads (the trip's keys plus phase, streak
+        # and offscreen), and the count of every away read, listed or not.
+        self.away_max = int(NSIGMA_AWAY_LOG_MAX if away_max is None
+                            else away_max)
+        self.away = []
+        self.n_away = 0
+
+    def stats(self):
+        """(location, sigma) the next read is judged by, or (None, None)
+        when there is nothing to judge it by yet."""
+        q = self._quiet[:-self.guard] if self.guard else self._quiet
+        if len(q) >= self.w_min:
+            if self._stats_cache is None:
+                s = sorted(q)
+                n = len(s)
+                med = s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+                a = sorted(abs(v - med) for v in s)
+                mad = (a[n // 2] if n % 2
+                       else 0.5 * (a[n // 2 - 1] + a[n // 2]))
+                self._stats_cache = (med, max(self.sigma_floor,
+                                              1.4826 * mad))
+            return self._stats_cache
+        if self.base_loc is not None:
+            return (self.base_loc, max(self.sigma_floor,
+                                       self.base_sigma or 0.0))
+        return None, None
+
+    def _keep(self, ua):
+        self._quiet.append(ua)
+        if len(self._quiet) > self.window + self.guard:
+            del self._quiet[0]
+        self._stats_cache = None
+
+    def update(self, t_s, kv, ua, offscreen=False):
+        """Feed one read: elapsed time (s), nominal kV, current (uA, or
+        None when unreadable). Returns True once the rule would trip."""
+        if self.tripped:
+            return True
+        kv = float(kv)
+        ramping = (self._prev_kv is not None
+                   and abs(kv - self._prev_kv) > 1e-6)
+        if ramping:
+            self._landing_t = None
+        elif self._landing_t is None:
+            self._landing_t = t_s
+        self._prev_kv = kv
+        settling = (self._landing_t is None
+                    or t_s - self._landing_t < self.settle_s)
+        if ua is None and not offscreen:
+            return False                  # unreadable: no evidence either way
+        self.n_reads += 1
+        loc, sig = self.stats()
+        if offscreen:
+            away, dev, bar = True, None, None
+        elif loc is None:
+            if not ramping and not settling:
+                self._keep(ua)            # bootstrap: seed, cannot judge yet
+            self._streak = 0
+            return False
+        else:
+            dev = abs(ua - loc)
+            bar = max(self.n_sigma * sig, self.dev_min)
+            if ramping or settling:
+                bar *= self.ramp_factor
+            away = dev >= bar
+            if self.peak is None or dev > self.peak['dev']:
+                self.peak = {'t': t_s, 'kv': kv, 'ua': ua, 'dev': dev,
+                             'bar': bar, 'loc': loc, 'sigma': sig}
+            if not away and not ramping and not settling:
+                self._keep(ua)
+        self._streak = self._streak + 1 if away else 0
+        if away:
+            # Every away read, for the owner's call on single-read
+            # excursions (#219): always counted, listed up to away_max.
+            # Memory only: the worker writes the list once, after the SG
+            # is zeroed, so nothing here waits on a file or on Tk.
+            self.n_away += 1
+            if len(self.away) < self.away_max:
+                self.away.append({
+                    't': t_s, 'kv': kv, 'ua': ua, 'dev': dev, 'bar': bar,
+                    'loc': loc, 'sigma': sig, 'offscreen': bool(offscreen),
+                    'phase': ('ramp' if ramping else
+                              'settling' if settling else 'landing'),
+                    'streak': self._streak})
+        if self._streak >= self.k_consec:
+            self.tripped = True
+            self.how = ('off-screen' if offscreen else 'away') + \
+                f", {self.k_consec} reads in a row"
+            self.trip = {'t': t_s, 'kv': kv, 'ua': ua, 'dev': dev,
+                         'bar': bar, 'loc': loc, 'sigma': sig}
+        return self.tripped
+
+    def rule_text(self):
+        """The rule and its parameters, ASCII, for setup.txt."""
+        return (f"|I - location| >= max({self.n_sigma:g} sigma, "
+                f"{self.dev_min:g} uA) for {self.k_consec} reads in a row; "
+                f"location and sigma = median and 1.4826 MAD of the last "
+                f"{self.window} quiet landing reads; bar x"
+                f"{self.ramp_factor:g} on ramps and the first "
+                f"{self.settle_s:g} s of a landing; off-screen counts as away")
+
+    def outcome_text(self):
+        """What it would have done, ASCII, for run.log and setup.txt."""
+        if self.tripped:
+            tr = self.trip
+            if tr['ua'] is None:
+                what = "the current was off the scope's screen"
+            else:
+                what = (f"I {tr['ua']:.1f} uA, {tr['dev']:.1f} uA from "
+                        f"location {tr['loc']:.1f} uA (bar {tr['bar']:.1f} "
+                        f"uA, sigma {tr['sigma']:.2f} uA)")
+            return (f"would trip at {tr['t']:.1f} s ({tr['kv']:.2f} kV): "
+                    f"{what}; {self.how}")
+        if self.peak is None:
+            return f"no trip in {self.n_reads} reads (nothing to judge by)"
+        pk = self.peak
+        return (f"no trip in {self.n_reads} reads; largest departure "
+                f"{pk['dev']:.1f} uA (bar {pk['bar']:.1f} uA) at "
+                f"{pk['t']:.1f} s ({pk['kv']:.2f} kV)")
+
+    def away_lines(self):
+        """Every away read it saw, ASCII, for run.log (#219): a count line,
+        then one line per listed read with its time, kV, reading, the
+        location it was judged against, the deviation and the bar. [] with
+        no away read, so a quiet run logs nothing. The owner reads these to
+        decide whether a single away read is a breakdown."""
+        if not self.n_away:
+            return []
+        n = len(self.away)
+        head = (f"{self.n_away} away read{'' if self.n_away == 1 else 's'} "
+                f"in {self.n_reads} reads")
+        if self.n_away > n:
+            head += f"; the first {n} listed, {self.n_away - n} more not"
+        out = [head]
+        for a in self.away:
+            if a['offscreen']:
+                what = "off the scope's screen"
+                if a['loc'] is not None:
+                    what += f" (location {a['loc']:.1f} uA)"
+            else:
+                what = (f"I {a['ua']:.1f} uA, {a['dev']:.1f} uA from "
+                        f"location {a['loc']:.1f} uA (bar {a['bar']:.1f} "
+                        f"uA, sigma {a['sigma']:.2f} uA)")
+            run = f"{a['streak']} in a row"
+            if a['streak'] >= self.k_consec:
+                run += ", would trip"
+            out.append(f"away at {a['t']:.1f} s ({a['kv']:.2f} kV, "
+                       f"{a['phase']}): {what}; {run}")
+        return out
+
+
+def shadow_record(live, monitored):
+    """setup.txt's `Watchdog shadow:` line for a run start (#219).
+
+    The N-sigma rule runs in shadow on every LIVE run whose monitor reads
+    run (the breakdown watchdog armed, or telemetry on), and acts on
+    nothing. ASCII, because the worker writes setup.txt in the locale
+    encoding."""
+    if not live:
+        return "Watchdog shadow: OFF (dry run, no HV)"
+    if not monitored:
+        return ("Watchdog shadow: OFF (no current reads: watchdog and "
+                "telemetry both off)")
+    return ("Watchdog shadow: N-sigma rule, logs only and never acts: "
+            + NSigmaWatchdog().rule_text())
+
+
 TELEMETRY_FILENAME = 'telemetry.csv'
 TELEMETRY_COLUMNS = ['t_s', 'timestamp', 'nominal_kV', 'measured_kV',
                      'measured_uA', 'v_status', 'i_status', 'event']
@@ -1837,7 +2135,13 @@ class SldeaProfile:
 
     def setup_text(self, run_name, started_iso, sg_ch, vmon_ch, imon_ch,
                    dry_run, cam_info='', dea_diam_mm=None, electrode=None,
-                   concentration_ml=None, film_thickness_um=None):
+                   concentration_ml=None, film_thickness_um=None,
+                   watchdog=None, watchdog_shadow=None):
+        """`watchdog` is watchdog_record's setup line (#406), written under
+        the I_Out line it watches; None (a caller that predates it) writes
+        no line, so an older run and an OFF run stay apart.
+        `watchdog_shadow` is shadow_record's line (#219), written right
+        under it on the same terms."""
         step_desc = (f"{self.step_kv:g} kV/step" if self.step_kv
                      else f"{self.n_steps_req} steps")
         return "\n".join([
@@ -1862,7 +2166,8 @@ class SldeaProfile:
             "--- Measurement (Trek monitors on scope) ---",
             f"V_Out: scope CH{vmon_ch}  ({VMON_KV_PER_V:g} kV per scope-volt)",
             f"I_Out: scope CH{imon_ch}  ({IMON_UA_PER_V:g} uA per scope-volt; "
-            f"10 V = 2000 uA)",
+            f"10 V = 2000 uA)"] + ([] if watchdog is None else [watchdog])
+            + ([] if watchdog_shadow is None else [watchdog_shadow]) + [
             "",
             "--- Camera ---",
             cam_info or "(settings not recorded)",

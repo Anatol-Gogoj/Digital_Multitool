@@ -544,6 +544,105 @@ def test_the_worker_writes_where_run_folder_says():
             sprof.run_folder = real
 
 
+def _bytes_of(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def test_a_run_that_appears_after_the_check_makes_this_run_fail():
+    """#402 review, finding 3: Run checks the folder, then every dialog
+    takes as long as the operator does, and another run (another PC on the
+    share) can start there meanwhile. The worker opens setup.txt with mode
+    'x' for a typed name, so this run fails at that first write, before
+    the camera and the SG, and the earlier run's setup.txt stays as it
+    was. LIVE, through the REAL worker: the SG gets nothing but the
+    finally's zeroing, 0 V and output off."""
+    mb = T._MB(T.LIVE_OK)
+    with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+        run = os.path.join(tmp, 'RUN')
+        before = {}
+
+        def meanwhile():                 # after the check, before the worker
+            _a_run_in(run)
+            before['setup'] = _bytes_of(os.path.join(run, 'setup.txt'))
+        app = _app(tmp, 'RUN', dry=False, real_worker=True)
+        app.on_preflight = meanwhile
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        app.root.run_pending()
+        assert mb.titles() == list(T.LIVE_OK), mb.calls   # the check passed
+        assert 'setup' in before, 'the pre-flight never ran'
+        errors = [l for l in app.lines if l.startswith('ERROR')]
+        assert len(errors) == 1, app.lines
+        assert 'setup.txt appeared in the run folder' in errors[0], errors
+        assert 'before any HV' in errors[0], errors
+        assert not any(l.startswith('run complete') for l in app.lines)
+        assert _bytes_of(os.path.join(run, 'setup.txt')) == before['setup']
+        assert sorted(os.listdir(run)) == ['frames', 'setup.txt'], \
+            os.listdir(run)
+        writes = [w[1:] for w in app.sg.writes]
+        assert writes == [('set_offset', 1, (0.0,)),
+                          ('set_output', 1, (False,))], writes
+        assert not app._sldea_running
+
+
+def test_a_data_csv_that_appears_after_the_check_is_not_overwritten():
+    """The same for a folder that got only a data.csv meanwhile: data.csv
+    is opened with mode 'x' too, still before the camera and the SG, so it
+    stays as it was and the SG is only zeroed."""
+    mb = T._MB(T.LIVE_OK)
+    with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+        run = os.path.join(tmp, 'RUN')
+        data = os.path.join(run, 'data.csv')
+        before = {}
+
+        def meanwhile():
+            os.makedirs(run)
+            with open(data, 'w', newline='') as f:
+                f.write('frame,kv\r\n1,0.5\r\n')
+            before['data'] = _bytes_of(data)
+        app = _app(tmp, 'RUN', dry=False, real_worker=True)
+        app.on_preflight = meanwhile
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        app.root.run_pending()
+        errors = [l for l in app.lines if l.startswith('ERROR')]
+        assert len(errors) == 1, app.lines
+        assert 'data.csv appeared in the run folder' in errors[0], errors
+        assert _bytes_of(data) == before['data']
+        writes = [w[1:] for w in app.sg.writes]
+        assert writes == [('set_offset', 1, (0.0,)),
+                          ('set_output', 1, (False,))], writes
+
+
+def test_a_blank_name_keeps_writing_its_files_with_w():
+    """A blank name's folder is new by its time stamp: the worker keeps
+    mode 'w' for it, and a typed name gets 'x', for both files."""
+    import builtins
+    with tempfile.TemporaryDirectory() as tmp:
+        modes = []
+        real = builtins.open
+        try:
+            sprof.open = lambda path, mode, **kw: (
+                modes.append((os.path.basename(path), mode))
+                or real(path, mode, **kw))
+            for name, folder in (('', 'a'), ('RUN', 'b')):
+                os.mkdir(os.path.join(tmp, folder))
+                for fn in ('setup.txt', 'data.csv'):
+                    sprof.open_run_file(os.path.join(tmp, folder), fn,
+                                        name).close()
+        finally:
+            del sprof.open
+        assert modes == [('setup.txt', 'w'), ('data.csv', 'w'),
+                         ('setup.txt', 'x'), ('data.csv', 'x')], modes
+        try:
+            sprof.open_run_file(os.path.join(tmp, 'b'), 'setup.txt', 'RUN')
+        except FileExistsError as e:
+            assert 'setup.txt appeared in the run folder' in str(e), e
+        else:
+            raise AssertionError('a second open with a typed name passed')
+
+
 def test_the_boxes_are_read_once_at_the_check():
     """Retyping the boxes while the pre-flight is up cannot slip a checked
     folder past the check: the worker gets what was checked."""
@@ -753,14 +852,16 @@ def test_the_line_warns_while_the_share_is_not_mounted():
     """#402 review, finding 1, on the real tab: an Output dir under the
     share's mount point while nothing is mounted there gets a warning, for
     a typed name and a blank one; an Output dir off the share gets none."""
-    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app),             _share_at(os.path.join(tmp, 'mnt')) as mnt:
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app), \
+            _share_at(os.path.join(tmp, 'mnt')) as mnt:
         share = os.path.join(mnt, 'SLDEA_data')
         os.makedirs(share)
         line = app.sldea_folder_line
         app.sldea_outdir.set(share)
         for name in ('RUN', ''):
             app.sldea_runname_var.set(name)
-            assert _settle(root, lambda: 'not mounted' in line.cget('text')),                 (name, line.cget('text'))
+            assert _settle(root, lambda: 'not mounted' in line.cget('text')), \
+                (name, line.cget('text'))
             assert line.cget('fg') == WINE
             assert mnt in app._sldea_folder_tip.text
         local = os.path.join(tmp, 'local')
@@ -768,7 +869,8 @@ def test_the_line_warns_while_the_share_is_not_mounted():
         app.sldea_outdir.set(local)
         app.sldea_runname_var.set('RUN')
         assert _settle(root, lambda: line.cget('text') ==
-                       _saves_to(app, os.path.join(local, 'RUN'))),             line.cget('text')
+                       _saves_to(app, os.path.join(local, 'RUN'))), \
+            line.cget('text')
         assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
 
 

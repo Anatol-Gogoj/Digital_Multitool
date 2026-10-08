@@ -5421,7 +5421,13 @@ LOGGING:
             os.makedirs(framedir, exist_ok=True)
             # Write run metadata FIRST -- before any (possibly slow) camera
             # setup -- so even an interrupted run leaves setup.txt + the header.
-            with open(os.path.join(rundir, 'setup.txt'), 'w') as sf:
+            # A typed run name opens it, and data.csv below, with mode 'x'
+            # (#402 review): sldea_run checked the folder held no run, but
+            # a run that started there since (the dialogs take minutes)
+            # makes this one fail HERE, before the camera and the SG, the
+            # way a makedirs failure does, instead of writing over it.
+            with sldea_profile.open_run_file(rundir, 'setup.txt',
+                                             runname) as sf:
                 sf.write(p.setup_text(
                     runname or p.run_dirname(started),
                     started.isoformat(timespec='seconds'),
@@ -5483,7 +5489,8 @@ LOGGING:
                     pass
                 self._sldea_runlog = runlog
                 self._sldea_prelog = None
-            fh = open(os.path.join(rundir, 'data.csv'), 'w', newline='')
+            fh = sldea_profile.open_run_file(rundir, 'data.csv', runname,
+                                             newline='')
             writer = _csv.DictWriter(fh, fieldnames=p.CSV_COLUMNS)
             writer.writeheader()
             fh.flush()

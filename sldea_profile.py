@@ -831,6 +831,27 @@ def run_folder_refusal(outdir, run_name, timeout_s=None, mount=None):
     return None
 
 
+def open_run_file(rundir, name, run_name, **kw):
+    """open(<rundir>/<name>) for the worker to write a run's own file
+    (setup.txt, data.csv) -> the file object.
+
+    With a typed `run_name` the mode is 'x', so a run that started in that
+    folder after Run checked it (another PC on the share, in the minutes
+    the dialogs took) makes this one fail instead of writing over it
+    (#402 review). The FileExistsError then says so in words, for the run
+    log. A blank name's folder is new by its time stamp and keeps 'w'."""
+    import os
+    path = os.path.join(rundir, name)
+    try:
+        return open(path, 'x' if (run_name or '').strip() else 'w', **kw)
+    except FileExistsError:
+        raise FileExistsError(
+            f"{name} appeared in the run folder {rundir} after ▶ Run "
+            f"checked it: another run is writing there. This run stopped "
+            f"before any HV and left that run's files as they were. Type "
+            f"another run name and press ▶ Run again.") from None
+
+
 def _fits_chars(text):
     """run_folder_line's `fits` when the caller has no measured width."""
     return len(text) <= RUN_FOLDER_LINE_CHARS

@@ -196,6 +196,15 @@ def test_the_line_says_where_and_warns_in_words():
         text, warn, full = sprof.run_folder_line(tmp, 'a:b')
         assert warn and 'Run name' in text and 'refuse' in text, text
         assert 'Windows' in full, full          # the whole reason, hovered
+        # not plain ASCII: the line also says New folder's way round it,
+        # in its words, before Run is pressed (owner decision 2026-10-08)
+        import output_folder
+        text, warn, full = sprof.run_folder_line(tmp, 'P3_7_2.5µL')
+        assert warn and 'plain ASCII' in text, text
+        assert output_folder.ASCII_HINT in text, text
+        assert 'u for µ' in text and 'refuse' in text, text
+        text, _warn, _full = sprof.run_folder_line(tmp, 'a:b')
+        assert output_folder.ASCII_HINT not in text, text
         text, warn, _full = sprof.run_folder_line(tmp, 'NEW', None, slow=True)
         assert warn and 'not answering' in text, text
     deep = ('/mnt/shareDrive/robot_incubator/SLDEA_data/Upload 20260804/'
@@ -245,6 +254,47 @@ def test_a_name_that_cannot_be_a_folder_is_refused_the_same_way():
         assert 'cannot name the run' in mb.message(REFUSED)
         _not_started(app)
         assert os.listdir(tmp) == [], os.listdir(tmp)
+
+
+def test_a_name_that_is_not_plain_ascii_is_refused_with_the_u_hint():
+    """Owner decision 2026-10-08: a µ in the run name is refused like any
+    name that cannot be a folder name, and the box carries New folder's
+    own way round it (output_folder.ASCII_HINT), not a second wording."""
+    import output_folder
+    mb = T._MB(T.LIVE_OK)
+    with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+        app = _app(tmp, 'P3_7_2.5µL', dry=False)
+        app.sldea_run()
+        assert mb.titles() == [REFUSED], mb.calls
+        msg = mb.message(REFUSED)
+        assert 'plain ASCII' in msg and output_folder.ASCII_HINT in msg, msg
+        assert 'u for µ, as in 2.5uL' in msg, msg
+        _not_started(app)
+        assert os.listdir(tmp) == [], os.listdir(tmp)
+
+
+def test_a_share_that_does_not_answer_refuses_the_run():
+    """Owner decision 2026-10-08: no answer from the Output dir within the
+    bound refuses the run, before any question, with nothing started. The
+    bound is read at the call, so this test shortens it."""
+    mb = T._MB(T.LIVE_OK)
+    real_bound = sprof.RUN_FOLDER_CHECK_S
+    with tempfile.TemporaryDirectory() as tmp, T._patched(mb), \
+            _hanging_share():
+        sprof.RUN_FOLDER_CHECK_S = 0.3
+        try:
+            app = _app(tmp, 'RUN', dry=False)
+            t0 = time.monotonic()
+            app.sldea_run()
+            took = time.monotonic() - t0
+        finally:
+            sprof.RUN_FOLDER_CHECK_S = real_bound
+        assert mb.titles() == [REFUSED], mb.calls
+        msg = mb.message(REFUSED)
+        assert 'did not answer within 0.3 s' in msg, msg
+        assert 'mounted' in msg, msg
+        assert took < 3.0, took
+        _not_started(app)
 
 
 def test_a_new_name_runs_and_the_same_name_is_then_refused():
@@ -419,6 +469,12 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
         app.sldea_runname_var.set('a:b')
         root.update()
         assert 'Run name' in line.cget('text'), line.cget('text')
+        assert line.cget('fg') == WINE
+        note()
+        # a µ in the name: warned at once, with New folder's way round it
+        app.sldea_runname_var.set('P3_7_2.5µL')
+        root.update()
+        assert 'u for µ, as in 2.5uL' in line.cget('text'), line.cget('text')
         assert line.cget('fg') == WINE
         note()
         app.sldea_runname_var.set('')

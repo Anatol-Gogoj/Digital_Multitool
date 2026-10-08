@@ -45,6 +45,12 @@ _WINDOWS_DEVICES = frozenset(
     + [f'COM{d}' for d in '123456789\u00b9\u00b2\u00b3']
     + [f'LPT{d}' for d in '123456789\u00b9\u00b2\u00b3'])
 
+# The way round the plain-ASCII rule for the character the lab's names
+# use most, the micro sign of a volume. name_problem ends that refusal
+# with it, and the SLDEA tab's run folder line shows the same words
+# (#402).
+ASCII_HINT = "Use plain letters instead: u for \u00b5, as in 2.5uL."
+
 
 def browse_start(box):
     """The folder a Browse dialog opens at, for a box holding `box`.
@@ -172,8 +178,7 @@ def name_problem(name):
                 f"{'is' if len(odd) == 1 else 'are'} not. On the lab's "
                 f"Windows PCs, OpenCV cannot save or open images in a folder "
                 f"with such a character in its path, so Webcam saves and Edge "
-                f"Review fail there. Use plain letters instead: u for "
-                f"\u00b5, as in 2.5uL.")
+                f"Review fail there. {ASCII_HINT}")
     return None
 
 

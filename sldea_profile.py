@@ -729,7 +729,7 @@ def holds_run_within(folder, timeout_s=RUN_FOLDER_CHECK_S):
     return out[0] if out else None
 
 
-def run_folder_refusal(outdir, run_name, timeout_s=RUN_FOLDER_CHECK_S):
+def run_folder_refusal(outdir, run_name, timeout_s=None):
     """Why Run must not start into this run's folder, as the message to
     show, or None when it may.
 
@@ -737,8 +737,12 @@ def run_folder_refusal(outdir, run_name, timeout_s=RUN_FOLDER_CHECK_S):
     already holds a run, and a folder whose check has not answered within
     `timeout_s`, because a run already there cannot be ruled out and
     writing over the only copy of a run cannot be undone. There is no
-    "start anyway". A blank name is never refused: its folder is named
-    from the start time."""
+    "start anyway", for the folder that does not answer either (owner
+    decision 2026-10-08). A blank name is never refused: its folder is
+    named from the start time. `timeout_s` None means RUN_FOLDER_CHECK_S,
+    read at the call."""
+    if timeout_s is None:
+        timeout_s = RUN_FOLDER_CHECK_S
     name = (run_name or '').strip()
     if not name:
         return None
@@ -795,9 +799,14 @@ def run_folder_line(outdir, run_name, found=None, slow=False):
     name = (run_name or '').strip()
     problem = run_name_problem(name)
     if problem:
+        import output_folder
         first = problem.split('. ')[0].rstrip('.') + '.'
-        return (f"⚠ Run name: {first} ▶ Run will refuse it.", True,
-                problem)
+        # a name that is not plain ASCII also gets New folder's way round
+        # it, in its own words (owner decision 2026-10-08)
+        hint = (f" {output_folder.ASCII_HINT}"
+                if output_folder.ASCII_HINT in problem else '')
+        return (f"⚠ Run name: {first}{hint} ▶ Run will refuse it.",
+                True, problem)
     folder = os.path.abspath(run_folder(outdir, name))
     short = _short_path(folder)
     if not name:

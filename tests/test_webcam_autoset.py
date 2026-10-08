@@ -83,6 +83,7 @@ class _Camera:
         self.stamps = []
         self.saves = []
         self.fail_stamp = False
+        self.reached = None          # how many controls a stamp sets
 
     def __enter__(self):
         self.restore = {n: getattr(webcam, n) for n in self.NAMES}
@@ -92,6 +93,8 @@ class _Camera:
             self.stamps.append(dict(webcam.LOCKED_CONTROLS))
             if self.fail_stamp:
                 raise RuntimeError("the camera went away")
+            if self.reached is not None:
+                return self.reached
             return len(webcam.LOCKED_CONTROLS)
 
         def save(controls, path=None):
@@ -319,6 +322,81 @@ def test_a_failing_step_names_it_and_leaves_the_previous_lock():
                 [box] = [c for c in p.mb.calls if c[0] == 'showerror']
                 assert box[1] == "Auto-set camera" and step in box[2], box
                 assert 'previous lock is unchanged' in box[2], box
+            finally:
+                WA._close(root, app)
+                WA._reap()
+
+
+def test_a_lock_that_reached_no_control_is_a_failure():
+    """Review of #400: Apply & Lock and Auto-set's last step count the
+    controls the lock set on the camera, and a count of 0 was reported as
+    a success ("locked 0 controls; saved for next start"): the previous
+    lock was replaced, in the app and in the file the next start restores,
+    by one that had reached nothing. A count of 0 is now a failure that
+    says why, and the previous lock stays."""
+    # Apply & Lock on a panel the camera reported no controls for: the
+    # empty lock cleared the previous one and was saved over it
+    with WA._Patched() as p, _Camera() as cam:
+        webcam.list_controls = lambda device: []
+        root, app = _tab()
+        if root is None:
+            return
+        try:
+            assert app.camctl_rows == {}
+            webcam.set_locked(STALE_LOCK)
+            _press(root, app, app.cam_apply_controls)
+            assert webcam.LOCKED_CONTROLS == STALE_LOCK, \
+                webcam.LOCKED_CONTROLS
+            assert not cam.saves, cam.saves
+            status = app.cam_sensor_status.cget('text')
+            assert status.startswith("Nothing locked: the camera reported "
+                                     "no controls"), status
+            assert 'Read camera' in status, status
+            assert status.endswith("The previous lock is unchanged."), \
+                status
+            assert str(app.cam_sensor_status.cget('foreground')) == \
+                gui.CAM_STATUS_WARN
+            [box] = [c for c in p.mb.calls if c[0] == 'showerror']
+            assert box[1] == "Camera", box
+            assert box[2].startswith("Nothing locked: the camera reported "
+                                     "no controls"), box
+            assert 'previous lock is unchanged' in box[2], box
+        finally:
+            WA._close(root, app)
+            WA._reap()
+    # Apply & Lock and Auto-set when no control reached the camera
+    for press, start in (('cam_apply_controls', "Nothing locked: "),
+                         ('cam_auto_set', "Auto-set stopped while locking: ")):
+        with WA._Patched() as p, _Camera() as cam:
+            root, app = _tab()
+            if root is None:
+                return
+            try:
+                assert webcam.LOCKED_CONTROLS == STALE_LOCK
+                app._set_entry(app.cam_exposure, 31)    # typed, not locked
+                before = {name: _box(app, name) for name in app.camctl_rows
+                          if app.camctl_rows[name][0] == 'int'}
+                cam.reached = 0
+                _press(root, app, getattr(app, press))
+                assert webcam.LOCKED_CONTROLS == STALE_LOCK, (
+                    press, webcam.LOCKED_CONTROLS)
+                assert not cam.saves, (press, cam.saves)
+                after = {name: _box(app, name) for name in before}
+                assert after == before, (press, before, after)
+                status = app.cam_sensor_status.cget('text')
+                assert status.startswith(
+                    start + "none of the 7 controls reached the camera at "
+                            "/dev/video0"), (press, status)
+                assert 'previous lock is unchanged' in status, status
+                assert str(app.cam_sensor_status.cget('foreground')) == \
+                    gui.CAM_STATUS_WARN
+                [box] = [c for c in p.mb.calls if c[0] == 'showerror']
+                assert 'none of the 7 controls reached the camera' in \
+                    box[2], box
+                assert 'previous lock is unchanged' in box[2], box
+                if press == 'cam_auto_set':
+                    # a failed Auto-set does not start an off preview
+                    assert not app.cam_previewing
             finally:
                 WA._close(root, app)
                 WA._reap()

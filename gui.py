@@ -8744,14 +8744,35 @@ LOGGING:
         work only, for a worker thread: Apply & Lock, and Auto-set camera's
         last step. Persistence never sinks the lock itself (bench
         2026-07-24: a root-owned ~/.local/share/scpi_control gave Errno 13
-        here)."""
+        here).
+
+        A lock that set no control on the camera is no lock (#400 review):
+        the previous lock goes back, nothing is saved, and it returns
+        (0, None, None) for the caller to report as a failure
+        (_cam_nothing_locked). It used to say "locked 0 controls; saved for
+        next start", over a lock it had replaced in the app and in the file
+        the next start restores."""
+        previous = dict(webcam.LOCKED_CONTROLS)
         webcam.set_locked(controls)
         n = webcam.apply_locked(device)
+        if not n:
+            webcam.set_locked(previous)
+            return 0, None, None
         try:
             saved, err = webcam.save_camera_settings(controls), None
         except OSError as e:
             saved, err = None, str(e)
         return n, saved, err
+
+    @staticmethod
+    def _cam_nothing_locked(device, controls):
+        """Why a lock set no control on the camera, for the status line."""
+        if not controls:
+            return ("the camera reported no controls, so there was nothing "
+                    "to lock. Plug it in and press Read camera (under "
+                    "Advanced)")
+        return (f"none of the {len(controls)} controls reached the camera "
+                f"at {device} (unplugged, or v4l2-ctl refused them?)")
 
     @staticmethod
     def _cam_saved_words(saved, err):
@@ -8819,6 +8840,14 @@ LOGGING:
                 messagebox.showerror("Camera", str(error))
                 return
             n, saved, err = result
+            if not n:
+                why = self._cam_nothing_locked(device, controls)
+                self._cam_status(f"Nothing locked: {why}. The previous lock "
+                                 "is unchanged.", 'warn')
+                messagebox.showerror(
+                    "Camera", f"Nothing locked: {why}.\n\nThe previous lock "
+                              f"is unchanged.")
+                return
             words, kind = self._cam_saved_words(saved, err)
             self._cam_status(f"🔒 locked {n} controls; {words}", kind)
             self.status_bar.config(text=f"Camera: {n} controls locked")
@@ -8907,6 +8936,9 @@ LOGGING:
                 step = 'locking'
                 say("Auto-set 3/3: writing and locking...")
                 n, saved, err = self._cam_lock_and_save(device, locked)
+                if not n:
+                    raise RuntimeError(
+                        self._cam_nothing_locked(device, locked))
             except Exception as e:
                 # nothing new stays locked: the previous lock goes back in
                 # the dict and onto the device

@@ -1155,7 +1155,12 @@ def test_gui_flag_opens_the_window_without_run_arguments():
 # the commit this branch was cut from (the `#223` plot-window merge). Kept
 # as a SHA rather than a stored PNG because PNG bytes carry the matplotlib
 # version -- a golden file would rot on the next upgrade, this cannot.
-_BASE_SHA = 'd11b01ad0b9e3e28786d482fabb4fe6027a4438e'
+# Re-pinned 2026-10-06: the history rewrite that dropped the session
+# trailers gave that commit a new SHA. The old one, d11b01ad, survives only
+# in clones fetched before the rewrite, so everywhere else this comparison
+# skipped. 7e45ac1a is the same commit after the rewrite: the parent of the
+# commit that added this test, an ancestor of main, reachable in every clone.
+_BASE_SHA = '7e45ac1a882de37d50a6d3cc768a1d85fb97b7dd'
 
 
 def _pre_change_module(sha=None):
@@ -4431,9 +4436,9 @@ def test_the_cli_option_table_cannot_drift_from_make_opts():
 # elapsed-time axis, and that none of it moves a single-sweep figure.
 # --------------------------------------------------------------------------
 
-# the commit this work was cut from: an ANCESTOR of main, so -- unlike
-# _BASE_SHA, which main's history does not contain -- it is reachable in
-# every clone, and the comparisons below run everywhere rather than skip
+# the commit this work was cut from: an ANCESTOR of main, so it is
+# reachable in every clone, and the comparisons below run everywhere rather
+# than skip (as _BASE_SHA did until it was re-pinned on 2026-10-06)
 _LEGS_BASE_SHA = '78315cc27c9d2b001d99f8d198aa5a4e5bb1e1d5'
 
 FALL_OFFSET = 8.0       # mm2: the falling leg sits this much HIGHER

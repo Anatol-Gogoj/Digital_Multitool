@@ -9350,6 +9350,24 @@ LOGGING:
         return n, saved, err
 
     @staticmethod
+    def _cam_put_lock_back(device):
+        """Stamp the lock back onto `device` once an adjustment's trials
+        are over, for a worker thread: Stabilize and Auto-WB once (#425
+        review). Every trial stamps its own controls (webcam.oneshot_rgb),
+        and these two lock nothing, so the camera kept the last trial. A
+        preview restarted afterwards stamps the lock as it opens, but with
+        the preview off nothing did, and Refresh then read that trial into
+        the boxes a run takes (exposure 130, gain 0 after a failed
+        Stabilize, over a lock of 20 and 44). The lock is the one in place
+        before the adjustment, as nothing changes it while one runs. Never
+        raises, like Auto-set's put-back on failure: the adjustment's own
+        result or error is what the operator sees."""
+        try:
+            webcam.apply_locked(device)
+        except Exception:
+            pass
+
+    @staticmethod
     def _cam_nothing_locked(device, controls):
         """Why a lock set no control on the camera, for the status line."""
         if not controls:
@@ -9618,7 +9636,10 @@ LOGGING:
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            found = webcam.find_exposure(spec, base)
+            try:
+                found = webcam.find_exposure(spec, base)
+            finally:
+                self._cam_put_lock_back(device)
             if found is None:
                 return None
             exp, mean = found
@@ -9669,9 +9690,12 @@ LOGGING:
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            return webcam.balance_gray_world(
-                spec, base, red=base.get('red_balance'),
-                blue=base.get('blue_balance'))
+            try:
+                return webcam.balance_gray_world(
+                    spec, base, red=base.get('red_balance'),
+                    blue=base.get('blue_balance'))
+            finally:
+                self._cam_put_lock_back(device)
 
         def done(best, error):
             try:

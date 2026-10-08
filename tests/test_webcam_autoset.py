@@ -570,14 +570,76 @@ def test_refresh_refuses_while_an_adjustment_is_writing_the_camera():
                     status, status
                 assert 'Refresh' in status, status
                 assert color == gui.CAM_STATUS_WARN, color
-                # with the camera free, Refresh re-lists and reads it
+                # with the camera free, Refresh re-lists and reads it, also
+                # while a job of another kind runs: only an adjustment
+                # holds it off
                 device.update(exposure_time_absolute=33, gain=5)
-                app.cam_refresh_devices()
+                app._bg_busy.add('connect')
+                try:
+                    app.cam_refresh_devices()
+                finally:
+                    app._bg_busy.discard('connect')
                 assert boxes() == ('33', '5'), boxes()
                 assert tuple(app.cam_combo['values']) == ('0', '2')
                 assert app.status_bar.cget('text') == "Found 2 camera(s)"
             finally:
                 app._bg_busy.discard('camera-ctrl')
+                WA._close(root, app)
+        WA._reap()
+
+
+def test_stabilize_and_auto_wb_once_put_the_lock_back_on_the_camera():
+    """#425 review: every trial stamps its own controls on the camera
+    (oneshot_rgb), and Stabilize and Auto-WB once lock nothing, so the
+    camera kept the last trial after them. With the preview off nothing
+    stamped the lock back (a preview restart does, on open), and Refresh
+    then read that trial into the boxes a run takes: after a failed
+    Stabilize they went from exposure 20, gain 44 to 130, 0, with the lock
+    still at 20, 44. Both now stamp the lock back once when their trials
+    end, whatever the search found, and change no lock."""
+    for adjust, fails in (('cam_stabilize', True), ('cam_stabilize', False),
+                          ('cam_grey_world', True),
+                          ('cam_grey_world', False)):
+        WA._reap()
+        with WA._Patched(), _Camera() as cam:
+            root, app = _tab()
+            if root is None:
+                return
+            # the device, as in the Refresh test above, and the lock stamp
+            # writing onto it as well as being recorded
+            device = dict(STALE_LOCK)
+            shoot, stamp = cam.scene.oneshot, webcam.apply_locked
+
+            def oneshot(spec, count=2, controls=None):
+                device.update(webcam.LOCKED_CONTROLS if controls is None
+                              else controls)
+                return None if fails else shoot(spec, count, controls)
+
+            def apply_locked(dev, exclude=None):
+                device.update({k: v for k, v in
+                               webcam.LOCKED_CONTROLS.items()
+                               if k not in (exclude or ())})
+                return stamp(dev, exclude)
+
+            webcam.oneshot_rgb = oneshot
+            webcam.apply_locked = apply_locked
+            webcam.get_control = lambda dev, name: device.get(name)
+            case = (adjust, 'fails' if fails else 'finds')
+            try:
+                assert not app.cam_previewing
+                _press(root, app, getattr(app, adjust))
+                assert webcam.LOCKED_CONTROLS == STALE_LOCK, \
+                    (case, webcam.LOCKED_CONTROLS)
+                assert cam.stamps == [STALE_LOCK], (case, cam.stamps)
+                held = {k: device[k] for k in STALE_LOCK}
+                assert held == STALE_LOCK, (case, held)
+                if fails:
+                    # the operator presses Refresh a second later
+                    app.cam_refresh_devices()
+                    got = (_box(app, 'exposure_time_absolute'),
+                           _box(app, 'gain'))
+                    assert got == ('20', '44'), (case, got)
+            finally:
                 WA._close(root, app)
         WA._reap()
 

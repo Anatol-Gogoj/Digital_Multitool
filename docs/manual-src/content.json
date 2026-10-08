@@ -51,6 +51,10 @@
    {
     "label": "Shared preset storage",
     "what": "Presets and profiles live in the ShareDrive presets folder so both bench users see them; if the NAS is down, saves land in a local copy and the status bar says so."
+   },
+   {
+    "label": "tk_stall.log (window freezes)",
+    "what": "Each time the main window, Edge Review or the plot window freezes for more than 0.3 s, it writes one record to tk_stall.log (in ~/.cache/scpi_control, or $SCPI_CACHE): how long it froze, the code it was stuck in, and whether it was computing or waiting. A freeze still going after 4 s gets an early STALLING record, so a window killed while frozen still leaves its stack. Send tk_stall.log and tk_stall.log.1 with a problem report. SCPI_STALL_LOG=0 turns it off."
    }
   ],
   "workflow": [
@@ -894,8 +898,8 @@
     "what": "Live plot of the staircase. Each photo moment is marked by SHAPE as well as colour, so the marks read in any colour vision and in greyscale: open circle = camera warm-up, grey diamond = 0 kV baseline, blue triangle = post-ramp, yellow square = pre-ramp (legend along the top). Hover a mark for its landing, kV and time; a dashed black playhead tracks a running test."
    },
    {
-    "label": "Output dir / Run name (blank = auto)",
-    "what": "Where the run folder is created; blank name auto-stamps SLDEA_YYYYMMDD_HHMMSS."
+    "label": "Output dir (Browse, New folder…) / Run name (blank = auto)",
+    "what": "Where the run folder is created; blank name auto-stamps SLDEA_YYYYMMDD_HHMMSS. Browse opens at the folder in the box; New folder… asks for a name, makes that folder inside the one in the box and switches the box to it. Both refuse while a run is going: the run keeps the folder it started in."
    },
    {
     "label": "V_Out / I_Out scope CH, SG CH",
@@ -918,6 +922,10 @@
     "what": "How much CNT ink went on this device — the '2.5mL' in a folder name like P3_2.5mL_Triazole, now recorded in the run itself. It is greyed out for carbon black and eGaIn, which are not inks dispensed by volume, and for the nano-c Invisicon pair, which is sprayed on as coats rather than dispensed as a measured millilitre: when it is greyed the run neither asks for it nor writes it to setup.txt, so a carbon-black or Invisicon run carries no ink key at all. Greying it does not change the material — a sprayed CNT is still recorded in the CNT family and still averages with every other CNT run. Where it does apply, the run asks before starting without it, and only a positive number is accepted."
    },
    {
+    "label": "Film thickness (µm)",
+    "what": "Thickness of the dielectric film, measured with the film mounted and prestretched on its frame, the way the device is tested. That is t0, the thickness the plot window's field axis divides the voltage by (V/µm), so no stretch ratio is needed. Optional, but the run asks before starting without it, and asks again for a value outside 5 to 2000 µm, where a thickness typed in mm or nm lands; Enter answers No to both. setup.txt records it as Film thickness: 50 um."
+   },
+   {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
     "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
    },
@@ -927,7 +935,7 @@
    },
    {
     "label": "🎥 Video beside the snapshots: Record / fps / detect edges",
-    "what": "Off by default. Record adds a lossless grey video of the whole run (video.mkv, about 1 MB per frame, so roughly 2.5 GB for a 40-minute run at 1 fps; the line beside the boxes shows the estimate for the staircase above) and video_frames.csv with each frame's time and commanded kV. The snapshots are still taken on schedule from the same stream, so data.csv and everything that reads it are unchanged. The file is written to this PC's local disk during the run and moved into the run folder once the HV is off. The run refuses to start video without the lossless encoder or enough local disk, and offers a snapshots-only run instead. Once the camera is streaming, still at 0 kV, the run writes and reads back one of the camera's own frames on the local disk. If that check fails (for example a frame size the encoder cannot record losslessly), the run stops itself before any HV and says why; unticking Record then runs it with snapshots only. While any SLDEA run is going, the Webcam tab cannot open the camera or change its exposure. 'then detect edges on every frame' runs Edge Review's own detector on every recorded frame after a completed run, in a separate program, and writes video_edges.csv and video_edges.png; each row carries the detector's confidence and needs-review verdict instead of a review queue."
+    "what": "Off by default. Record adds a lossless grey video of the whole run (video.mkv, about 1 MB per frame, so roughly 2.5 GB for a 40-minute run at 1 fps; the line beside the boxes shows the estimate for the staircase above) and video_frames.csv with each frame's time and commanded kV. The snapshots are still taken on schedule from the same stream, so data.csv and everything that reads it are unchanged. The file is written to this PC's local disk during the run and moved into the run folder once the HV is off. The run refuses to start video without the lossless encoder or enough local disk, and offers a snapshots-only run instead. Once the camera is streaming, still at 0 kV, the run writes and reads back one of the camera's own frames on the local disk. If that check fails (for example a frame size the encoder cannot record losslessly), the run stops itself before any HV and says why; unticking Record then runs it with snapshots only. A check still running after 15 s counts as failed, and until it ends, ▶ Run offers a snapshots-only run instead of checking again. At the end of a video run, setup.txt gets a Video outcome (end) line: how many frames were recorded, or NOT recorded, and why the video stopped (for example, the camera stopped delivering). While any SLDEA run is going, the Webcam tab cannot open the camera or change its exposure. 'then detect edges on every frame' runs Edge Review's own detector on every recorded frame after a completed run, in a separate program, and writes video_edges.csv and video_edges.png; each row carries the detector's confidence and needs-review verdict instead of a review queue."
    },
    {
     "label": "Run configuration presets",
@@ -951,7 +959,19 @@
    },
    {
     "label": "📊 Plot runs…",
-    "what": "Opens the plot window on several finished runs at once: tick the runs, choose area / current / power, toggle what is drawn (pre/post separately, mean line, uncertainty bands, breakdown marks) and the figure redraws as you go. Nothing is written until Export, which saves the figure — PNG at a dpi you set (300 by default) or SVG, the dpi box greying out under SVG because a vector file has no dots per inch — together with the tidy per-snapshot CSV behind it — the CSV is the figure's evidence, so the two always travel as a pair. Area mode needs runs Edge Review has saved areas for (✓ processed in the list); current and power work on raw runs, so a run can be looked at electrically before anyone has reviewed a frame. Hover the uncertainty-bands box to see where those numbers come from: they are the calibrated error budget in SLDEA_MEASUREMENT.md — ±2% for machine-measured levels, ±1% for hand-traced ones, a level mixing the two keeping the machine band — and Edge Review's conf score is a review-ordering number, never an uncertainty. An up/down (hysteresis) run is drawn leg by leg — triangle-up rising, triangle-down falling, small arrows in the direction of travel — rather than averaging its two visits to each voltage into one point; untick 'up/down legs apart' for that older averaged view. The x axis switches between nominal kV and elapsed time, which unrolls any run in the order it was recorded."
+    "what": "Opens the plot window on several finished runs at once: select the runs (drag down the list, or Shift-click and Ctrl-click), choose area / current / power, toggle what is drawn (pre/post separately, mean line, uncertainty bands, breakdown marks) and the figure redraws as you go. Nothing is written until Export, which saves the figure — PNG at a dpi you set (300 by default) or SVG, the dpi box greying out under SVG because a vector file has no dots per inch — together with the tidy per-snapshot CSV behind it — the CSV is the figure's evidence, so the two always travel as a pair. Area mode needs runs Edge Review has saved areas for (marked ✓ in the list); current and power work on raw runs, so a run can be looked at electrically before anyone has reviewed a frame. Hover the uncertainty-bands box to see where those numbers come from: they are the calibrated error budget in SLDEA_MEASUREMENT.md — ±2% for machine-measured levels, ±1% for hand-traced ones, a level mixing the two keeping the machine band — and Edge Review's conf score is a review-ordering number, never an uncertainty. An up/down (hysteresis) run is drawn leg by leg — triangle-up rising, triangle-down falling, small arrows in the direction of travel — rather than averaging its two visits to each voltage into one point; untick 'up/down legs apart' for that older averaged view. The x axis switches between nominal kV, elapsed time, which unrolls any run in the order it was recorded, and the nominal field V/µm: the voltage divided by each run's film thickness, for comparing films of different thickness. A run with no thickness is left off that axis by name, with the line to add by hand. The run list is a table of the run, the electrode material its setup.txt records and the group it is plotted in: click a heading to sort, and right-click the selected runs to move them to a group (an existing one, a new one, or none), or to open 🎞 Video review… on the run under the pointer. Group by material fills the groups from each run's electrode, and ...and by concentration splits each material by its ink volume; each group mean is drawn in its material's line style. In a small window a long caption is cut, with a row saying so; Export and the toolbar's Save always write the whole caption."
+   },
+   {
+    "label": "🎞 Video review…",
+    "what": "At the right of the run row, beside Live view…: opens the video review of the last run that ended with a recording (Record ticked), as its own program, so a stall in it cannot take this window down. Grey until such a run ends in this session, and gone from the row while a run is going. If the recording is still being moved into the run folder, the review says so; open it again once the job line says ready."
+   },
+   {
+    "label": "Live view…",
+    "what": "The camera during a run, in its own window: a video run's stream, or a stills-only run's newest saved still labelled with its age, with the commanded kV and the exposure verdict of the frame shown. It opens by itself when a run starts and keeps the last frame after the run ends. It only shows frames the run already holds and never opens the camera, so closing it never affects the run. A camera that stops delivering shows a red NO FRAME, which stays red through ■ Abort; a video run whose stream gives nothing in its first 5 s shows its stills under a red VIDEO STREAM DOWN banner."
+   },
+   {
+    "label": "Video job line (under the run row)",
+    "what": "After a video run, follows the background video job: starting the post-run job, detecting edges n/N with the time left, copying video.mkv into the run folder (x GB of y GB), then ready in the run folder with the frame counts. It also follows the re-run that an Edge Review Save starts. It is the video job's line, never the run's status: the run's alarms stay in the status beside the buttons. The words carry the meaning; the color repeats it (gray while busy, green when ready, ⚠ and a reason for a warning)."
    },
    {
     "label": "Run log",
@@ -961,7 +981,7 @@
   "workflow": [
    "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
    "2. Check the preview and summary line — dots are photos, total time shown.",
-   "3. Set Output dir, DEA active area diam (mm), and the scope/SG channels.",
+   "3. Set Output dir (New folder… makes a fresh one), the device fields (DEA active area diam, electrode, concentration, film thickness) and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
    "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
    "6. In camera pre-flight, center the DEA in the circle, check focus, start (Return starts only a clean pre-flight).",
@@ -977,7 +997,8 @@
    "During a live run the driven SG channel is locked; its Signal Gen tab controls (Apply, Output, Fire, Reconnect) and the Waveform Editor's upload refuse it, and a Webcam-tab sweep will not write it, until the run ends. ▶ Run itself refuses to start while a sweep is writing its channel, a timed capture or camera adjustment is running, or (live runs) a Signal Gen tab command is still being sent; a sweep on the other channel is asked about (Enter = No).",
    "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering, and not in the run's first seconds, while the watchdog is still arming.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start.",
-   "The camera pre-flight treats a flat picture (no visible disc) like a blown-out one: its start button reads ⚠ Start anyway (no picture), Return does nothing, and pressing it asks again (Enter = No). Unless you answered Yes there, a run stops itself the way ■ Abort does at its 0 kV baseline photo, taken as the first ramp begins, if that photo is flat, or if the camera gave the pre-flight a picture but gives the run none. The 2026-10-01 run went to 3 kV for 209 s on a flat grey picture. Yes is the deliberate override for a faint device: that run carries on, run.log and setup.txt record that you started anyway, and it needs reviewing by hand."
+   "The camera pre-flight treats a flat picture (no visible disc) like a blown-out one: its start button reads ⚠ Start anyway (no picture), Return does nothing, and pressing it asks again (Enter = No). Unless you answered Yes there, a run stops itself the way ■ Abort does at its 0 kV baseline photo, taken as the first ramp begins, if that photo is flat, or if the camera gave the pre-flight a picture but gives the run none. The 2026-10-01 run went to 3 kV for 209 s on a flat grey picture. Yes is the deliberate override for a faint device: that run carries on, run.log and setup.txt record that you started anyway, and it needs reviewing by hand.",
+   "Keep folder and run names plain ASCII (2.5uL, not 2.5µL): OpenCV on the Windows PCs cannot save or open images under other characters, and New folder… refuses them."
   ],
   "callouts": [
    {
@@ -1045,6 +1066,22 @@
    {
     "name": "SLDEA plot — cross-run figures (separate program)",
     "how_opened": "📊 Plot runs…"
+   },
+   {
+    "name": "New folder name prompt",
+    "how_opened": "New folder… beside Browse"
+   },
+   {
+    "name": "No film thickness specified / Film thickness looks unusual",
+    "how_opened": "▶ Run with the Film thickness box blank, or outside 5 to 2000 µm (Enter = No)"
+   },
+   {
+    "name": "SLDEA live view",
+    "how_opened": "Opens with each run; Live view… reopens it"
+   },
+   {
+    "name": "Video review (separate program)",
+    "how_opened": "🎞 Video review…"
    }
   ]
  },
@@ -1054,8 +1091,8 @@
   "purpose": "Records readings from the connected instruments to CSV files continuously, at a cadence you set in seconds or in Hz — one timestamped file per source, so a run captures stimulus (sig gen, supply) and response (LCR, scope, DMM) side by side. While a run goes, the tab shows each logged number's latest value with its min and max since Start; there is no live plot. Files are for offline analysis (Excel, Python).",
   "controls": [
    {
-    "label": "Log Directory: + Browse",
-    "what": "Folder where the CSV files are written (default ./logs); created automatically if missing."
+    "label": "Log Directory: + Browse / New folder…",
+    "what": "Folder where the CSV files are written (default ./logs); created automatically if missing. Browse opens at the folder in the box; New folder… makes a fresh folder inside it and switches the box to it. During a LIVE SLDEA run New folder… refuses with a note: it works on the share from the window's own thread, and a slow share would hold up the run."
    },
    {
     "label": "Sample cadence: + s / Hz",
@@ -1091,7 +1128,7 @@
    },
    {
     "label": "Live Values (since Start)",
-    "what": "Each logged number's latest value, min and max since Start. -- means the latest read had no value (no signal, overload, an LCR status error or a failed read); such reads never count toward min or max. The line beneath counts samples and any skipped slots. Display only: Start clears it, and after Stop it keeps the last run's values."
+    "what": "Each logged number's latest value, min and max since Start. -- means the latest read had no value (no signal, overload, an LCR status error or a failed read); such reads never count toward min or max. The line beneath counts samples and any skipped slots. Display only: Start clears it, and after Stop it keeps the last run's values. A ticked source whose reads have all failed so far shows one (read failed) row until its first good read."
    },
    {
     "label": "Log Status",
@@ -1104,7 +1141,7 @@
   ],
   "workflow": [
    "1. Connect and configure the instruments on their own tabs first.",
-   "2. Pick a Log Directory (Browse) or keep ./logs.",
+   "2. Pick a Log Directory (Browse, or New folder… for a fresh one) or keep ./logs.",
    "3. Set the Sample cadence: seconds between samples (e.g. 1.0 s), or pick Hz for samples per second.",
    "4. Tick every source you want recorded.",
    "5. Click Start Logging and note the CSV paths in Log Status.",
@@ -1116,7 +1153,8 @@
    "The DMM is logged with whatever function was selected on the DMM tab at the moment you pressed Start Logging — changing the function mid-run does not change what is recorded.",
    "Sources are read one after another each sample. If that takes longer than the cadence, the missed sample slots are skipped and counted under Live Values, never made up in a burst, so the real spacing becomes a whole multiple of the cadence.",
    "On a PC with no instruments connected, Start Logging refuses with \"Nothing to log\" — every ticked source must be connected on its tab.",
-   "Files are flushed after every sample, so a crash or power loss loses at most the last row — but each Start opens new files; nothing is ever appended to an old run."
+   "Files are flushed after every sample, so a crash or power loss loses at most the last row — but each Start opens new files; nothing is ever appended to an old run.",
+   "Keep folder and run names plain ASCII (2.5uL, not 2.5µL): OpenCV on the Windows PCs cannot save or open images under other characters, and New folder… refuses them."
   ],
   "callouts": [
    {
@@ -1160,6 +1198,10 @@
    {
     "name": "Continuous Logging Tips (info popup)",
     "how_opened": "📖 Show Usage Tips"
+   },
+   {
+    "name": "New folder name prompt",
+    "how_opened": "New folder… beside Browse"
    }
   ]
  },
@@ -1297,7 +1339,7 @@
    },
    {
     "label": "Start Preview",
-    "what": "Live view of the selected camera. It starts by itself when you open this tab and stops when you leave it, unless interval capture is running; this button stops and restarts it. While it is off, the view says PREVIEW OFF and why, over the last frame dimmed."
+    "what": "Live view of the selected camera. It starts by itself when you open this tab and stops when you leave it, unless interval capture is running; this button stops and restarts it. While it is off, the view says PREVIEW OFF and why, over the last frame dimmed. If something held it off (an SLDEA run, a capture, a camera adjustment or a dialog) and that ends while the tab is shown, it starts again by itself, once. After Stop Preview, or after the camera failed to open, it stays off until you start it or open the tab again."
    },
    {
     "label": "Snapshot",
@@ -1340,8 +1382,8 @@
     "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo."
    },
    {
-    "label": "Save to / Prefix",
-    "what": "Output folder and the start of every saved filename (e.g. cap_0003_1p9V_….png)."
+    "label": "Save to (Browse, New folder…) / Prefix",
+    "what": "Output folder and the start of every saved filename (e.g. cap_0003_1p9V_….png). New folder… beside Browse makes a fresh folder inside the one in the box and switches the box to it."
    },
    {
     "label": "Interval capture",
@@ -1361,7 +1403,7 @@
    }
   ],
   "workflow": [
-   "Open the tab; the preview starts by itself. If the view says PREVIEW OFF, read the reason under it, then pick the camera number and click Start Preview.",
+   "Open the tab; the preview starts by itself. If the view says PREVIEW OFF, read the reason under it: when it names something running, the preview starts by itself when that ends, unless you pressed Stop Preview or the camera already failed to open on this visit; otherwise pick the camera number and click Start Preview.",
    "Turn the lens until the focus score (on by default) peaks.",
    "Press Auto-set camera and wait for \"locked\" on the line under it (or type the exposure and gain and press 🔒 Apply & Lock beside them).",
    "Set the save folder and filename prefix.",
@@ -1373,9 +1415,10 @@
    "Run sweep and the burst-trigger option need the signal generator connected — on an offline (e.g. Windows) machine they refuse to start.",
    "Before a sweep, turn the channel's Output ON in the Signal Gen tab — otherwise the levels are written but never reach the device, and you get a folder of identical photos.",
    "A sweep leaves the generator sitting at the LAST level when it ends — it does not return the output to zero.",
-   "Starting a sweep or timed capture stops the live preview to free the camera; a running interval capture stops with it.",
+   "Starting a sweep or timed capture stops the live preview to free the camera; a running interval capture stops with it. The preview starts again by itself when the capture ends, if the tab is on screen and you have not pressed Stop Preview.",
    "Without a lock (Auto-set camera, or 🔒 Apply & Lock) the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
-   "The focus CSV is rewritten on every run with the same prefix — change the prefix to keep the previous one."
+   "The focus CSV is rewritten on every run with the same prefix — change the prefix to keep the previous one.",
+   "Keep folder and run names plain ASCII (2.5uL, not 2.5µL): OpenCV on the Windows PCs cannot save or open images under other characters, and New folder… refuses them."
   ],
   "callouts": [
    {
@@ -1415,6 +1458,10 @@
    {
     "name": "Folder picker (choose save folder)",
     "how_opened": "Browse"
+   },
+   {
+    "name": "New folder name prompt",
+    "how_opened": "New folder… beside Browse"
    }
   ]
  },
@@ -1477,11 +1524,11 @@
    },
    {
     "label": "💾 Save to data.csv… (Edge Review)",
-    "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays. When the run folder holds a video, Save then re-runs the video edge pass in the background if its edges are out of date, and the status line says so; run.log records the result. If the scale anchor could not be recorded in setup.txt, the status line says so and what to do."
+    "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays. When the run folder holds a video, Save then re-runs the video edge pass in the background if its edges are out of date, and the status line says so; run.log records the result. If the scale anchor could not be recorded in setup.txt, the status line says so and what to do. Save does its file work behind a Saving n/N box with the busy cursor; the window cannot be closed and takes no review keys until it ends. A second Save while a video re-run is still going says so and starts no second one."
    },
    {
     "label": "🎞 Video review… (Edge Review)",
-    "what": "Live when the run folder holds a video recorded with the SLDEA tab's Record box. It shows only the video frames that need a person: the ones the detector doubts or finds no edge on, the ones that read more than 2 % off the run's accepted stills for their landing, and, between landings, a spike or the frame a 2 % step lands on. The run-wide offset between the video and the stills is measured and divided out first. Each frame comes with the detector's outline and its place on the area-against-time figure. Left / Right step one frame, N / P jump to the next or previous undecided flagged frame, A accepts, R rejects, C clears, Shift+A / Shift+R decide a whole flagged stretch, Esc closes. Decisions go to video_review.csv, never to data.csv, and video_edges.png is redrawn with them on close. The same window opens from the command line with python sldea_video_review.py RUN. Not bench-checked yet (BENCH_TEST Q16 and Q17)."
+    "what": "Live when the run folder holds a video recorded with the SLDEA tab's Record box. It shows only the video frames that need a person: the ones the detector doubts or finds no edge on, the ones that read more than 2 % off the run's accepted stills for their landing, and, between landings, a spike or the frame a 2 % step lands on. The run-wide offset between the video and the stills is measured and divided out first. Each frame comes with the detector's outline and its place on the area-against-time figure. Left / Right step one frame, N / P jump to the next or previous undecided flagged frame, A accepts, R rejects, C clears, Shift+A / Shift+R decide a whole flagged stretch, Esc closes. Decisions go to video_review.csv, never to data.csv, and video_edges.png is redrawn with them on close. The same window opens from the command line with python sldea_video_review.py RUN. Not bench-checked yet (BENCH_TEST Q16 and Q17). It also opens from the SLDEA tab (🎞 Video review… for the run that just ended) and from the plot window's right-click menu on a run, each time as its own program. It opens before the run's video edges exist, says so and offers Re-run, and while the recording is still being moved into the run folder it says the recording is not there yet."
    },
    {
     "label": "❓ How to use… (Edge Review)",
@@ -1493,7 +1540,7 @@
    },
    {
     "label": "sldea_plot.py (headless or windowed)",
-    "what": "Puts one or more finished runs on a single figure. Takes the same run arguments as the tuner and the diagnostic (a run folder, a parent full of runs, or a bench shortcut) and writes the figure (--format png|svg, --dpi 300 by default) plus the tidy per-snapshot CSV behind it, so a figure can always be traced back to its numbers. Colours are the house colourblind-safe set, assigned in the order runs are listed. Add --gui (or use 📊 Plot runs… on the SLDEA tab) for the window: the same figure, with the runs and the toggles as tick boxes and a live preview. The command line stays the way to script a batch of figures. --x time plots against elapsed time instead of kV; an up/down run is drawn leg by leg with direction arrows unless --merge-legs / --no-arrows say otherwise."
+    "what": "Puts one or more finished runs on a single figure. Takes the same run arguments as the tuner and the diagnostic (a run folder, a parent full of runs, or a bench shortcut) and writes the figure (--format png|svg, --dpi 300 by default) plus the tidy per-snapshot CSV behind it, so a figure can always be traced back to its numbers. Colours are the house colourblind-safe set, assigned in the order runs are listed. Add --gui (or use 📊 Plot runs… on the SLDEA tab) for the window: the same figure, with the runs and the toggles as tick boxes and a live preview. The command line stays the way to script a batch of figures. --x time plots against elapsed time instead of kV; an up/down run is drawn leg by leg with direction arrows unless --merge-legs / --no-arrows say otherwise. --x field plots against the nominal field V/µm, from the film thickness in each run's setup.txt; a run with no thickness is left off that axis by name, with the line to add by hand."
    },
    {
     "label": "sldea_video.py (headless)",

@@ -6,6 +6,103 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.4 (2026-10-08, pre-release)
+
+**TL;DR:** Everything that reached `main` after v1.4.3, and none of it has been
+checked on the bench yet: the checks are listed in #369. The SLDEA tab now
+shows the camera live during a run, records the film thickness, and checks the
+video codec before any HV; the plot window groups runs by material and can plot
+against the electric field. Data Logging is now Continuous Logging, and the
+Webcam tab starts its own preview.
+
+### SLDEA test tab
+
+- **Live camera view during a run** (#386). A window opens with each run: a
+  video run's stream, or a stills-only run's newest still labelled with its
+  step and age, with the pre-flight reticle, the commanded kV and the exposure
+  verdict of the frame on screen. It only reads frames the run already holds,
+  so it never opens the camera; the run waits at most one view tick, about
+  10 ms, for it. A dead stream stays red through ■ Abort, and a video run
+  whose stream gives nothing in its first 5 s shows its stills under a red
+  VIDEO STREAM DOWN banner (#413).
+- **Film thickness** (#416). A "Film thickness (µm)" box under Concentration,
+  measured with the film mounted and prestretched, checked at ▶ Run like the
+  concentration and written to setup.txt as `Film thickness: 50 um`. A blank
+  box or a value outside 5 to 2000 µm asks before the run starts, default No.
+- **The video codec is checked at the camera's own frame size before any HV**
+  (#379), and the run stops at 0 V if that frame cannot be recorded
+  losslessly. The "Unknown C++ exception" behind it was FFmpeg 4.4 reading
+  1 KB past every gray frame; frames are now laid out so that read stays in
+  the app's own buffer. The check gives up after 15 s, and setup.txt now ends
+  with one `Video outcome (end):` line: the frames recorded, or NOT recorded,
+  and why the video stopped (#412).
+- **Video review from the SLDEA tab and the plot window** (#417): a 🎞 Video
+  review… button for the run that just ended, and an entry in the plot
+  window's right-click menu on a run. The review runs as its own program, so
+  a decoder stall cannot take the main window or the plot window down.
+- **The post-run video job shows its progress** (#418) on a line under the run
+  row ("detecting edges 120/438", "copying video.mkv into the run folder",
+  "ready in the run folder"), including the re-run Edge Review's Save starts.
+  The job runs at low priority, and Edge Review's Save writes its files on a
+  worker thread behind a "Saving n/N" box, so neither window looks hung. Every
+  file Save writes is byte-identical to before.
+- **New folder… beside Browse** (#410) on the SLDEA, Webcam and Continuous
+  Logging tabs, because the bench's folder dialog cannot make one. Browse
+  opens at the folder in the box. During a run the SLDEA tab's two buttons
+  refuse with a note, and during a LIVE run New folder… refuses on the other
+  two tabs as well, because it works on the share from the thread the HV
+  worker waits on.
+- **The run video stays full-frame** (#387): a crop changes what the edge
+  detector measures. Decision log only.
+
+### Plot window
+
+- **Group by material** (#382): a button fills the groups from each run's
+  `Compliant electrode:` line, and "...and by concentration" splits each
+  material further. Each group mean draws in its material's line style.
+- **The run list is a table** (#383) with the run, its electrode material and
+  its group; click a heading to sort, right-click to move runs between groups.
+  Material is re-read from setup.txt whenever a grouping change acts on a run,
+  click-drag selects a range again, and four layout fixes come with it (#415).
+- **Field axis** (#416): a third x axis, the nominal field V / t0 in V/µm, for
+  runs whose setup.txt records the film thickness (`--x field` on the command
+  line). Runs without it are left off that axis by name.
+- **The caption fits the figure** (#380, #420). Every caption line is wrapped
+  at its measured width, and grouped captions lay out faster (a six-group
+  figure draws in about 200 ms instead of 360). In the window only, a caption
+  too tall for a small window is cut with a row saying so; exports always
+  carry the whole caption, and the toolbar's Save does too. A run legend that
+  covers data moves below the panels.
+
+### Continuous Logging (was Data Logging)
+
+- **Renamed, with a cadence in seconds or Hz and live min and max** (#384).
+  The loop samples on a fixed time grid, so "2 Hz" means two samples a second.
+- **A meter's overload code can no longer become the Max** (#409), and a source
+  whose first read fails gets a "(read failed)" row. The CSVs and the
+  instrument loop are unchanged.
+
+### Webcam tab
+
+- **The preview starts when the tab opens** (#385) and stops when you leave it,
+  unless interval capture is running. When it is off, the view says PREVIEW
+  OFF in large text with the reason, over the last frame dimmed.
+- **It comes back once by itself** when what held it off ends (#411): Apply &
+  Lock, an SLDEA run, a timed capture or a dialog. It never takes the camera
+  from a run, a capture or an adjustment, and Stop Preview holds for the visit.
+
+### Diagnostics and tests
+
+- **Window freezes are logged** (#414). The main window, Edge Review and the
+  plot window write one record to `tk_stall.log` (in `~/.cache/scpi_control`,
+  or `$SCPI_CACHE`) each time they freeze for more than 0.3 s, with the stack
+  of where they were stuck. Nothing that causes a freeze changes yet: run it on
+  the bench through a working day and send the log.
+- **The edge-GUI test flake is fixed** (#419): a hover tip's timer could stop a
+  test's window teardown half way. #280 stays open for a re-run on a lab PC.
+- **The plot suite's byte check runs again** (#408) in every clone.
+- `sldea_preview.py`'s docstring cites the CVD floor by method (#381).
+
 ## v1.4.3 (2026-10-06, pre-release)
 
 **TL;DR:** Two fixes that reached `main` after v1.4.2. Neither has been

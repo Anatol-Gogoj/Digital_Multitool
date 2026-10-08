@@ -197,13 +197,19 @@ S["tab_dmm"] = {
 
 S["tab_logging"] = {
     "callouts": [
-        {"match": "Log Directory:", "extend_right": 260, "label": "All CSV files land here (default ./logs)"},
-        {"match": "Sample cadence:", "extend_right": 180,
+        # badge left: the default top badge sat on the tab strip's
+        # "Oscilloscope (MSO24)" label (v1.4.4 build)
+        {"match": "Log Directory:", "extend_right": 260, "badge_side": "left",
+         "label": "All CSV files land here (default ./logs)"},
+        # extend_right reaches past the "= 1 Hz" hint, which the capsule's
+        # edge used to cut through.
+        {"match": "Sample cadence:", "extend_right": 220,
          "label": "Seconds between samples, or pick Hz for samples per second"},
-        # #30 re-measured at 175 % with Tk pinned to 96 dpi (capture.py's
-        # setup) but NOT from a capture run: re-check it against
-        # widgets.json at the next manual build.
-        {"rect": [28, 133, 341, 366], "badge_side": "right",
+        # Measured from the v1.4.4 capture's widgets.json (client area): the
+        # "Log Instruments:" label at y=135 down to the DMM box's bottom at
+        # y=462, clear of Start/Stop Logging at y=487. #30's scripted value
+        # ran its bottom edge through those two buttons.
+        {"rect": [27, 126, 338, 342], "badge_side": "right",
          "label": "Tick every source to record — one CSV per source"},
         {"match": "Start Logging", "label": "Opens fresh timestamped CSVs and starts sampling"},
         {"match": "Stop Logging", "label": "Closes the files and ends the run"},
@@ -238,6 +244,16 @@ S["tab_webcam"] = {
         {"match": "🔒 Apply & Lock", "label": "Locks what the boxes say, for every capture"},
         {"match": "Auto-set camera", "label": "One press: gain 0, exposure for mid-gray, white balance, then locks it all"},
         {"match": "▸ Advanced camera settings", "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
+    ],
+}
+
+# v1.4.4: the PREVIEW OFF splash (#385) made the tab taller than the capture
+# window, so its capture rows are annotated on the scrolled shot, as the
+# SLDEA tab's lower half is.
+S["tab_webcam_bottom"] = {
+    "callouts": [
+        {"union": ["Save to:", "New folder…"],
+         "label": "Where photos are saved; New folder… makes a fresh one inside it"},
         {"match": "Start interval", "badge_side": "right", "label": "Automatic photo every N seconds"},
         {"match": "Run sweep", "label": "Steps a sig-gen voltage, one photo per level"},
         {"match": "Start timed capture", "label": "Photos at chosen delays after t=0"},
@@ -257,11 +273,15 @@ S["tab_sldea"] = {
         # and comes after"). Trek inverts therefore stays OUT of the union.
         # The px→mm warning stays inline: it is the one field here that can
         # silently corrupt every area in the run.
+        # The film thickness row (#398, v1.4.4) joined the device fields
+        # under Concentration, and joins the capsule with them.
         {"union": ["DEA active area diam (mm):", "Electrode:",
-                   "Concentration (mL):"], "extend_right": 175,
+                   "Concentration (mL):", "Film thickness (µm):"],
+         "extend_right": 175,
          "label": "Defines the device: active-area diameter (sets the px→mm "
                   "scale — a wrong value corrupts every area), electrode "
-                  "material, ink concentration (greyed for non-inks)"},
+                  "material, ink concentration (greyed for non-inks), film "
+                  "thickness (mounted and prestretched)"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
     ],
@@ -302,11 +322,19 @@ S["tab_sldea_bottom"] = {
         # "later" is the failure mode `#248` exists to stop.
         {"match": "📊 Plot runs…", "badge_below": "Camera for this run",
          "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
+        # v1.4.4: the run row's right end (#386 Live view, #417 Video
+        # review). Grey here: the shot is taken with no video run ended.
+        {"match": "🎞 Video review…", "badge_below": "Camera for this run",
+         "label": "Video review of the last run that ended with a recording"},
+        {"match": "Live view…", "badge_below": "Camera for this run",
+         "label": "The camera during a run; it never opens the camera itself"},
         # Listed last rather than in screen order (it sits above the DRY RUN
         # row) so this entry stays clear of the DEA-diam callout that `#262`
         # is rewriting three lines up. Badge numbering follows list order, so
         # the presets capsule is numbered last on the shot — cosmetic only.
-        {"match": "Run configuration presets",
+        # Its badge goes top right: the default corner sat on Live view…
+        # once the run row grew a Video review button (#417, v1.4.4).
+        {"match": "Run configuration presets", "badge_side": "tr",
          "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
     ],
 }

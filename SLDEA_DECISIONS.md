@@ -3840,6 +3840,294 @@ the over-trip streak survives the gap.
 - **No bench gate:** there is no new instrument I/O; the change only
   withholds writes.
 
+## A ticked LIVE run waits at 0 V for a scope Reconnect in flight while it arms its watchdog, then arms as usual (2026-10-08)
+
+**TL;DR:** when a ticked LIVE run's scope Reconnect is still running as
+the run arms its breakdown watchdog, the run now waits for it at 0 V
+before its run clock starts. That covers the arming line and also the
+0 kV baseline, where such a Reconnect most likely lands. All the waits
+together last at most 25 s. A scope back in time gets the normal baseline
+and the watchdog arms as an on-time arming does. One rule covers the
+rest: a ticked LIVE run always arms, on the absolute rule |I| >= trip
+when its baseline gets fewer than 4 of its 8 reads or there is no scope
+at its arming line at all, and only a stop (■ Abort or the window
+closed) leaves it NOT ARMED. That supersedes `#406`'s NOT ARMED record
+for a run with no scope at its arming line. setup.txt says which rule
+the run armed on (`#423`, `#339`).
+
+**Observation.**
+
+- The worker builds the watchdog once, at its arming line, right after
+  the SG output goes on at 0 V, and only if `self.scope` is set there. A
+  scope Reconnect confirmed in a run's first seconds sets the handle to
+  None on the Tk thread at once and puts the new driver there from its
+  done callback. A run that reached the arming line in between never
+  armed; since `#406`'s HV review it says NOT ARMED.
+- Nothing told the worker that a Reconnect was in flight. The busy key
+  `connect` is shared by every instrument's connect, and `_run_bg` clears
+  it before the done callback sets the new handle, so a reader of the key
+  could see nothing in flight and no scope for a Reconnect that worked.
+- What a scope connect does (`TekMSO24()`): four USB transfers, each
+  bounded by `TekMSO24.TIMEOUT_MS` = 5 s (the `*IDN?` write and its
+  reply, and the two data-format writes). Its device clear fails at once
+  over USB: in the installed PyVISA-py 0.8.1 the USB session does not
+  implement it (the base `Session.clear` returns
+  `error_nonsupported_operation`), and the driver swallows the error.
+  Closing the old session and finding the USB device are not bounded by
+  the timeout, and no bench session has timed them.
+- The first attempt at `#423` (branch `archive/423-late-arming-2026-10-08`,
+  dropped) armed late, from inside the run loop, while the run was still
+  at 0 kV before its first step. Its HV review found that it cannot arm
+  on the bench. The late baseline's ten reads had to finish before the
+  first step, 2 s into the run clock, which holds only for reads under
+  about 0.067 s. One `measure_raw` takes about 0.13 s on the bench: per-run
+  medians of 104 to 141 ms in nine bench telemetry.csv files (rows with a
+  V_Out read minus rows without one; the run.log baseline spans agree).
+  The only late arming the bench could complete was blind: the scope
+  dropped again mid-baseline, the run armed on 1 of 8 reads, and it was
+  recorded as armed. A hung read could skip the first ramp, and the tests
+  could not tell a learned baseline from none, because the fake read
+  0 µA at 0 kV.
+
+**Decision (owner, 2026-10-08; `#423`).**
+
+1. The wait happens at the arming line, before the run clock starts.
+   Only a ticked LIVE run whose scope is gone there waits, and only while
+   the scope's own Reconnect is in flight. The SG is on at 0 V, as it
+   always is there (DC, offset 0, output on), and nothing writes its
+   offset until the run loop. The profile, the stills, the video (the
+   recorder keeps nothing before `set_t0`) and telemetry all start with
+   the run clock, so none of their timing moves, and there is no
+   read-time window. No Reconnect in flight means no wait: the run goes
+   on exactly as before.
+2. The signal is `_scope_reconnecting`. `_reconnect` sets it on the Tk
+   thread just before it drops the scope handle and clears it in its done
+   callback just after the new handle is in place (after a failed
+   connect, before the error box). At the arming line the worker reads
+   the handle, then the flag; in the wait, the flag, then the handle. So
+   a dropped handle always comes with the flag set, and a cleared flag
+   means the next handle read is the Reconnect's outcome. These are plain
+   attribute reads, as the worker already makes of the handle, with no
+   lock.
+3. The bound is `SLDEA_SCOPE_WAIT_S` = 25 s: 20 s for the four 5 s
+   transfers of a connect that succeeds, plus 5 s of margin for the close
+   and the USB discovery, which are untimed. The wait polls every 0.1 s
+   (`SLDEA_POLL_S`), ■ Abort ends it within a poll, and the run then ends
+   at 0 V through the normal shutdown. The status line counts the wait.
+4. When the scope is back, the on-time baseline code runs on the new
+   scope: a 0.5 s settle, ten reads 0.1 s apart with the first two
+   discarded, the median of at least four, and the credibility bound.
+   The `#219` shadow starts from it as at an on-time arming. (The first
+   version left a run NOT ARMED when a first wait ended without the
+   scope, or when the baseline after a wait got fewer than four reads;
+   decisions 10 and 7 reverse both.)
+5. Records. run.log says when the run starts waiting, how long it may,
+   and when the scope is back. A run that waited and armed then gets
+   `breakdown watchdog ARMED after <t> s of waiting at 0 V for the scope
+   Reconnect; ...` after the usual baseline line. setup.txt keeps the
+   start line "Energize HV?" was worded from, and gets one ASCII
+   `Breakdown watchdog (scope wait): <t> s at 0 V for a scope Reconnect
+   <where>; <how it ended>` row per wait. (A first wait that ended
+   without the scope got `#406`'s NOT ARMED records in the first
+   version; decision 11 has what it gets now.)
+
+**HV review, same day (2026-10-08).** An adversarial review of the change
+above (`45c26ef`), reproduced on the real sldea_run and worker over the
+scope-lock suite's fakes.
+
+*Observation.*
+
+- After a wait, a short baseline left the run NOT ARMED where an on-time
+  arming falls back to the absolute rule. With the scope back, gone again
+  during the baseline and back once more reading 120 µA on the ramp,
+  nothing tripped, although the scope was read 6 times on the ramp. The
+  same drop on an on-time arming armed on the absolute rule and tripped
+  at 120 µA once the scope answered.
+- On the fakes the worker reaches the arming line about 0.5 s after Run,
+  and the baseline then takes about 2.8 s at 0.13 s reads. Opening the
+  Oscilloscope tab and answering "Scope in use" takes longer than 0.5 s,
+  so a Reconnect pressed in a run's first seconds most likely lands in
+  the baseline, not before the arming line. Inferred, not bench-timed.
+- The baseline loop did not look at the stop flag: Abort or the window
+  closing waited out all ten reads, up to 10 x 5 s on a scope that times
+  out on each.
+- The records said "Abort was pressed" also when the window was closed:
+  `_on_app_close` sets the same flag. An on-time short baseline left
+  setup.txt saying "baseline learned at 0 kV".
+- The tests missed a connect that fails during the wait and the order of
+  the Reconnect's writes: five of the reviewer's eight mutants survived.
+
+*Decision (owner, 2026-10-08).*
+
+6. A Reconnect in flight during the baseline is waited for too. When the
+   baseline ends with fewer than 4 good reads and `_scope_reconnecting`
+   is set, the run waits at 0 V again and then takes the whole baseline
+   again, still before the run clock starts. One bound covers every wait:
+   all of them end within `SLDEA_SCOPE_WAIT_S` of the first one's start,
+   and no new wait starts once it is spent.
+7. A baseline still short of reads (fewer than 4 of 8), on time or after
+   a wait, arms on the absolute rule |I| >= trip. This reverses the first
+   review's advice to leave such a run NOT ARMED. The absolute rule reads
+   whatever scope there is on every 0.5 s tick and trips as soon as one
+   answers, and reads that keep failing raise the 10 s CURRENT MONITORING
+   LOST alarm. A NOT ARMED run with telemetry off reads nothing and raises
+   no alarm. The cost is precision at a non-zero rest offset: at the
+   07-29 era's −16 µA, a 100 µA absolute trip is 84 µA one way and
+   116 µA the other.
+8. The baseline checks the stop flag before each read, so Abort or the
+   window closing ends it at once, and no baseline verdict is logged for
+   a run that is over.
+9. Records. A run that fell back gets the existing run.log line
+   `watchdog baseline unavailable (<n>/8 reads ok) — absolute trip ...`
+   and a new ASCII setup.txt row, `Breakdown watchdog (start): armed on
+   the absolute rule |I| >= <trip> uA; only <n> of 8 0 kV reads
+   answered`, so setup.txt no longer claims a learned baseline it did not
+   get. A re-wait logs `breakdown watchdog: only <n> of the 8 baseline
+   reads at 0 kV answered, and a scope Reconnect is running, so the run
+   waits for it here at 0 V, up to <t> s more ...`, and its setup.txt row
+   says `after only <n> of 8 0 kV baseline reads answered`. A stopped wait
+   says "the run was stopped (Abort or the window closed)": both set the
+   same flag, and telling them apart would take new state for a record
+   only.
+
+**Owner decision, same day (2026-10-08): one rule.** After the HV
+re-check of `713208c`.
+
+*Observation.*
+
+- With decisions 1 to 9, a ticked LIVE run with no scope at its arming
+  line (a first wait that ended 'failed' or 'timeout', or no Reconnect in
+  flight, for example one that had already failed) still went on NOT
+  ARMED, as `#406` decided. With telemetry off it then took no monitor
+  reads at all: a scope that a later Reconnect brought back was read only
+  at the snapshots, and nothing could trip.
+- The reviewer's E6, an armed watchdog with no scope: each tick's read
+  raises on the None handle, is caught, is logged once ("⚠ monitor scope
+  read failed"), and counts toward the 10 s CURRENT MONITORING LOST
+  alarm, which only logs. The next tick reads `self.scope` afresh, so a
+  later successful Reconnect is picked up. In this branch's test of it,
+  with the first Reconnect failing at the arming line and a second
+  pressed 11.5 s into the run clock: the alarm at +10.0 s, monitoring
+  recovered at +12.2 s, the trip at 120 µA at +13.2 s (1.1 s after the
+  recovery, the 1 s confirm), and BREAKDOWN-ABORT at +13.5 s.
+- The re-check's low finding: a Reconnect that finishes before the
+  baseline ends has already cleared the flag, so nothing waits, and a
+  short baseline with a fresh scope in place fell back to the absolute
+  rule instead of being taken again. That costs precision, not
+  protection.
+
+*Decision (owner, 2026-10-08).*
+
+10. One rule: a ticked LIVE run always arms. With a usable 0 kV
+    baseline it trips on |I − baseline|; with no usable baseline, or no
+    scope at its arming line at all, on the absolute rule |I| >= trip.
+    Only a stop (■ Abort or the window closed, or a check before the HV
+    such as the video codec check) leaves it NOT ARMED: during a wait, or
+    before the arming line with no scope there. This supersedes `#406`'s
+    decision 8 (run on NOT armed) for the no-scope case. A run with no
+    scope at its arming line takes no baseline (nothing could answer it).
+    A ticked LIVE run with no scope when ▶ Run is pressed is unchanged:
+    "Energize HV?" says OFF (no scope to read the current) and it does
+    not arm.
+11. Records, `sldea_profile.absolute_no_scope_record`: run.log says `⚠
+    breakdown watchdog armed on the absolute rule |I| >= <trip> uA with
+    no scope at the arming line: nothing is read until a scope Reconnect
+    succeeds, and the monitoring-lost alarm fires after 10 s`, and
+    setup.txt gets `Breakdown watchdog (start): armed on the absolute rule
+    |I| >= <trip> uA; no scope at the arming line`. A wait that ended
+    without the scope logs how it ended first. The NOT ARMED wording is
+    kept only for a stop (`stopped_not_armed_record`): `NOT armed (stopped
+    while waiting for the scope)` or `NOT armed (stopped before the arming
+    line)`. `#406`'s "(a Reconnect?)" warning and its `NOT armed (no
+    scope)` row are gone. The armed-after-waiting line no longer says "as
+    at any arming"; it is written only after a baseline was taken.
+12. The `#219` shadow runs as it does at any arming without a baseline:
+    it is built with no 0 kV location (`base_loc` None), reads nothing
+    while there is no scope, and once a scope answers it seeds its window
+    from settled landing reads before it judges any. So a fault already
+    present when the scope comes back is learned as normal by the shadow;
+    the fixed rule's absolute trip is what catches it (E6's 120 µA).
+13. A baseline short of reads, with the flag clear but a different scope
+    session in place than the one it started on (a Reconnect finished
+    during it), is taken once more on that session, within the one bound.
+    One retake only; a second short baseline falls back to the absolute
+    rule. run.log and setup.txt (`Breakdown watchdog (retake): ...`) say
+    so.
+
+**What it costs.** A run that waits holds the Trek at 0 kV with the SG
+output on for up to 25 s longer before its first frame; the status line
+and run.log say why. A run that falls back to the absolute rule trips at
+|I| >= trip whatever the rest offset. A run armed with no scope reads
+nothing until a scope Reconnect succeeds, and its 10 s CURRENT
+MONITORING LOST alarm only logs. The remaining exposure is the one any
+armed run has: a returning scope that answers slowly can hold the run
+thread, the one that writes the SG, for up to 5 s per transfer
+(`TekMSO24.TIMEOUT_MS`). The "Scope in use" question still tells the
+operator to abort and reconnect when the run started only seconds ago;
+it is unchanged.
+
+**Tests.** `tests/test_sldea_watchdog_reconnect_wait.py` (21 tests)
+drives the real sldea_run, worker, `_reconnect` and `_run_bg`: connects
+run on their own thread and their done callbacks on a pumped "Tk"
+thread. Reads take 0.13 s and the scope reads 7 µA at 0 kV.
+
+- Scope back 1 s after the press: no offset write until the new scope's
+  ten baseline reads are done, a 7.0 µA baseline, the shadow built from
+  (7.0, 0.0), and a trip at 120 µA over the 100 µA trip. At −95 µA it
+  trips too, which only a watchdog holding the 7 µA baseline can
+  (|−95 − 7| = 102, |−95| = 95).
+- A connect that fails 0.5 s into the wait ends it then, and one that
+  never finishes ends it at the bound; either way the run arms on the
+  absolute rule with no scope and says so. A scope back between two
+  polls, with the bound passed in between, still counts as back.
+- The reviewer's E6: a first Reconnect that fails at the arming line,
+  then a second 11.5 s into the run clock bringing back a scope at
+  120 µA. The monitoring-lost alarm at +10.0 s, monitoring recovered at
+  +12.2 s, the trip at +13.2 s and BREAKDOWN-ABORT at +13.5 s; the
+  shadow built with no baseline.
+- The Reconnect's writes, recorded in order: the flag up before the
+  handle is dropped, the new handle in before the flag goes down, the
+  flag down before a failed connect's error box, and nothing for another
+  instrument.
+- A Reconnect at an on-time baseline's fourth read: a re-wait, the
+  baseline again on the new scope, and a trip at −95 µA. A second
+  Reconnect during a waited baseline: armed after two waits, a trip at
+  120 µA. A 3 s bound: the re-wait gets only what is left, and the run
+  arms on the absolute rule with the row that says so.
+- A short baseline, on time and after a wait: the absolute rule, its
+  setup.txt row, and a trip at 120 µA once the scope answers again.
+- Abort 0.3 s into a wait: over in under 1 s at 0 V, NOT ARMED. Abort
+  at the second of ten 1 s baseline reads: over in under 1.6 s, with no
+  verdict. Abort before the arming line with no scope: the SG never
+  switched on, NOT ARMED (stopped before the arming line).
+- A Reconnect that failed before the arming line means no wait, and
+  the absolute rule with no scope. An on-time arming is unchanged.
+- A session that stops answering at the fourth baseline read and a new
+  one in place by the last: one retake on it, and a trip at −95 µA. A
+  second such drop: no second retake, the absolute rule.
+- Mutants for decisions 10 to 13, all four killed: a run with no scope
+  left NOT ARMED, a run armed after a stopped wait, no retake, and a
+  baseline taken with no scope.
+- Mutants, run at `713208c` (before decisions 10 to 13): the reviewer's
+  runner, with its anchors moved to the fixed code, plus eight for
+  that round's paths. All 16 are killed. The
+  reviewer's M1 to M8 are the flag's two write orders, no clear on a
+  failed connect, no 'failed' end, arming after any wait, the bound
+  checked before 'back', and the shadow losing its baseline after a
+  wait; their M4 disabled the NOT ARMED branch decision 7 removed, so
+  its inverse puts that branch back. M9 to M16 are a baseline blind to
+  Abort, no re-wait, a bound per wait instead of one, no fallback row,
+  no first wait, the waited arming or every arming dropping its
+  baseline, and a wait blind to Abort.
+- `#406`'s NOT ARMED test in `test_sldea_watchdog_default` is now
+  `test_a_scope_lost_before_the_arming_line_arms_on_the_absolute_rule`:
+  the scope it drops before the arming line (no Reconnect marked, so no
+  wait) comes back 0.3 s later and trips the run at 120 µA, where that
+  run used to go to its end. Decision 10's tests fail on `713208c`.
+
+**Bench.** No new instrument I/O: the waits read two attributes, and the
+baseline is the existing reads. The `#369` HV section gets a line for it.
+
 ## A LIVE run asks before the scope's Reconnect closes the session its watchdog reads (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab's Reconnect used to

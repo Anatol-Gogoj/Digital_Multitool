@@ -1550,6 +1550,137 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
               "the end of the run does.")
 
 
+# How a wait for a scope Reconnect can end (#423): the scope came back,
+# the Reconnect ended without one, the one bound ran out, or the run was
+# stopped (■ Abort, or the window closing, which sets the same flag).
+SCOPE_WAIT_ENDS = {
+    'back': "the scope came back",
+    'failed': "the Reconnect failed",
+    'timeout': "still running at the {limit:g} s limit",
+    'aborted': "the run was stopped (Abort or the window closed)",
+}
+
+
+def scope_wait_start_line(limit_s, left_s, good=None):
+    """run.log's line as a ticked LIVE run starts waiting at 0 V for a
+    scope Reconnect in flight (#423): at the arming line (`good` None), or
+    again after a 0 kV baseline that got only `good` of its 8 reads, with
+    `left_s` left of the one `limit_s` bound for every wait."""
+    if good is None:
+        return (f"breakdown watchdog: the scope Reconnect is still running, "
+                f"so the run waits for it here at 0 V, up to {limit_s:g} s, "
+                f"before it arms. ■ Abort ends the run.")
+    return (f"breakdown watchdog: only {good} of the 8 baseline reads at "
+            f"0 kV answered, and a scope Reconnect is running, so the run "
+            f"waits for it here at 0 V, up to {left_s:.1f} s more (one "
+            f"{limit_s:g} s bound for every wait), then takes the baseline "
+            f"again. ■ Abort ends the run.")
+
+
+def scope_wait_lines(outcome, waited_s, limit_s, good=None):
+    """(log_line, setup_rows) for how one wait ended (#423).
+
+    `good` as in scope_wait_start_line. Every wait gets one ASCII
+    `Breakdown watchdog (scope wait):` row, because setup.txt is written in
+    the locale encoding. run.log gets a line too, except for a first wait
+    stopped by Abort or the window closing, where stopped_not_armed_record
+    says it (log_line is None there)."""
+    if outcome not in SCOPE_WAIT_ENDS:
+        raise ValueError(f"unknown scope wait outcome {outcome!r}")
+    w = f"{waited_s:.1f} s"
+    end = SCOPE_WAIT_ENDS[outcome].format(limit=limit_s)
+    where = ("at the arming line" if good is None else
+             f"after only {good} of 8 0 kV baseline reads answered")
+    row = (f"Breakdown watchdog (scope wait): {w} at 0 V for a scope "
+           f"Reconnect {where}; {end}")
+    if outcome == 'back':
+        log = (f"breakdown watchdog: the scope is back after a {w} wait at "
+               f"0 V; taking the 0 kV baseline now")
+    elif outcome == 'aborted':
+        log = (None if good is None else
+               f"breakdown watchdog: waited {w} at 0 V for the scope "
+               f"Reconnect: the run was stopped (■ Abort or the window "
+               f"closed). It ends here, at 0 V.")
+    elif good is None:
+        log = (f"breakdown watchdog: waited {w} at 0 V for the scope "
+               f"Reconnect: {end}.")
+    else:
+        log = (f"breakdown watchdog: waited {w} at 0 V for the scope "
+               f"Reconnect: {end}. The baseline stays short, so the "
+               f"absolute rule follows.")
+    return log, [row]
+
+
+def absolute_no_scope_record(trip_ua):
+    """(log_line, setup_rows) for a ticked LIVE run with no scope at its
+    arming line, armed on the absolute rule all the same (owner decision
+    2026-10-08, #423, superseding #406's run-on-NOT-armed for this case).
+    Its ticks fail their reads until a scope Reconnect succeeds, which
+    raises the 10 s CURRENT MONITORING LOST alarm, and the first tick
+    after one reads the new scope. ASCII row for setup.txt."""
+    return (f"⚠ breakdown watchdog armed on the absolute rule |I| >= "
+            f"{trip_ua:g} uA with no scope at the arming line: nothing is "
+            f"read until a scope Reconnect succeeds, and the "
+            f"monitoring-lost alarm fires after 10 s",
+            [f"Breakdown watchdog (start): armed on the absolute rule |I| >= "
+             f"{trip_ua:g} uA; no scope at the arming line"])
+
+
+def stopped_not_armed_record(waited_s=None):
+    """(log_line, setup_rows) for a ticked LIVE run stopped (■ Abort, the
+    window closed, or a check before the HV) before its watchdog could
+    arm: during a wait for a scope Reconnect (`waited_s`), or before the
+    arming line with no scope there (None). The only way a ticked LIVE run
+    is left NOT armed (owner decision 2026-10-08, #423). ASCII row."""
+    head = "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — "
+    said = "Energize HV? and the start line said ON."
+    if waited_s is not None:
+        return (head + f"the run was stopped (■ Abort or the window closed) "
+                f"after a {waited_s:.1f} s wait at 0 V for the scope "
+                f"Reconnect. It ends here, at 0 V. " + said,
+                ["Breakdown watchdog (start): NOT armed (stopped while "
+                 "waiting for the scope)"])
+    return (head + "the run was stopped (■ Abort, the window closed, or a "
+            "check before the HV) before its arming line, with no scope "
+            "there. It ends here, at 0 V. " + said,
+            ["Breakdown watchdog (start): NOT armed (stopped before the "
+             "arming line)"])
+
+
+def baseline_retake_line(good):
+    """(log_line, setup_rows) for a 0 kV baseline taken once more because a
+    scope Reconnect finished during it and only `good` of its 8 reads
+    answered (#423 HV re-check): the new session is there, so a baseline
+    can still be learned, within the one wait bound."""
+    return (f"breakdown watchdog: only {good} of the 8 baseline reads at "
+            f"0 kV answered, and a scope Reconnect put a new session in "
+            f"place during them, so the run takes the baseline again on it",
+            [f"Breakdown watchdog (retake): only {good} of 8 0 kV reads "
+             f"answered and a new scope session came up during them; "
+             f"baseline taken again"])
+
+
+def scope_wait_armed_line(total_s, n_waits):
+    """run.log's line for a run that waited for a scope Reconnect and then
+    armed from a baseline it took (#423), after the line that says what
+    that baseline came to: learned, refused, or too short (the absolute
+    rule). A run with no scope at its arming line gets
+    absolute_no_scope_record instead."""
+    return (f"breakdown watchdog ARMED after {total_s:.1f} s of waiting at "
+            f"0 V for the scope Reconnect"
+            + (f" ({n_waits} waits)" if n_waits > 1 else "")
+            + "; the line above says what its 0 kV baseline came to")
+
+
+def absolute_fallback_line(trip_ua, good):
+    """setup.txt's ASCII row for a run whose 0 kV baseline got fewer than
+    4 of its 8 reads, on time or after a wait, and so armed on the
+    absolute rule (owner decision 2026-10-08, #423). The start line's
+    "baseline learned at 0 kV" plan did not happen; this row says so."""
+    return (f"Breakdown watchdog (start): armed on the absolute rule |I| >= "
+            f"{trip_ua:g} uA; only {good} of 8 0 kV reads answered")
+
+
 # The #219 N-sigma rule's defaults, chosen on the 18 single-layer runs
 # replayed on 2026-10-08 (SLDEA_DECISIONS.md, "The N-sigma breakdown rule
 # runs in shadow"): no false trip on any healthy run and none on the three
@@ -1613,9 +1744,10 @@ class NSigmaWatchdog:
     baseline, settled landing reads seed the window unjudged until it
     holds `w_min` of them; a fault present from the first landing is then
     taken as normal. The fixed rule catches that only on a run where it is
-    armed (its absolute |I| rule, when its baseline read failed). On a run
-    whose watchdog is not armed (the box unticked, or no scope at its
-    arming line) nothing does, so such a run's "no trip" is no evidence;
+    armed (its absolute |I| rule, when its baseline read failed or there
+    was no scope at its arming line, #423). On a run whose watchdog is not
+    armed (the box unticked, or no scope at Run) nothing does, so such a
+    run's "no trip" is no evidence;
     only its would-trips are (HV review 2026-10-08). (The desk
     prototype of 2026-10-08 judged reads before it had anything to judge
     them by, so without a baseline its window never filled.)"""

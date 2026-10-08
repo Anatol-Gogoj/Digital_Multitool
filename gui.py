@@ -754,6 +754,13 @@ class InstrumentControlGUI:
         # Keys of background instrument operations in flight (issue #40) --
         # guards against double-starting a connect/capture from the UI.
         self._bg_busy = set()
+        # True while the scope's own Reconnect is in flight, from just
+        # before its handle goes to just after the new one is in place:
+        # what a ticked LIVE run waits for while it arms its watchdog, at
+        # the arming line or after a baseline cut short (#423). The
+        # 'connect' key above is shared by every instrument's connect and
+        # is cleared before the done callback sets the handle.
+        self._scope_reconnecting = False
 
         # LCR sweep state (worker thread + thread-safe UI queue)
         self.sweeping = False
@@ -1346,6 +1353,18 @@ class InstrumentControlGUI:
                                 "(confirmed) — no kV/µA readings until its "
                                 "new session is open")
         old = getattr(self, key)
+        # The scope's Reconnect is marked in flight BEFORE its handle goes
+        # (#423): a ticked LIVE run that is arming its watchdog meanwhile
+        # waits for it at 0 V. At its arming line it reads the handle and
+        # then this mark, so a handle it finds gone always comes with the
+        # mark already set; a baseline cut short reads the mark alone.
+        # done() clears the mark only after the new handle is in place,
+        # and the waiting run reads the mark and then the handle, so a
+        # cleared mark means the handle it reads next is the Reconnect's
+        # outcome. Plain attribute writes on this thread and
+        # reads on the worker's, as for the handle itself.
+        if key == 'scope':
+            self._scope_reconnecting = True
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")
 
@@ -1358,18 +1377,22 @@ class InstrumentControlGUI:
             return cls()
 
         def done(inst, error):
+            if not error:
+                setattr(self, key, inst)
+            if key == 'scope':
+                self._scope_reconnecting = False   # after the handle
             if error:
                 label.config(text=f"Error: {error}", fg="red")
                 messagebox.showerror("Connection Error", str(error))
                 return
-            setattr(self, key, inst)
             label.config(
                 text=f"Connected ({self._transport(inst)}): {inst.idn}",
                 fg="green")
             if sync:
                 sync()
 
-        self._run_bg(work, done, busy='connect')
+        if not self._run_bg(work, done, busy='connect') and key == 'scope':
+            self._scope_reconnecting = False       # never started
     
     def show_lcr_tips(self):
         """Show LCR meter tips"""
@@ -3089,6 +3112,18 @@ LOGGING:
     # logged NO FRAME. Neither ever blocks the loop.
     SLDEA_STAMP_LEAD_S = 0.6
     SLDEA_STILL_WAIT_S = 1.5
+
+    # A ticked LIVE run that reaches its watchdog's arming line while the
+    # scope's Reconnect is still in flight waits for it at 0 V, before the
+    # run clock starts, for at most this long (#423). A connect that
+    # succeeds makes four USB transfers, each bounded by
+    # TekMSO24.TIMEOUT_MS = 5 s: the *IDN? write and its reply, and the
+    # two data-format writes. Its device clear fails at once over USB
+    # (PyVISA-py 0.8.1's USB session does not implement it, and the
+    # driver swallows the error). So 20 s. Closing the old session and
+    # finding the USB device are not bounded by that timeout, and no bench
+    # session has timed them: the 5 s on top is margin, not a measurement.
+    SLDEA_SCOPE_WAIT_S = 25.0
 
     def create_sldea_tab(self):
         _tab = ScrollableTab(self.notebook)
@@ -6152,29 +6187,124 @@ LOGGING:
                 self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
                 self.sg.set_output(sgch, True)
 
+            # Arming the breakdown watchdog. One rule (owner decision
+            # 2026-10-08, #423): a ticked LIVE run always arms, and only a
+            # stop (■ Abort, or the window closed) leaves it NOT armed. With
+            # a usable 0 kV baseline it trips on |I - baseline|; with no
+            # usable baseline, or no scope at all, on the absolute rule
+            # |I| >= trip, and the records say which. An armed tick with no
+            # scope fails its read, which counts toward the 10 s CURRENT
+            # MONITORING LOST alarm, and the next tick reads self.scope
+            # afresh, so a scope a later Reconnect brings back is watched.
+            #
+            # A scope Reconnect in flight while the run arms (a LIVE
+            # Reconnect confirmed in the run's first seconds, #339) is
+            # waited for, at 0 V, before the run clock starts, with the SG
+            # on at 0 V as above. Only a ticked LIVE run waits, only for the
+            # scope's own Reconnect (_scope_reconnecting, set on the Tk
+            # thread before the handle goes and cleared after the new one
+            # is in place), and all its waits together last at most
+            # SLDEA_SCOPE_WAIT_S from the first one's start. ■ Abort ends a
+            # wait within one poll. It waits at the arming line when the
+            # scope is gone there, and again when the 0 kV baseline below
+            # comes up short while a Reconnect runs (the likelier case: the
+            # baseline takes about 2.8 s at the bench's 0.13 s reads), then
+            # takes the baseline again. Nothing in the profile, the stills,
+            # the video or telemetry moves: none of them starts before the
+            # run clock. No Reconnect in flight, no wait.
+            waits = []                # #423: (outcome, seconds) per wait
+            wait_from = [None]        # ...when the first one began
+
+            def note(line=None, rows=()):
+                """run.log and setup.txt for one step of the arming (#423),
+                written here, at 0 V, before the run clock starts. ASCII
+                rows: setup.txt is written in the locale encoding."""
+                if line:
+                    self._sldea_log(line)
+                if rows:
+                    try:
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write("".join(r + "\n" for r in rows))
+                    except OSError:
+                        pass
+
+            def wait_for_scope(good=None):
+                """Wait at 0 V while the scope's own Reconnect is in flight
+                -> 'back', 'failed', 'timeout' or 'aborted' (#423). `good`
+                is None at the arming line, else how many 0 kV reads the
+                baseline got before this wait. One bound for all waits."""
+                limit = float(self.SLDEA_SCOPE_WAIT_S)
+                w0 = time.monotonic()
+                if wait_from[0] is None:
+                    wait_from[0] = w0
+                note(sldea_profile.scope_wait_start_line(
+                    limit, limit - (w0 - wait_from[0]), good))
+                shown = None
+                while True:
+                    # The mark first, then the handle: _reconnect's done()
+                    # sets the handle before it clears the mark, so with
+                    # the mark read clear, the handle read next is final.
+                    connecting = getattr(self, '_scope_reconnecting', False)
+                    now = time.monotonic()
+                    if self._sldea_stop:
+                        outcome = 'aborted'
+                    elif self.scope is not None:
+                        outcome = 'back'
+                    elif not connecting:
+                        outcome = 'failed'
+                    elif now - wait_from[0] >= limit:
+                        outcome = 'timeout'
+                    else:
+                        if shown != int(now - wait_from[0]):
+                            shown = int(now - wait_from[0])
+                            self._sldea_set_status(
+                                f"LIVE  waiting at 0 V for the scope "
+                                f"Reconnect: {shown}/{limit:g} s",
+                                fg='#a01010')
+                        time.sleep(self.SLDEA_POLL_S)
+                        continue
+                    break
+                waits.append((outcome, now - w0))
+                note(*sldea_profile.scope_wait_lines(
+                    outcome, now - w0, limit, good))
+                return outcome
+
+            def bound_left():
+                """True while the one wait bound has time left (#423)."""
+                return (wait_from[0] is None
+                        or time.monotonic() - wait_from[0]
+                        < float(self.SLDEA_SCOPE_WAIT_S))
+
+            if (wd_on and not dry and self.scope is None
+                    and not self._sldea_stop
+                    and getattr(self, '_scope_reconnecting', False)):
+                wait_for_scope()
+            # Armed unless the run was stopped: during a wait, or before
+            # this line with no scope here (an Abort or a check before the
+            # HV; the SG was never switched on then). A stopped run that
+            # does have its scope builds the watchdog as it always has; its
+            # run loop never starts.
+            stopped_unarmed = bool(
+                (waits and waits[-1][0] == 'aborted')
+                or (self._sldea_stop and self.scope is None))
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
-                        if (wd_on and not dry and self.scope) else None)
-            # Asked to arm, and could not: the scope went (a LIVE Reconnect
-            # confirmed in the run's first seconds, #339) after "Energize
-            # HV?", run.log's start line and setup.txt all said ON. The run
-            # goes on unwatched (owner decision 2026-10-08, HV review of
-            # #406), and the records say so, the way the telemetry branch
-            # above does for its own file. ASCII in setup.txt, which is
-            # written in the locale encoding.
-            if wd_on and not dry and watchdog is None:
-                self._sldea_log(
-                    "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope was gone "
-                    "when the run reached the arming line (a Reconnect?). "
-                    "Nothing stops this run on a breakdown; only ■ Abort or "
-                    "the end of the run does. Energize HV? and the start "
-                    "line said ON.")
-                try:
-                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
-                        sf.write("Breakdown watchdog (start): NOT armed (no "
-                                 "scope)\n")
-                except OSError:
-                    pass
-            if watchdog is not None and not self._sldea_stop:
+                        if (wd_on and not dry and not stopped_unarmed)
+                        else None)
+            # No scope here (a Reconnect that failed or ran out, or one
+            # that failed before this line): armed on the absolute rule
+            # with nothing to read yet, and no baseline to take. This
+            # supersedes #406's run-on-NOT-armed for that case. Read once,
+            # so the records and the baseline below agree.
+            no_scope = watchdog is not None and self.scope is None
+            if no_scope:
+                note(*sldea_profile.absolute_no_scope_record(wd_ua))
+            elif wd_on and not dry and watchdog is None:
+                note(*sldea_profile.stopped_not_armed_record(
+                    waits[-1][1] if waits else None))
+            based = False             # a baseline was taken to a verdict
+            if watchdog is not None and not no_scope \
+                    and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29
                 # campaign sat on a stiff −16 µA instrument offset that
@@ -6185,17 +6315,48 @@ LOGGING:
                 # the first reads ride that transient — 0.5 s plus two
                 # discarded reads keep it out of the median (review
                 # 2026-08-04).
-                time.sleep(0.5)
-                base = []
-                for k in range(10):
-                    try:
-                        mi, _st = self.scope.measure_raw('MEAN', ich)
-                    except Exception:
-                        mi = None
-                    if k >= 2 and mi is not None:
-                        base.append(measured_ua(mi))
-                    time.sleep(0.1)
-                if len(base) >= 4:
+                retaken = False
+                while True:
+                    time.sleep(0.5)
+                    base = []
+                    took_from = self.scope
+                    for k in range(10):
+                        # Abort, or the window closing, ends the baseline
+                        # at once: ten reads can take 10 x 5 s on a scope
+                        # that times out (#423 HV review, 2026-10-08).
+                        if self._sldea_stop:
+                            break
+                        try:
+                            mi, _st = self.scope.measure_raw('MEAN', ich)
+                        except Exception:
+                            mi = None
+                        if k >= 2 and mi is not None:
+                            base.append(measured_ua(mi))
+                        time.sleep(0.1)
+                    if len(base) >= 4 or self._sldea_stop:
+                        break
+                    # Short, with the scope's Reconnect in flight and time
+                    # left in the one bound: wait for it, then take the
+                    # whole baseline again (#423).
+                    if getattr(self, '_scope_reconnecting', False):
+                        if bound_left() \
+                                and wait_for_scope(len(base)) == 'back':
+                            continue
+                        break
+                    # Short, and a Reconnect already put a new session in
+                    # place during these reads: take the baseline once more
+                    # on it, within the bound (#423 HV re-check).
+                    fresh = self.scope
+                    if (fresh is not None and fresh is not took_from
+                            and not retaken and bound_left()):
+                        retaken = True
+                        note(*sldea_profile.baseline_retake_line(len(base)))
+                        continue
+                    break
+                if self._sldea_stop:
+                    pass              # the run is over: no baseline verdict
+                elif len(base) >= 4:
+                    based = True
                     base.sort()
                     n = len(base)
                     med = (base[n // 2] if n % 2 else
@@ -6226,10 +6387,23 @@ LOGGING:
                             f"credible 0 kV rest level — keeping absolute "
                             f"trip |I| ≥ {wd_ua:g} µA")
                 else:
+                    based = True
+                    # Too few reads, on time or after a wait: the absolute
+                    # rule (owner decision 2026-10-08, #423). It reads
+                    # whatever scope there is on every tick and trips as
+                    # soon as one answers, and reads that keep failing
+                    # raise the 10 s CURRENT MONITORING LOST alarm. It
+                    # costs precision at a non-zero rest level. setup.txt
+                    # says so, so it does not claim a learned baseline.
                     self._sldea_log(
                         f"watchdog baseline unavailable ({len(base)}/8 "
                         f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
                         f"for {wd_s:g}s")
+                    note(rows=[sldea_profile.absolute_fallback_line(
+                        wd_ua, len(base))])
+            if waits and based:
+                note(sldea_profile.scope_wait_armed_line(
+                    sum(w for _o, w in waits), len(waits)))
             # #219: the N-sigma rule in SHADOW on a LIVE run whose monitor
             # reads run (the watchdog armed, or telemetry on): the same
             # wd_on and tel_on sldea_run worded its setup.txt line from,

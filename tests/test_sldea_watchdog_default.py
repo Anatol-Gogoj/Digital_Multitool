@@ -269,14 +269,20 @@ def test_a_ticked_live_run_arms_it_as_before_and_records_on():
         assert not any('NOT ARMED' in ln for ln in app.lines), app.lines
 
 
-def test_a_scope_lost_before_the_arming_line_is_recorded_not_armed():
-    """HV review 2026-10-08, finding 2; the owner chose to run on and say
-    so. A LIVE Reconnect confirmed in the run's first seconds (#339): the
+def test_a_scope_lost_before_the_arming_line_arms_on_the_absolute_rule():
+    """A LIVE Reconnect confirmed in the run's first seconds (#339): the
     scope is gone where the worker resolves the camera, before its arming
-    line, and back 0.3 s later. The run goes on unwatched, as before, and
-    at 120 uA over the 100 uA trip nothing stops it; now run.log carries
-    the NOT ARMED warning and setup.txt an ASCII line, while the start
-    records still say ON, as "Energize HV?" did."""
+    line, and back 0.3 s later. #406's HV review made such a run go on
+    NOT ARMED and say so; at 120 uA over the 100 uA trip nothing stopped
+    it. Owner decision 2026-10-08 (#423) replaces that with one rule: a
+    ticked LIVE run always arms, here on the absolute rule with no scope
+    at the arming line, and its records say exactly that. The scope back
+    0.3 s later is read by the next tick, and the 120 uA on the ramp trips
+    it. The start records still say ON, as "Energize HV?" did.
+
+    This stand-in drops the handle without marking a Reconnect in flight,
+    so nothing is waited for (#423's waits are in
+    tests/test_sldea_watchdog_reconnect_wait.py)."""
     with tempfile.TemporaryDirectory() as tmp:
         mb = L._MB(L.LIVE_OK)
         with L._patched(mb):
@@ -302,22 +308,24 @@ def test_a_scope_lost_before_the_arming_line_is_recorded_not_armed():
             app.root.run_pending()
         assert app.worker_args[11:14] == (True, 100.0, 1.0), \
             app.worker_args[11:14]
-        assert any(ln.startswith('run complete') for ln in app.lines), \
-            app.lines
-        assert not app._sldea_bd_tripped
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('run BREAKDOWN-ABORT') for ln in
+                   app.lines), app.lines
         [hv] = [c[2] for c in mb.calls if c[1] == 'Energize HV?']
         assert "\n\nBreakdown watchdog: ON. " in hv, hv
         assert ('  [watchdog: dev ≥100 µA for 1s, baseline learned at '
                 '0 kV]') in _start_line(app)
-        [warn] = [ln for ln in app.lines if 'NOT ARMED' in ln]
-        assert warn.startswith("⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope "
-                               "was gone when the run reached the arming "
-                               "line"), warn
-        assert "Nothing stops this run on a breakdown" in warn, warn
+        assert not any('NOT ARMED' in ln for ln in app.lines), app.lines
+        assert ("⚠ breakdown watchdog armed on the absolute rule |I| >= "
+                "100 uA with no scope at the arming line: nothing is read "
+                "until a scope Reconnect succeeds, and the monitoring-lost "
+                "alarm fires after 10 s") in app.lines, app.lines
         setup = _read(os.path.join(_rundir(tmp), 'setup.txt'))
         assert "\nBreakdown watchdog: ON, trips when " in setup, setup
-        assert "\nBreakdown watchdog (start): NOT armed (no scope)\n" in \
-            setup, setup
+        assert ("\nBreakdown watchdog (start): armed on the absolute rule "
+                "|I| >= 100 uA; no scope at the arming line\n") in setup, \
+            setup
+        assert 'NOT armed' not in setup, setup
         with open(os.path.join(_rundir(tmp), 'setup.txt'), 'rb') as f:
             f.read().decode('ascii')     # still ASCII, line and all
         assert se.load_settings(_rundir(tmp))['diam_mm'] == 16.0

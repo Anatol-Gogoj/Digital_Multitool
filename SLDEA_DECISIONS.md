@@ -1839,7 +1839,11 @@ Decisions:
   name. setup.txt is its first write, right after `makedirs`, and data.csv
   follows; both come before the camera and the first SG write, so a lost
   race takes the `makedirs` failure's path: "ERROR:" in the run log, and
-  the finally zeroes the SG. A blank name keeps 'w'.
+  the finally zeroes the SG. A blank name keeps 'w'. When it is data.csv
+  that fails, this run has already written its setup.txt in that folder
+  and appended its log lines to the run.log there, so its message says
+  that, not that it left the folder as it was (final HV review,
+  2026-10-08).
 - **The line is always two lines high**: "Saves to:" and the folder, cut
   from the left to the line's width so the run folder's name shows, then
   a warning or nothing. While a run is on it says "Writing to:" and that

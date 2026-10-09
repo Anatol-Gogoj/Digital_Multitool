@@ -345,7 +345,7 @@
    "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
    "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
    "During a live SLDEA run, the run's V_Out and I_Out channels and the settings every channel shares are locked, with a warning: Apply CHx Config and Enable Channel refuse those two channels, and Stop, Single and AutoSet refuse outright. Apply All Settings sends only the other channels. Run and the measurement buttons still work, and Reconnect asks first.",
-   "During a live SLDEA run, Reconnect asks first (default No) while the scope is connected. Reconnecting leaves the run with no kV/µA readings and a breakdown watchdog that cannot trip until the new connection is up — and until a later Reconnect succeeds, if this one fails; that retry does not ask. Say Yes only if the scope has stopped answering, and never in the run's first seconds, while its watchdog is still arming; otherwise abort the run first.",
+   "During a live SLDEA run, Reconnect asks first (default No) while the scope is connected. Reconnecting leaves the run with no kV/µA readings and a breakdown watchdog that cannot trip until the new connection is up — and until a later Reconnect succeeds, if this one fails; that retry does not ask. In the run's first seconds, before its watchdog has armed, the run waits at 0 V for this Reconnect, up to 25 s, then takes its 0 kV baseline and arms; if the scope is not back by then, it arms on the absolute rule |I| ≥ Trip, which reads nothing until a later Reconnect succeeds. Say Yes only if the scope has stopped answering; otherwise abort the run first.",
    "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
   ],
   "callouts": [
@@ -906,6 +906,10 @@
     "what": "Where the run folder is created; blank name auto-stamps SLDEA_YYYYMMDD_HHMMSS. Browse opens at the folder in the box; New folder… asks for a name, makes that folder inside the one in the box and switches the box to it. Both refuse while a run is going: the run keeps the folder it started in."
    },
    {
+    "label": "Saves to (the line under Run name)",
+    "what": "Shows the folder the run will write to, and warns as you type when ▶ Run will refuse it: a folder that already holds a run (setup.txt or data.csv), a run name that cannot be a folder name (plain ASCII only: u for µ, as in 2.5uL), an Output dir on the lab share while the share is not mounted, or an Output dir that does not answer within 3 s. ▶ Run refuses those before any HV question, with no start anyway, so a used name can no longer overwrite an earlier run. A blank name is refused only on the share, when it is not mounted or does not answer. During a run the line reads Writing to: and the run's own folder."
+   },
+   {
     "label": "V_Out / I_Out scope CH, SG CH",
     "what": "Which scope channels carry the Trek monitor outputs and which SG channel drives the Trek."
    },
@@ -931,7 +935,7 @@
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
-    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it. The Energize HV? question says whether it is on, and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down."
+    "what": "Ticked by default. Watches Trek current during live runs: a current that stays Trip (µA) or more away from the baseline it learns at 0 kV, for Confirm (s) of consecutive reads, snapshots the breakdown, ramps to 0 and aborts. With fewer than 4 of its 8 baseline reads, or no scope at the arming line, it arms on the absolute rule |I| ≥ Trip instead, and run.log and setup.txt say so; a ticked LIVE run is left NOT ARMED only when it is stopped first. Transient spikes never trip it. The Energize HV? question says whether it is on (ON with its Trip and Confirm, or OFF and why), and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down. With it ticked, ▶ Run refuses a Trip or Confirm that is not a positive number. Beside it, every LIVE run with current reads also runs a second rule, the N-sigma rule, in shadow only: it stops nothing, marks in telemetry.csv when it would have tripped, and after the run lists what it saw in run.log and setup.txt (Watchdog shadow lines)."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
@@ -947,7 +951,7 @@
    },
    {
     "label": "Camera for this run (the line under ▶ Run)",
-    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does)."
+    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab, open Advanced camera settings and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does; Auto-set camera or 🔒 Apply & Lock on the Webcam tab makes them agree). setup.txt's camera block records the same summary, then the camera device, pixel format, frame size and every locked control."
    },
    {
     "label": "Auto-open Edge Review",
@@ -955,7 +959,7 @@
    },
    {
     "label": "🔍 Edge Review… / 🎚 Tune params…",
-    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt."
+    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt. These two, 📊 Plot runs… and 🎞 Video review… each start a program of their own: the status bar says starting, then opened once it has run for 2 s. One that fails before then is named on the status bar, with a box giving its exit code, its last lines and its log file (in launch_logs, beside tk_stall.log); during a run the box waits until the run has ended."
    },
    {
     "label": "📊 Plot runs…",
@@ -975,15 +979,15 @@
    },
    {
     "label": "Run log",
-    "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings."
+    "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings. The start line names the breakdown watchdog's state. After a LIVE run come any reads the N-sigma shadow judged away (SHADOW away reads) and its verdict (SHADOW N-sigma); the shadow acted on none of them."
    }
   ],
   "workflow": [
-   "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
+   "1. Load a saved setup under Run configuration presets at the top (the tab stays in DRY), or enter the staircase: Start/End/Step kV, Ramp and Landing times.",
    "2. Check the preview and summary line — dots are photos, total time shown.",
-   "3. Set Output dir (New folder… makes a fresh one), the device fields (DEA active area diam, electrode, concentration, film thickness) and the scope/SG channels.",
+   "3. Set Output dir (New folder… makes a fresh one), a new Run name (the Saves to line under it names the folder and warns if ▶ Run will refuse it), the device fields (DEA active area diam, electrode, concentration, film thickness) and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
-   "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
+   "5. Untick DRY RUN; answer the scope-monitor and Energize HV? prompts (Energize HV? should say Breakdown watchdog: ON).",
    "6. In camera pre-flight, center the DEA in the circle, check focus, start (Return starts only a clean pre-flight).",
    "7. Let it finish (or ■ Abort); Edge Review opens on the new run folder."
   ],
@@ -995,7 +999,7 @@
    "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel could blind it.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls (Apply, Output, Fire, Reconnect) and the Waveform Editor's upload refuse it, and a Webcam-tab sweep will not write it, until the run ends. ▶ Run itself refuses to start while a sweep is writing its channel, a timed capture or camera adjustment is running, or (live runs) a Signal Gen tab command is still being sent; a sweep on the other channel is asked about (Enter = No).",
-   "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering, and not in the run's first seconds, while the watchdog is still arming.",
+   "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering. One that lands in the run's first seconds, before the watchdog has armed, makes the run wait at 0 V, up to 25 s, then take its 0 kV baseline and arm; with no scope back by then it arms on the absolute rule |I| ≥ Trip and reads nothing until a later Reconnect succeeds.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start.",
    "The camera pre-flight treats a flat picture (no visible disc) like a blown-out one: its start button reads ⚠ Start anyway (no picture), Return does nothing, and pressing it asks again (Enter = No). Unless you answered Yes there, a run stops itself the way ■ Abort does at its 0 kV baseline photo, taken as the first ramp begins, if that photo is flat, or if the camera gave the pre-flight a picture but gives the run none. The 2026-10-01 run went to 3 kV for 209 s on a flat grey picture. Yes is the deliberate override for a faint device: that run carries on, run.log and setup.txt record that you started anyway, and it needs reviewing by hand.",
    "Keep folder and run names plain ASCII (2.5uL, not 2.5µL): OpenCV on the Windows PCs cannot save or open images under other characters, and New folder… refuses them."
@@ -1053,7 +1057,7 @@
    },
    {
     "name": "Energize HV? confirmation",
-    "how_opened": "▶ Run — LIVE HV, final confirmation before driving the Trek"
+    "how_opened": "▶ Run — LIVE HV, final confirmation before driving the Trek; it names the breakdown watchdog's state (ON with its Trip and Confirm, or OFF and why)"
    },
    {
     "name": "SLDEA Edge Review (separate program)",
@@ -1335,7 +1339,7 @@
   "controls": [
    {
     "label": "Camera + Refresh",
-    "what": "Pick the video device number; Refresh rescans after plugging or unplugging a camera."
+    "what": "Pick the video device number; Refresh rescans after plugging or unplugging a camera and reads the exposure and gain back into their boxes. It refuses while a camera adjustment runs (Auto-set camera, Apply & Lock, Stabilize, Auto-WB once, Auto-expose)."
    },
    {
     "label": "Start Preview",
@@ -1355,7 +1359,7 @@
    },
    {
     "label": "🔒 Apply & Lock",
-    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand."
+    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand. If no value reaches the camera (it reported no controls, say), it says Nothing locked and keeps the previous lock."
    },
    {
     "label": "Auto-set camera",
@@ -1367,7 +1371,7 @@
    },
    {
     "label": "Read camera (Advanced)",
-    "what": "Refills the fields from the camera's current state."
+    "what": "Refills the fields from the camera's current state. Refused while a camera adjustment runs."
    },
    {
     "label": "Auto-expose (Advanced)",
@@ -1375,11 +1379,11 @@
    },
    {
     "label": "Auto-WB once (Advanced)",
-    "what": "One-shot grey-world colour balance on the scene in view; it fills the fields in, then Apply & Lock."
+    "what": "One-shot grey-world colour balance on the scene in view, not on the locked values; it fills the fields in and puts the lock back on the camera, so nothing changes until Apply & Lock."
    },
    {
     "label": "Stabilize (pin gain 0) (Advanced)",
-    "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo."
+    "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo. It runs Auto-set camera's exposure search on the scene in view, fills the fields in and puts the lock back on the camera; then Apply & Lock."
    },
    {
     "label": "Save to (Browse, New folder…) / Prefix",

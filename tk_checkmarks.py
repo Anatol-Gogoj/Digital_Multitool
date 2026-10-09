@@ -203,6 +203,16 @@ def install_check_marks(master):
         return None
 
 
+def _pixels(widget, option):
+    """A screen-distance option of a classic widget in whole pixels.
+    cget hands back a plain int only when the value has no units; a value
+    such as '1p' (which X11 defaults can carry) comes back as a Tcl
+    'pixel object', which int() refuses with TypeError. That took the
+    whole SLDEA tab down on the Linux bench in v1.4.5 (#448).
+    winfo_pixels converts either form."""
+    return widget.winfo_pixels(widget.cget(option))
+
+
 def mark_classic_checkbutton(cb):
     """Give a classic tk.Checkbutton the same drawn box as the ttk ones:
     the images in place of its indicator, which on X11 is a square filled
@@ -219,17 +229,17 @@ def mark_classic_checkbutton(cb):
         return False
     try:
         width = cb.winfo_reqwidth()
-        border = int(cb.cget('borderwidth'))
+        border = _pixels(cb, 'borderwidth')
         cb.configure(image=images['off'], selectimage=images['on'],
                      compound='left', indicatoron=False, borderwidth=0,
-                     padx=int(cb.cget('padx')) + (border + 1) // 2,
-                     pady=int(cb.cget('pady')) + border)
+                     padx=_pixels(cb, 'padx') + (border + 1) // 2,
+                     pady=_pixels(cb, 'pady') + border)
         short = width - cb.winfo_reqwidth()
         if short > 0:
             off, on = (_widened(cb, images[k], short) for k in ('off', 'on'))
             cb._ui_check_images = (off, on)     # Tk keeps only the names
             cb.configure(image=off, selectimage=on)
-    except (tk.TclError, ValueError):
+    except (tk.TclError, ValueError, TypeError):
         return False
     return True
 
@@ -392,17 +402,17 @@ def mark_classic_radiobutton(rb):
         return False
     try:
         width = rb.winfo_reqwidth()
-        border = int(rb.cget('borderwidth'))
+        border = _pixels(rb, 'borderwidth')
         rb.configure(image=images['off'], selectimage=images['on'],
                      compound='left', indicatoron=False, borderwidth=0,
                      selectcolor=rb.cget('background'),
-                     padx=int(rb.cget('padx')) + (border + 1) // 2,
-                     pady=int(rb.cget('pady')) + border)
+                     padx=_pixels(rb, 'padx') + (border + 1) // 2,
+                     pady=_pixels(rb, 'pady') + border)
         short = width - rb.winfo_reqwidth()
         if short > 0:
             off, on = (_widened(rb, images[k], short) for k in ('off', 'on'))
             rb._ui_radio_images = (off, on)     # Tk keeps only the names
             rb.configure(image=off, selectimage=on)
-    except (tk.TclError, ValueError):
+    except (tk.TclError, ValueError, TypeError):
         return False
     return True

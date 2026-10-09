@@ -284,6 +284,33 @@ def test_a_classic_radiobutton_gets_the_ring_and_keeps_its_size():
         _shut(root)
 
 
+def test_a_classic_radiobutton_with_sizes_in_units_is_marked():
+    """#448: the same Tcl 'pixel object' trap as the classic checkbutton.
+    Edge Review's candidate radios must get their ring when the bench's
+    defaults give borderwidth, padx and pady in points."""
+    root = _root()
+    try:
+        import tkinter as tk
+        var = tk.StringVar(root, value='a')
+        rb = tk.Radiobutton(root, text="candidate", variable=var, value='a',
+                            indicatoron=True, borderwidth='1p', padx='3p',
+                            pady='1p')
+        rb.pack()
+        root.update_idletasks()
+        assert type(rb.cget('borderwidth')).__name__ == 'Tcl_Obj', (
+            "this Tk returns plain ints for unit sizes; the test cannot "
+            "reproduce the bench")
+        border = rb.winfo_pixels('1p')
+        padx, pady = rb.winfo_pixels('3p'), rb.winfo_pixels('1p')
+        assert uiw.mark_classic_radiobutton(rb)
+        assert rb.winfo_pixels(rb.cget('borderwidth')) == 0
+        assert rb.winfo_pixels(rb.cget('padx')) == padx + (border + 1) // 2
+        assert rb.winfo_pixels(rb.cget('pady')) == pady + border
+        assert str(rb.cget('image')) and str(rb.cget('selectimage'))
+    finally:
+        _shut(root)
+
+
 def test_a_layout_with_no_indicator_or_a_tk_error_changes_nothing():
     root = _root()
     try:

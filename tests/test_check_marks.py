@@ -293,6 +293,32 @@ def test_a_classic_checkbutton_gets_the_box_and_keeps_its_size():
         _shut(root)
 
 
+def test_a_classic_checkbutton_with_sizes_in_units_is_marked():
+    """#448: on the Linux bench a classic checkbutton's borderwidth, padx
+    and pady carried units, so cget handed back Tcl 'pixel objects' and
+    int() raised TypeError, which took the whole SLDEA tab down. Sizes in
+    points must be read as pixels and the box marked as usual."""
+    root = _root()
+    try:
+        import tkinter as tk
+        cb = tk.Checkbutton(root, text="DRY RUN", indicatoron=True,
+                            borderwidth='1p', padx='3p', pady='1p')
+        cb.pack()
+        root.update_idletasks()
+        assert type(cb.cget('borderwidth')).__name__ == 'Tcl_Obj', (
+            "this Tk returns plain ints for unit sizes; the test cannot "
+            "reproduce the bench")
+        border = cb.winfo_pixels('1p')
+        padx, pady = cb.winfo_pixels('3p'), cb.winfo_pixels('1p')
+        assert uiw.mark_classic_checkbutton(cb)
+        assert cb.winfo_pixels(cb.cget('borderwidth')) == 0
+        assert cb.winfo_pixels(cb.cget('padx')) == padx + (border + 1) // 2
+        assert cb.winfo_pixels(cb.cget('pady')) == pady + border
+        assert str(cb.cget('image')) and str(cb.cget('selectimage'))
+    finally:
+        _shut(root)
+
+
 def test_a_layout_with_no_indicator_or_a_tk_error_changes_nothing():
     """A checkbox the theme draws is better than a window that does not
     open: any failure returns None and leaves the style alone."""

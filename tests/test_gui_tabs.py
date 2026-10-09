@@ -235,6 +235,39 @@ def test_the_manual_vocabulary_is_one_vocabulary():
         set(content) ^ (set(slugs) | {'start', 'arb', 'tools'}))
 
 
+def test_every_tab_loads_when_the_defaults_carry_units():
+    """#448: v1.4.5's SLDEA tab failed to load on the Linux bench ("int()
+    argument must be ... not '_tkinter.Tcl_Obj'") because the bench's
+    defaults give classic widgets their sizes in units, which cget returns
+    as Tcl pixel objects. Build the whole app with such defaults in the
+    option database: no tab may come up as "(unavailable)"."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    try:
+        for cls in ('Checkbutton', 'Radiobutton', 'Button', 'Label',
+                    'Entry'):
+            root.option_add(f'*{cls}.borderWidth', '1p')
+            root.option_add(f'*{cls}.padX', '1p')
+            root.option_add(f'*{cls}.padY', '1p')
+        import gui
+        gui.InstrumentControlGUI.auto_connect = lambda self: None
+        gui.CAM_AUTOSTART_ON_TAB = False
+        app = gui.InstrumentControlGUI(root)
+        _settle(root, 6)
+        names = [app.notebook.tab(tid, 'text') for tid in app.notebook.tabs()]
+        broken = [n for n in names if n.endswith('(unavailable)')]
+        assert not broken, f"tabs failed to load: {broken}"
+        assert app.tab_widget('sldea') is not None, names
+        assert not int(app.sldea_dry_cb.cget('indicatoron')), (
+            "the DRY RUN box was not given its drawn check mark")
+    finally:
+        root.destroy()
+
+
 def test_every_live_tab_carries_its_slug():
     """The other half: the real notebook, tagged, in order.
 

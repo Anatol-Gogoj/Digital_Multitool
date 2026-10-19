@@ -1777,10 +1777,11 @@ hand placement; that is a bench check (`#454`, listed in `#369`).
   muted indigo `#332288`; the resting disc is Tol black. White matches the
   manual trace's candidate D on the review card (#450). An exhaustive
   search over Tol's eight schemes for these three, beside A, B and C's Tol
-  colors, found that every set with all three at 3:1 on gray 147 is white
-  plus two dark colors, and the best of them reach 19.14 (white vs A's
-  cyan, protanopia). Beside the Material A, B and C still on main before
-  #450, the worst pair is 21.33 (indigo vs black, tritanopia).
+  colors, found the best sets with all three at 3:1 on gray 147 at 19.14
+  (white vs A's cyan, protanopia), each of them white plus two dark
+  colors; three dark colors reach 16.96 at best. Beside the Material A,
+  B and C still on main before #450, the worst pair is 21.33 (indigo vs
+  black, tritanopia).
 - **Contrast is 3:1 at the median, not everywhere.** At gray 147: white
   3.07, indigo 3.96, black 6.84. At the frame's 95th percentile (gray 167)
   white falls to 2.41 (the green: 1.44); at its 5th (gray 106) indigo falls

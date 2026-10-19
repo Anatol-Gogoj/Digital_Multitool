@@ -636,8 +636,8 @@ def test_calibration_two_point_marker_is_a_1px_white_ring_on_black():
     assert _colors(items) <= {gui.CAL_INK, gui.CAL_HALO}, _colors(items)
     ovals = sorted((it['width'], it['outline'], it['fill'])
                    for it in items if it['kind'] == 'oval')
-    assert ovals == sorted([(1.0, gui.CAL_INK, ''), (1.0, gui.CAL_HALO, '')]), \
-        ovals
+    want = sorted([(1.0, gui.CAL_INK, ''), (1.0, gui.CAL_HALO, '')])
+    assert ovals == want, ovals
     arms = [it for it in items if it['kind'] == 'line']
     assert arms and all(it['fill'] == gui.CAL_INK and it['width'] == 1.0
                         for it in arms), arms

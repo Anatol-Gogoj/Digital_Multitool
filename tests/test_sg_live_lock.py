@@ -464,9 +464,10 @@ SG_WRITERS = {
         {'set_load_polarity': 1, 'set_basic_wave': 1, 'set_output': 1,
          'set_offset': 1}),
     'gui.InstrumentControlGUI._on_app_close': (
-        'shutdown', 'window close: stops a running run first, then '
-                    'switches both outputs OFF',
-        {'set_output': 1}),
+        'shutdown', 'window close: stops a running run first; zeroes the '
+                    "run's channel if the run set it to DC and has not "
+                    'finished (#460), then switches both outputs OFF',
+        {'set_offset': 1, 'set_output': 1}),
     'gui.InstrumentControlGUI.apply_sg_channel': (
         'locked', 'Apply, and every preset / bench-profile load through it',
         {'set_basic_wave': 1, 'select_arb': 1, 'set_load_polarity': 1,

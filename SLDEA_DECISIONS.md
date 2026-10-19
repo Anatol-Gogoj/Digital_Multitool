@@ -4730,17 +4730,19 @@ bench-checked yet; the check is in #369.
 - Cost: on a dead SG link the close makes one more write, so up to one
   more 5 s timeout before the window goes.
 
-**Evidence.** `tests/test_app_close_zeroes_sg.py`, 14 cases. They cover
+**Evidence.** `tests/test_app_close_zeroes_sg.py`, 15 cases. They cover
 the close handler's call order on a recording SG (zero on the run's
-channel, then CH1 and CH2 off, then the session handed back), every case
-that must not write an offset, and a dead link. Five run the real
-sldea_run and worker:
+channel, written as +0 V, then CH1 and CH2 off, then the session handed
+back), every case that must not write an offset, and a dead link. Six run
+the real sldea_run and worker:
 
 - the mark lands between the DC write and output ON;
 - a DRY run never marks a channel;
 - Abort during a scope read makes the zero the next SG write;
 - a stop set while the worker waits for the SG's lock still stops the
   level;
+- every level is written while the worker still holds the lock it
+  checked the stop under;
 - a close during a scope read held past the wait leaves CH1's last
   writes at 0 V and output off.
 
@@ -4751,6 +4753,26 @@ and a zero on the claimed channel instead of the marked one. An eighth
 survives, and it is equivalent: dropping the stop check before the lock
 leaves the check under it, which stops the same writes. `SG_WRITERS` in
 tests/test_sg_live_lock.py lists the new `set_offset`.
+
+A second adversarial review (2026-10-19) found two more survivors that
+were not equivalent, and a case now catches each. The first: the stop is
+checked under the lock, but the level is written after the lock is
+released, so close's zero can land between them; the recording SG never
+takes the lock itself, so the earlier lock case could not see it. The
+second: close writes -0.0, which the call-order compare cannot tell from
+0.0. Two further survivors are equivalent: no mark reset at run start
+(`_sldea_finished` always clears it), and `last_kv` updated outside the
+inner check (the loop ends once a stop is asked).
+
+That review also found an older race this change does not close. The
+run's SG setup (stop check, then the DC write, the mark and output ON)
+does not hold the SG's lock. A worker that passed that stop check and
+then waited longer than close's ~3 s for the lock (a Continuous Logging
+query can hold it up to 5 s) finds no mark set, so close writes no zero,
+switches both outputs off, and the worker can then switch its channel ON
+at 0 V DC before the session closes. Reaching it needs that lock held
+across the whole wait, and it leaves 0 V, not a level. It is a separate
+follow-up.
 
 **Not changed.** Once the window is destroyed the close still cannot show
 the HV NOT ZEROED alarm, and a worker still going when the process exits

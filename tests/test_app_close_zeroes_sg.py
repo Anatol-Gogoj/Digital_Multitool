@@ -24,7 +24,8 @@ Trek. What is pinned here:
   scope read writes no new level after it, and a stop that comes while
   the worker waits for the SG's I/O lock (another thread holding it)
   stops the level too, because the stop is checked again under that
-  lock.
+  lock, and every level is written while the worker still holds the lock
+  it checked the stop under.
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
@@ -33,6 +34,7 @@ use the scope-lock suite's fakes (tests/test_scope_live_lock.py).
 Run: .venv/bin/python tests/test_app_close_zeroes_sg.py
 """
 import contextlib
+import math
 import os
 import sys
 import tempfile
@@ -175,6 +177,9 @@ def test_a_run_still_running_has_its_channel_zeroed_then_both_outputs_off():
         app._on_app_close()
     assert app.sg.writes == ([('set_offset', 2, 0.0)] + OUTPUTS_OFF
                              + SESSION_END), app.sg.writes
+    # 0.0 == -0.0, so the list compare above cannot see the sign
+    assert math.copysign(1.0, app.sg.offsets(2)[0]) == 1.0, \
+        "close must write +0 V, not -0"
     assert app._sldea_stop, "close must ask the run to stop"
     assert len(clock.sleeps) == WAIT_TICKS, clock.sleeps
     assert app.root.updates == WAIT_TICKS, app.root.updates
@@ -416,6 +421,61 @@ def test_a_stop_that_comes_while_the_run_waits_for_the_sg_lock_still_holds():
         # one it then did not write
         levels = [w for w in app.sg.writes[:hit[0]] if w[0] == 'set_offset']
         assert gate.entries == len(levels) + 1, (gate.entries, levels)
+
+
+class _OwnedLock:
+    """The SG's I/O lock, able to say whether the calling thread holds it.
+    owner and depth change only while the lock is held."""
+
+    def __init__(self):
+        self.inner = threading.RLock()
+        self.owner = None
+        self.depth = 0
+
+    def __enter__(self):
+        self.inner.acquire()
+        self.owner = threading.get_ident()
+        self.depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.depth -= 1
+        if self.depth == 0:
+            self.owner = None
+        self.inner.release()
+        return False
+
+    def held_here(self):
+        return self.owner == threading.get_ident()
+
+
+def test_every_level_is_written_under_the_lock_its_stop_check_took():
+    """The stop check under the SG's lock only helps if the level write
+    happens before that lock is let go: checked under the lock, then
+    written after it is released, close's zero can land in between. The
+    recording SG never takes the lock itself, so the write must find the
+    worker still holding it (second adversarial review, 2026-10-19)."""
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)):
+        app = _live_app(tmp)
+        gate = _OwnedLock()
+        app.sg.__dict__['_io_rlock'] = gate
+        unlocked = []
+        inner = app.sg.set_offset
+
+        def set_offset(channel, offset_v):
+            worker = threading.current_thread() is not threading.main_thread()
+            if worker and offset_v != 0.0 and not gate.held_here():
+                unlocked.append((channel, offset_v))
+            inner(channel, offset_v)
+        app.sg.set_offset = set_offset
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        assert app.worker_error is None, repr(app.worker_error)
+        levels = [w for w in app.sg.writes
+                  if w[0] == 'set_offset' and w[2] != 0.0]
+        assert levels, "the run wrote no level"
+        assert unlocked == [], unlocked
 
 
 def test_close_during_a_long_scope_read_leaves_the_run_channel_at_0v():

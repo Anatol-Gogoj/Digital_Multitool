@@ -4672,6 +4672,74 @@ replies, citing that session's date.** Not code now.
     stack, in files this change does not touch.
 - **No bench gate:** this adds no app I/O. The probe is the bench tool.
 
+## Window close zeroes a LIVE run's SG channel when the run has not stopped in time, and a stopping run writes no new level (2026-10-19)
+
+**TL;DR:** Closing the window during a LIVE run waits about 3 s for the
+run to set its SG channel to 0 V. A run blocked longer, in a scope read
+or a photo, used to get only both SG outputs switched off: its last level
+stayed set, and the next Output ON put it back on the Trek. Now the close
+sets that channel to 0 V itself and then switches the outputs off, and the
+run loop writes no new level once a stop is asked (#460). Not
+bench-checked yet; the check is in #369.
+
+**Observation (on `f22527f`, from the adversarial review of PR #455).**
+
+- `_on_app_close` set `_sldea_stop`, pumped Tk for up to 30 x 0.1 s, then
+  called `set_output(ch, False)` for CH1 and CH2. Only the worker's
+  finally block writes `set_offset(sgch, 0.0)`, and the worker is a daemon
+  thread: once the window is destroyed and the interpreter exits, a worker
+  that has not reached its finally block may never zero anything.
+- A tick can block past the wait. The watchdog's scope read holds the
+  scope lock for a TYPE/SOURCE/VALUE? triple at a 5 s timeout, and a photo
+  in progress holds off the next stop check. The channel then holds
+  `trek_sign * control_v_for_kv(kv)`, up to full scale. `OUTP OFF` changes
+  only the output state, so the next Output ON from the Signal Gen tab
+  (which sends only `set_output`) or from the front panel puts that level
+  straight back on the Trek.
+- Zeroing in the close handler alone is not enough. In a tick, the drive
+  write follows the scope read with no stop check in between, so a read
+  that comes back after the close writes the next ramp level over the
+  close's 0 V.
+- README's instrument quirks say nothing about OFST outside DC, and the
+  Signal Gen tab never sends it in NOISE mode. A close-time OFST on a
+  channel in an unknown mode would be bench-unverified instrument I/O.
+
+**Decision (owner, 2026-10-19).**
+
+- The worker marks its channel (`_sldea_sg_dc_ch`) right after its
+  `WVTP='DC', OFST=0.0` write and before output ON. `_sldea_finished`
+  clears the mark, and so does each run's start.
+- After the wait, if the run is still flagged (`_sldea_running` clears
+  only in `_sldea_finished`, which the worker queues after its zeroing
+  attempt) and has marked a channel, the close writes `set_offset(ch,
+  0.0)` to it, best-effort, then runs the existing outputs-off loop. That
+  is the worker's order. No offset goes to a channel the run has not set
+  to DC (a close during camera startup), to the other channel, on a DRY
+  run, or after a run that finished.
+- The loop skips its drive write once `_sldea_stop` is set. Abort, the
+  watchdog trip and the baseline stop all set it, and none of them wants
+  the drive raised afterwards. The finally block's zero is unchanged.
+- Cost: on a dead SG link the close makes one more write, so up to one
+  more 5 s timeout before the window goes.
+
+**Evidence.** `tests/test_app_close_zeroes_sg.py`, 13 cases. They cover
+the close handler's call order on a recording SG (zero on the run's
+channel, then CH1 and CH2 off, then the session handed back), every case
+that must not write an offset, a dead link, and the mark's place between
+the DC write and output ON. Two of them run the real worker: a close
+during a scope read held past the wait leaves CH1's last writes at 0 V
+and output off, and Abort during a scope read makes the zero the next SG
+write. Six mutants of the fix are each caught by at least one case: no
+loop guard, no close zero, a zero without the running check, the mark
+set before the DC write, the mark kept after the run, and a zero on the
+claimed channel instead of the marked one. `SG_WRITERS` in
+tests/test_sg_live_lock.py lists the new `set_offset`.
+
+**Not changed.** Once the window is destroyed the close still cannot show
+the HV NOT ZEROED alarm, and a worker still going when the process exits
+may not write the end of its records. ■ Abort stays the way to end a run.
+Bench check owed in #369.
+
 ## Update Software and its Restart now refuse while an SLDEA run is going (2026-09-24)
 
 **TL;DR:** Tools → Update Software → **Restart now** used to restart the

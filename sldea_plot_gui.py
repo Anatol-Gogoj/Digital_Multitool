@@ -77,6 +77,7 @@ from tkinter import font as tkfont
 import sldea_edge as se
 import sldea_plot as sp
 import tk_checkmarks
+import ui_colors as uc
 
 # ASCII only: this is the one thing the module prints to a console, and a
 # Windows cp1252 console cannot carry the docstring's prose.
@@ -805,7 +806,7 @@ class Tooltip:
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f'+{x}+{y}')
         tk.Label(tip, text=self.text, justify='left',
-                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 wraplength=self.wraplength, bg=uc.TOOLTIP_BG, fg='black',
                  relief='solid', borderwidth=1, padx=7, pady=5).pack()
         self._tip = tip
 
@@ -1423,7 +1424,19 @@ EXPORT_TIPS = {
 # figure says.
 # ---------------------------------------------------------------------------
 
-HINT_FG = '#8a8a8a'                    # grey: a hint, not a value
+HINT_FG = uc.TEXT_MUTED                # grey: a hint, not a value
+
+
+def _hint_font(widget):
+    """The entry's own TkTextFont, in italics. The hint's old light grey
+    (#8a8a8a, 3.5:1 on white) failed text contrast; the readable grey is
+    close to the black of a typed value, so the slant is what marks a hint
+    as not a value, without color (#462)."""
+    try:
+        f = tkfont.Font(root=widget, name='TkTextFont', exists=True).actual()
+        return (f['family'], f['size'], 'italic')
+    except (tk.TclError, KeyError):
+        return 'TkTextFont'
 
 
 def _field_bg(widget):
@@ -2038,7 +2051,7 @@ class PlotWindow:
         # --- runs
         rf = ttk.LabelFrame(left, text="Runs (pick several)", padding=6)
         rf.pack(fill=tk.BOTH, expand=True)
-        self.lbl_parent = ttk.Label(rf, text='', foreground='#666',
+        self.lbl_parent = ttk.Label(rf, text='', foreground=uc.TEXT_MUTED,
                                     wraplength=260, justify=tk.LEFT)
         self.lbl_parent.pack(fill=tk.X)
         box = ttk.Frame(rf)
@@ -2137,7 +2150,7 @@ class PlotWindow:
                                    command=self._drop_extra_parents)
         self.btn_drop.pack(side=tk.LEFT)
         add_tooltip(self.btn_drop, DROP_FOLDERS_TIP)
-        ttk.Label(rf, foreground='#666', wraplength=260, justify=tk.LEFT,
+        ttk.Label(rf, foreground=uc.TEXT_MUTED, wraplength=260, justify=tk.LEFT,
                   text="✓ = processed: Edge Review saved areas for that "
                        "run.").pack(fill=tk.X, pady=(4, 0))
 
@@ -2192,7 +2205,7 @@ class PlotWindow:
         self.btn_seed_concentration.pack(anchor=tk.W, padx=(18, 0),
                                          pady=(2, 0))
         add_tooltip(self.btn_seed_concentration, GROUP_SEED_CONC_TIP)
-        self.lbl_groups = ttk.Label(gf, foreground='#666', wraplength=260,
+        self.lbl_groups = ttk.Label(gf, foreground=uc.TEXT_MUTED, wraplength=260,
                                     justify=tk.LEFT)
         self.lbl_groups.pack(fill=tk.X, pady=(4, 0))
 
@@ -2202,7 +2215,7 @@ class PlotWindow:
         for m in sp.MODES:
             ttk.Radiobutton(mf, text=m, value=m, variable=self.v_mode,
                             command=self._mode_changed).pack(anchor=tk.W)
-        self.lbl_mode = ttk.Label(mf, foreground='#666', wraplength=260,
+        self.lbl_mode = ttk.Label(mf, foreground=uc.TEXT_MUTED, wraplength=260,
                                   justify=tk.LEFT)
         self.lbl_mode.pack(fill=tk.X, pady=(4, 0))
 
@@ -2427,7 +2440,7 @@ class PlotWindow:
         e_stem = ttk.Entry(srow, textvariable=self.v_stem)
         e_stem.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         e_stem.bind('<KeyRelease>', lambda _e: self._show_targets())
-        self.lbl_targets = ttk.Label(xf, foreground='#666', wraplength=260,
+        self.lbl_targets = ttk.Label(xf, foreground=uc.TEXT_MUTED, wraplength=260,
                                      justify=tk.LEFT)
         self.lbl_targets.pack(fill=tk.X, pady=(4, 0))
         self.btn_export = tk.Button(xf, text="💾 Export figure + CSV",
@@ -2454,7 +2467,7 @@ class PlotWindow:
         # what the last double-click resolved to: the feature is invisible
         # otherwise, and a click that silently opened a window somewhere
         # would be worse than one that did nothing.
-        self.lbl_click = ttk.Label(right, foreground='#666', anchor=tk.W,
+        self.lbl_click = ttk.Label(right, foreground=uc.TEXT_MUTED, anchor=tk.W,
                                    text=CLICK_HINT)
         self.lbl_click.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 2))
 
@@ -2529,7 +2542,7 @@ class PlotWindow:
         # destroyed exactly once.
         hint = tk.Label(entry, text='', anchor=tk.W, foreground=HINT_FG,
                         background=_field_bg(entry), borderwidth=0,
-                        font='TkTextFont')
+                        font=_hint_font(entry))
         # a click has to land in the box the hint covers, not on the hint
         hint.bind('<Button-1>', lambda _e: entry.focus_set())
         trow = TitleRow(key, panel, var, entry, hint,
@@ -3871,7 +3884,7 @@ class PlotWindow:
     def _hint(self, text):
         ax = self.fig.add_subplot(111)
         ax.axis('off')
-        ax.text(0.5, 0.5, text, ha='center', va='center', color='#999',
+        ax.text(0.5, 0.5, text, ha='center', va='center', color=uc.TEXT_MUTED,
                 fontsize=13)
         self.canvas.draw()
 

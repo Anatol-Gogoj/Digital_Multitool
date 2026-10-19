@@ -48,13 +48,14 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
 import gui  # noqa: E402
+import ui_colors as uc  # noqa: E402
 
 G = gui.InstrumentControlGUI
 KEYS = ('lcr', 'scope', 'sg', 'psu', 'dmm')
 ASK = 'Scope in use — LIVE HV run'
 BUSY_NOTE = 'Still working on the previous connect operation...'
-CONNECTING = ('Connecting...', '#b36b00')
-CONNECTED = ('Connected (USB): OLD scope', 'green')
+CONNECTING = ('Connecting...', uc.TEXT_ALERT)
+CONNECTED = ('Connected (USB): OLD scope', uc.TEXT_OK)
 
 
 class _Label:
@@ -145,7 +146,7 @@ class _App:
         for key in KEYS:
             setattr(self, key, _FakeInst(f'OLD {key}'))
             setattr(self, f'{key}_status',
-                    _Label(f'Connected (USB): OLD {key}', 'green'))
+                    _Label(f'Connected (USB): OLD {key}', uc.TEXT_OK))
 
     def _run_bg(self, work, done, busy=None, quiet=False):
         started = G._run_bg(self, work, done, busy=busy, quiet=quiet)
@@ -267,7 +268,7 @@ def test_yes_reconnects_as_before_and_says_so_in_the_run_log():
         assert seen == [(None, True)], seen
         assert app.scope.idn == 'NEW scope' and old.closed
         assert app.scope_status.state() == (
-            'Connected (USB): NEW scope', 'green')
+            'Connected (USB): NEW scope', uc.TEXT_OK)
         assert app._bg_busy == set() and app.status_bar.text is None
         assert [c[:2] for c in mb.calls] == [('askyesno', ASK)], mb.calls
 
@@ -336,7 +337,7 @@ def test_a_failed_connect_after_yes_leaves_the_retry_unasked():
         app.root.pump()
         assert old.closed and app.scope is None
         assert app.scope_status.state() == (
-            'Error: TekMSO24: no device found', 'red')
+            'Error: TekMSO24: no device found', uc.TEXT_ALERT)
         assert [c[:2] for c in mb.calls] == [
             ('askyesno', ASK), ('showerror', 'Connection Error')], mb.calls
         assert app._bg_busy == set() and len(app.log) == 1, app.log

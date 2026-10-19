@@ -14,6 +14,7 @@ import math
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import ui_colors as uc
 from lcr_format import format_si
 
 
@@ -129,12 +130,12 @@ class TraceWindow(tk.Toplevel):
             y = py(tick)
             c.create_line(x0, y, x1, y, fill='#e0e0e0')
             c.create_text(x0 - 6, y, text=format_si(tick, 'V', digits=3),
-                          anchor='e', font=('TkDefaultFont', 8), fill='#555')
+                          anchor='e', font=('TkDefaultFont', 8), fill=uc.TEXT_MUTED)
         for tick in nice_ticks(t_lo, t_hi):
             x = px(tick)
             c.create_line(x, y0, x, y1, fill='#e0e0e0')
             c.create_text(x, y1 + 6, text=format_si(tick, 's', digits=3),
-                          anchor='n', font=('TkDefaultFont', 8), fill='#555')
+                          anchor='n', font=('TkDefaultFont', 8), fill=uc.TEXT_MUTED)
         if v_lo < 0 < v_hi:
             c.create_line(x0, py(0), x1, py(0), fill='#999', dash=(3, 3))
         c.create_rectangle(x0, y0, x1, y1, outline='#888')

@@ -21,6 +21,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
 import tk_checkmarks as uiw
+import ui_colors as uc
 
 
 class _Skip(Exception):
@@ -265,7 +266,7 @@ def test_a_classic_checkbutton_gets_the_box_and_keeps_its_size():
         cb = tk.Checkbutton(root, text="DRY RUN — HV OFF", variable=var,
                             font=('TkDefaultFont', 10, 'bold'),
                             indicatoron=True, padx=6)
-        cb.config(bg='#fff3cd', fg='#8a5a00', selectcolor='#fff3cd')
+        cb.config(bg=uc.ROW_DRY, fg=uc.TEXT, selectcolor=uc.ROW_DRY)
         cb.pack()
         root.update_idletasks()
         before = (cb.winfo_reqwidth(), cb.winfo_reqheight())

@@ -48,8 +48,8 @@ Safety statements that already exist in the repo (quoted, nothing added):
 You need:
 1. The Linux bench PC (a live run refuses on Windows: "Linux only") with the scope, signal generator
    and camera on and connected. Start the app from its desktop icon. On the "Oscilloscope (MSO24)"
-   and "Signal Gen (BK 4055B)" tabs the "Connection" line must be green; if red, power the
-   instrument on and press "Reconnect". **The Trek's HV output stays OFF through sections 2 to 4.**
+   and "Signal Gen (BK 4055B)" tabs the "Connection" line must be blue and read "Connected"; if
+   it reads "Not connected" (brown), power the instrument on and press "Reconnect". **The Trek's HV output stays OFF through sections 2 to 4.**
 2. The wiring the software assumes (docs/manual-src/addendum_a_stack.json): signal generator CH1 is
    a DC source into the Trek control input (1 V per kV, 10 kV maximum). Trek V_Out goes to scope
    CH2 (1 kV per scope volt), I_Out to CH3 (200 uA per scope volt): the defaults of "SG CH",
@@ -172,7 +172,7 @@ drive channel (CH1 by default) was left outputting goes to the Trek's control in
 amplified once the Trek's HV is on. The app's own dry-run text says a stopped sweep leaves the
 channel at its last level, and to set it to 0 V, or its output OFF, on the Signal Gen tab. Do that,
 and ask the lab how to confirm it and when the Trek's HV may be enabled (box item 12). Then untick
-"DRY RUN - HV OFF" (the row turns red and says "LIVE - HV WILL BE DRIVEN") and press the button,
+"DRY RUN - HV OFF" (the row turns orange and says "LIVE - HV WILL BE DRIVEN") and press the button,
 which now reads "Run - LIVE HV".
 
 The dialogs come in this order; a dry run skips items 5 to 10. Enter answers the default: No on
@@ -265,9 +265,9 @@ monitoring says: "Run continues; watch the DEA and abort manually if in doubt."
 - What "Abort" does: it sets a stop flag, seen within about 0.1 s or after the photo in progress.
   The program then sets the signal generator offset to 0 V and only then switches its output OFF:
   one step, not a slow ramp, although the log line "abort requested" and the manual say ramp. The
-  status reads "aborted" in green. Green does not mean safe.
+  status reads "aborted" in blue. Blue does not mean safe.
 - If the watchdog trips ("BREAKDOWN CONFIRMED" in the log), the run takes one photo, stops and
-  zeroes, and the status reads "BREAKDOWN-ABORT" in red. BENCH_TEST.md section O: "keep everything".
+  zeroes, and the status reads "BREAKDOWN-ABORT" in brown. BENCH_TEST.md section O: "keep everything".
 
 ## 7. After the run
 

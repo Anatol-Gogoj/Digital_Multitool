@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import output_folder
+import ui_colors as uc
 
 
 class Tooltip:
@@ -58,7 +59,7 @@ class Tooltip:
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f'+{x}+{y}')
         tk.Label(tip, text=self.text, justify='left',
-                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 wraplength=self.wraplength, bg=uc.TOOLTIP_BG, fg='black',
                  relief='solid', borderwidth=1, padx=7, pady=5).pack()
         self._tip = tip
 
@@ -92,30 +93,30 @@ class SplashScreen(tk.Toplevel):
     def __init__(self, root, version_text=''):
         super().__init__(root)
         self.overrideredirect(True)          # no title bar / decorations
-        self.configure(bg='#1f3a5f')
+        self.configure(bg=uc.BANNER_INFO)
         # centre on screen (the main window is not sized yet)
         x = (self.winfo_screenwidth() - self.W) // 2
         y = (self.winfo_screenheight() - self.H) // 3
         self.geometry(f'{self.W}x{self.H}+{x}+{y}')
 
-        frame = tk.Frame(self, bg='#1f3a5f', padx=24, pady=18)
+        frame = tk.Frame(self, bg=uc.BANNER_INFO, padx=24, pady=18)
         frame.pack(fill='both', expand=True)
         # Name transition (2026-07-20): "SCPI Control" -> "Digital
         # Multitool", starting here on the splash. Same look, new name.
-        tk.Label(frame, text='Digital Multitool', bg='#1f3a5f', fg='white',
+        tk.Label(frame, text='Digital Multitool', bg=uc.BANNER_INFO, fg='white',
                  font=('TkDefaultFont', 17, 'bold')).pack(anchor='w')
-        tk.Label(frame, text='Lab instrument control suite', bg='#1f3a5f',
-                 fg='#b8c7dc', font=('TkDefaultFont', 10)).pack(anchor='w')
+        tk.Label(frame, text='Lab instrument control suite', bg=uc.BANNER_INFO,
+                 fg=uc.TEXT_ON_FILL_MUTED, font=('TkDefaultFont', 10)).pack(anchor='w')
 
-        self._status = tk.Label(frame, text='Starting...', bg='#1f3a5f',
-                                fg='#e6edf5', font=('TkDefaultFont', 10),
+        self._status = tk.Label(frame, text='Starting...', bg=uc.BANNER_INFO,
+                                fg=uc.TEXT_ON_FILL, font=('TkDefaultFont', 10),
                                 anchor='w')
         self._status.pack(anchor='w', pady=(14, 4), fill='x')
         self._bar = ttk.Progressbar(frame, mode='indeterminate', length=400)
         self._bar.pack(fill='x')
         self._bar.start(12)
         if version_text:
-            tk.Label(frame, text=version_text, bg='#1f3a5f', fg='#8fa4bd',
+            tk.Label(frame, text=version_text, bg=uc.BANNER_INFO, fg=uc.TEXT_ON_FILL_MUTED,
                      font=('TkDefaultFont', 8)).pack(anchor='e',
                                                      pady=(8, 0))
         self.update_idletasks()

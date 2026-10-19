@@ -59,6 +59,7 @@ import numpy as _np  # noqa: E402
 import gui  # noqa: E402
 import sldea_edge  # noqa: E402
 import sldea_profile  # noqa: E402
+import ui_colors as uc  # noqa: E402
 import webcam  # noqa: E402
 from sldea_profile import (  # noqa: E402
     PREFLIGHT_OVERRIDE_NO_PICTURE, SldeaProfile, baseline_picture_check,
@@ -613,13 +614,13 @@ def test_the_sldea_tab_line_reads_the_webcam_entries_and_the_lock():
         app._sldea_cam_line_refresh()
         [kw] = app.sldea_cam_line.shown
         assert kw == {'text': "Camera for this run: exposure 3, gain 0, set "
-                              "on the Webcam tab", 'fg': '#555'}, kw
+                              "on the Webcam tab", 'fg': gui.MUTED}, kw
     with _lock({'exposure_time_absolute': 30, 'gain': 0}):
         app = _LineApp('3', '0')
         app._sldea_cam_line_refresh()
         [kw] = app.sldea_cam_line.shown
         # the warning is words AND colour, never colour alone
-        assert kw['fg'] == '#8a5a00' and 'LOCKED exposure 30' in kw['text']
+        assert kw['fg'] == uc.TEXT_ALERT and 'LOCKED exposure 30' in kw['text']
         assert 'NOT' in kw['text'], kw
     with _lock({}):
         # no Webcam-tab boxes (camera never read), or an unreadable one
@@ -630,7 +631,7 @@ def test_the_sldea_tab_line_reads_the_webcam_entries_and_the_lock():
             app._sldea_cam_line_refresh()
             [kw] = app.sldea_cam_line.shown
             assert said in kw['text'], kw
-            assert kw['fg'] == '#8a5a00'
+            assert kw['fg'] == uc.TEXT_ALERT
         # a dead label is not an exception: it is a label
         _LineApp('3', '0', broken=True)._sldea_cam_line_refresh()
 
@@ -747,7 +748,7 @@ class _RunApp:
     def _sldea_log(self, msg):
         self.lines.append(str(msg))
 
-    def _sldea_set_status(self, text, fg='#555'):
+    def _sldea_set_status(self, text, fg=gui.MUTED):
         self.status.append((text, fg))
 
     def _sldea_finished(self):
@@ -884,7 +885,7 @@ def test_a_flat_baseline_stops_a_dry_run_right_after_the_baseline_frame():
     # the operator is told why, in words, where they look
     text, fg = app.status[-1]
     assert text.startswith('STOPPED: NO PICTURE in the baseline frame'), text
-    assert fg == '#c62828'
+    assert fg == uc.TEXT_ALERT
     assert mb.titles('showwarning') == [STOP_BOX], mb.calls
     box = mb.calls[0][2]
     assert box.startswith('The run stopped itself right after its baseline '
@@ -1284,7 +1285,7 @@ def test_no_baseline_frame_stops_a_run_whose_preflight_had_a_camera():
         assert not any('NO PICTURE' in ln for ln in app.lines), app.lines
         text, fg = app.status[-1]
         assert text.startswith('STOPPED: NO BASELINE FRAME'), text
-        assert fg == '#c62828'
+        assert fg == uc.TEXT_ALERT
         assert mb.titles('showwarning') == [NOFRAME_BOX], mb.calls
         assert 'gave the pre-flight one' in mb.calls[0][2], mb.calls
         assert not any(ln.startswith('Pre-flight') for ln in setup)

@@ -14,7 +14,7 @@
    },
    {
     "label": "Connection line (top of each instrument tab)",
-    "what": "Green 'Connected (USB/LAN/Serial)' with the instrument's identity, red 'Not connected' with the reason, amber 'Linux bench only' on Windows."
+    "what": "Blue 'Connected (USB/LAN/Serial)' with the instrument's identity; brown 'Not connected' with the reason, or 'Linux bench only' on Windows. The words carry the state; the color repeats it."
    },
    {
     "label": "Reconnect (top-right of each instrument tab)",
@@ -60,8 +60,8 @@
   "workflow": [
    "1. Double-click the launcher; the Digital Multitool splash names each tab as it loads.",
    "2. The main window opens and all instruments auto-connect in the background.",
-   "3. Check each tab's Connection line turns green with the instrument's identity.",
-   "4. If a line is red, power that instrument on and click its Reconnect.",
+   "3. Check each tab's Connection line turns blue and reads Connected, with the instrument's identity.",
+   "4. If a line reads Not connected (brown), power that instrument on and click its Reconnect.",
    "5. Tools > Load Bench Profile… to recall a saved whole-bench setup.",
    "6. Work; watch the footer status bar for confirmations and warnings.",
    "7. Close the window when done — outputs are switched off automatically."
@@ -83,7 +83,7 @@
    },
    {
     "widget_text": "Not connected",
-    "note": "Turns green when the instrument answers"
+    "note": "Turns blue when the instrument answers"
    },
    {
     "widget_text": "Reconnect",
@@ -136,7 +136,7 @@
   "controls": [
    {
     "label": "Connection / Reconnect",
-    "what": "Shows meter link state (red = not connected); Reconnect re-detects the meter and reads its current settings into the tab."
+    "what": "Shows meter link state (brown = not connected); Reconnect re-detects the meter and reads its current settings into the tab."
    },
    {
     "label": "Mode",
@@ -196,7 +196,7 @@
    }
   ],
   "workflow": [
-   "1. Check Connection is green; click Reconnect if not.",
+   "1. Check Connection is blue; click Reconnect if not.",
    "2. Pick Mode, then set Frequency and Voltage.",
    "3. Optional: run Open then Short Correction on the empty/shorted fixture.",
    "4. Click Apply Configuration.",
@@ -214,7 +214,7 @@
   "callouts": [
    {
     "widget_text": "Reconnect",
-    "note": "Re-detect the meter if status is red"
+    "note": "Re-detect the meter if status is brown"
    },
    {
     "widget_text": "Apply Configuration",
@@ -271,7 +271,7 @@
   "controls": [
    {
     "label": "Connection / Reconnect",
-    "what": "Shows scope link status (red = not connected); Reconnect retries auto-detection over USB."
+    "what": "Shows scope link status (brown = not connected); Reconnect retries auto-detection over USB."
    },
    {
     "label": "Channel 1–4 tabs",
@@ -331,7 +331,7 @@
    }
   ],
   "workflow": [
-   "Check Connection shows connected; click Reconnect if it is red.",
+   "Check Connection shows connected; click Reconnect if it is brown.",
    "On each Channel tab: tick Enable Channel, set V/div, Coupling, Position.",
    "Tick Use as trigger on the channel you want to trigger from.",
    "Set Horizontal (s/div), Trigger Level (V) and Trigger Slope.",
@@ -436,7 +436,7 @@
    },
    {
     "label": "Output: OFF / ON",
-    "what": "Switches the real output; asks for confirmation before turning ON and goes green while ON."
+    "what": "Switches the real output; asks for confirmation before turning ON and goes red while ON."
    },
    {
     "label": "Burst + Cycles / Trigger / Interval",
@@ -466,7 +466,7 @@
    "Click Apply CH1 Settings and compare the gray applied readouts.",
    "Click Output: OFF and confirm to energize the output.",
    "For shot testing: tick Burst, set Cycles, Apply, then Fire.",
-   "Click the green Output button to switch off when done."
+   "Click the red Output button to switch off when done."
   ],
   "cautions": [
    "Turning Output ON can energize the Trek HV amplifier: 1 V from this generator = 1 kV at the DEA. The confirmation defaults to No — check amplitude and offset first.",
@@ -496,7 +496,7 @@
    },
    {
     "widget_text": "Output: OFF",
-    "note": "real output switch; confirms, green when ON"
+    "note": "real output switch; confirms, red when ON"
    },
    {
     "widget_text": "Burst",
@@ -666,7 +666,7 @@
   "controls": [
    {
     "label": "Connection / Reconnect",
-    "what": "Shows link status (red = not connected); Reconnect reopens the supply's USB-serial port."
+    "what": "Shows link status (brown = not connected); Reconnect reopens the supply's USB-serial port."
    },
    {
     "label": "Live readout (checkbox)",
@@ -706,7 +706,7 @@
    },
    {
     "label": "Output: OFF / ON (button)",
-    "what": "Toggles the channel output; asks for confirmation before energizing and turns green when ON."
+    "what": "Toggles the channel output; asks for confirmation before energizing and turns red when ON."
    },
    {
     "label": "📖 Show Usage Tips",
@@ -714,13 +714,13 @@
    }
   ],
   "workflow": [
-   "1. Check Connection is not red; press Reconnect if needed.",
+   "1. Check Connection is not brown; press Reconnect if needed.",
    "2. Pick the Channel 1 or Channel 2 sub-tab.",
    "3. Enter OVP and OCP, press Set Protection.",
    "4. Enter Set Voltage and Current Limit, press Apply V / I limit.",
-   "5. Press the Output button and confirm — it turns green ON.",
+   "5. Press the Output button and confirm — it turns red ON.",
    "6. Tick Live readout to watch measured V, A, and W.",
-   "7. Press the green Output button again to switch off when done."
+   "7. Press the red Output button again to switch off when done."
   ],
   "cautions": [
    "Apply V / I limit never switches the output — only the Output button energizes the terminals, and it asks first.",
@@ -736,7 +736,7 @@
    },
    {
     "widget_text": "Output: OFF",
-    "note": "Energizes terminals — confirms first, turns green"
+    "note": "Energizes terminals — confirms first, turns red"
    },
    {
     "widget_text": "Set Protection",
@@ -777,7 +777,7 @@
   "controls": [
    {
     "label": "Not connected (status)",
-    "what": "Shows link state to the meter; red until a connection succeeds."
+    "what": "Shows link state to the meter; brown until a connection succeeds."
    },
    {
     "label": "IP:",
@@ -801,7 +801,7 @@
    },
    {
     "label": "Big readout",
-    "what": "Latest reading in engineering notation (e.g. 16.74 mV); turns red \"OVLD\" on overload or a non-numeric reply."
+    "what": "Latest reading in engineering notation (e.g. 16.74 mV); turns brown \"OVLD\" on overload or a non-numeric reply."
    },
    {
     "label": "Small line under readout",
@@ -814,7 +814,7 @@
   ],
   "workflow": [
    "On the meter's front panel: Menu -> I/O / LAN, use \"DHCP Once\" to get an address on the bench subnet.",
-   "Type that IP into the IP: field and click Reconnect; status turns green.",
+   "Type that IP into the IP: field and click Reconnect; status turns blue.",
    "Pick a Function from the dropdown (starts on DC Voltage).",
    "Click Read once, or tick Live reading for a continuous ~2 Hz display.",
    "Read the big number; the grey line beneath shows the raw value and unit.",
@@ -830,7 +830,7 @@
   "callouts": [
    {
     "widget_text": "Not connected",
-    "note": "Connection status — green when linked"
+    "note": "Connection status — blue when linked"
    },
    {
     "widget_text": "IP:",
@@ -947,11 +947,11 @@
    },
    {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
-    "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
+    "what": "Dry run rehearses timing and photos with HV off; unticking turns the row orange for a live run. Abort ramps to 0 kV before stopping."
    },
    {
     "label": "Camera for this run (the line under ▶ Run)",
-    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab, open Advanced camera settings and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does; Auto-set camera or 🔒 Apply & Lock on the Webcam tab makes them agree). setup.txt's camera block records the same summary, then the camera device, pixel format, frame size and every locked control."
+    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns brown and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab, open Advanced camera settings and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does; Auto-set camera or 🔒 Apply & Lock on the Webcam tab makes them agree). setup.txt's camera block records the same summary, then the camera device, pixel format, frame size and every locked control."
    },
    {
     "label": "Auto-open Edge Review",
@@ -975,7 +975,7 @@
    },
    {
     "label": "Video job line (under the run row)",
-    "what": "After a video run, follows the background video job: starting the post-run job, detecting edges n/N with the time left, copying video.mkv into the run folder (x GB of y GB), then ready in the run folder with the frame counts. It also follows the re-run that an Edge Review Save starts. It is the video job's line, never the run's status: the run's alarms stay in the status beside the buttons. The words carry the meaning; the color repeats it (gray while busy, green when ready, ⚠ and a reason for a warning)."
+    "what": "After a video run, follows the background video job: starting the post-run job, detecting edges n/N with the time left, copying video.mkv into the run folder (x GB of y GB), then ready in the run folder with the frame counts. It also follows the re-run that an Edge Review Save starts. It is the video job's line, never the run's status: the run's alarms stay in the status beside the buttons. The words carry the meaning; the color repeats it (gray while busy, blue when ready, ⚠ and a reason for a warning)."
    },
    {
     "label": "Run log",

@@ -80,6 +80,8 @@ import time
 import weakref
 from datetime import datetime
 
+import ui_colors as uc
+
 # The Tk loop's period: about 2 Hz, as the issue asks. Each tick copies
 # at most one stream frame (latest_rgb) and shrinks it to THUMB_W.
 PERIOD_MS = 500
@@ -636,7 +638,7 @@ class LiveView:
                                  wraplength=THUMB_W - 90)
         self._exp_lbl.pack(side=tk.LEFT, padx=(4, 0))
         self._note_lbl = tk.Label(win, text=NOTE, anchor='w', justify='left',
-                                  wraplength=THUMB_W, fg='#555555')
+                                  wraplength=THUMB_W, fg=uc.TEXT_MUTED)
         self._note_lbl.pack(fill='x', padx=8, pady=(4, 8))
         self._level_bg = self._level_lbl.cget('bg')
         self._place()

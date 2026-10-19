@@ -57,6 +57,7 @@ import sldea_video
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
+import ui_colors as uc
 from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
                         browse_folder, folder_buttons, new_folder)
 from tk_checkmarks import install_check_marks, mark_classic_checkbutton
@@ -182,7 +183,7 @@ SG_STATE_KEYS = {'freq': 'freq_hz', 'amp': 'amp_vpp', 'offset': 'offset_v',
 # LAN. Flip to False to hide the ARB waveform + Waveform Editor again.
 SG_ARB_ENABLED = True
 
-MUTED = '#555555'   # readable muted text (X11 'gray'=#bebebe is 1.3:1)
+MUTED = uc.TEXT_MUTED   # readable muted text (X11 'gray'=#bebebe is 1.3:1)
 PREVIEW_MAX_HEIGHT = 520   # webcam preview height budget (px)
 
 # ---- Webcam preview: when it runs, and what the view says when not (#375) --
@@ -233,9 +234,9 @@ CAM_MAIN_CONTROLS = ('exposure_time_absolute', 'gain')
 CAM_AUTOSET_TEXT = "Auto-set camera"
 CAM_ADVANCED_SHOW = "▸ Advanced camera settings"
 CAM_ADVANCED_HIDE = "▾ Advanced camera settings"
-# Status colors, Paul Tol muted green and wine. The words carry the state.
-CAM_STATUS_DONE = '#117733'
-CAM_STATUS_WARN = '#882255'
+# Status colors (ui_colors, #462). The words carry the state.
+CAM_STATUS_DONE = uc.TEXT_OK
+CAM_STATUS_WARN = uc.TEXT_ALERT
 # The focus score is on by default, and its label is drawn about twice its
 # old 11 px height (24 px type: 22 px tall in Arial Bold, 23 in DejaVu
 # Sans Bold, measured 2026-10-07).
@@ -828,7 +829,7 @@ class InstrumentControlGUI:
                 # (audit 2026-07-25 — startup had no guard at all).
                 err = ttk.Frame(self.notebook)
                 self.notebook.add(err, text=f"{label} (unavailable)")
-                tk.Label(err, fg='#a01010', justify='left', wraplength=700,
+                tk.Label(err, fg=uc.TEXT_ALERT, justify='left', wraplength=700,
                          text=f"This tab failed to load:\n\n{e}\n\n"
                               f"The rest of the app keeps working. Try "
                               f"Help → Update Software, or report this."
@@ -1200,14 +1201,14 @@ class InstrumentControlGUI:
         if not INSTRUMENTS_SUPPORTED:
             for label in (self.lcr_status, self.scope_status,
                           self.sg_status, self.psu_status, self.dmm_status):
-                label.config(text=NOT_LINUX_SHORT, fg="#8a5a00")
+                label.config(text=NOT_LINUX_SHORT, fg=uc.TEXT_ALERT)
             self.status_bar.config(
                 text="Non-Linux platform: instrument tabs are view/edit "
                      "only; Battery Data and Webcam are fully available")
             return
         for label in (self.lcr_status, self.scope_status, self.sg_status,
                       self.psu_status, self.dmm_status):
-            label.config(text="Connecting...", fg="#b36b00")
+            label.config(text="Connecting...", fg=uc.TEXT_ALERT)
 
         def work():
             # One serial worker on purpose: the drivers share a process-wide
@@ -1285,12 +1286,12 @@ class InstrumentControlGUI:
                 ('dmm', self.dmm_status, None)):
             inst = results.get(key)
             if isinstance(inst, Exception) or inst is None:
-                label.config(text=f"Not connected: {inst}", fg="red")
+                label.config(text=f"Not connected: {inst}", fg=uc.TEXT_ALERT)
                 continue
             setattr(self, key, inst)
             label.config(
                 text=f"Connected ({self._transport(inst)}): {inst.idn}",
-                fg="green")
+                fg=uc.TEXT_OK)
             if sync:
                 sync()   # reads config; catches its own errors
 
@@ -1366,7 +1367,7 @@ class InstrumentControlGUI:
         if key == 'scope':
             self._scope_reconnecting = True
         setattr(self, key, None)   # nothing may use the handle meanwhile
-        label.config(text="Connecting...", fg="#b36b00")
+        label.config(text="Connecting...", fg=uc.TEXT_ALERT)
 
         def work():
             if old:
@@ -1382,12 +1383,12 @@ class InstrumentControlGUI:
             if key == 'scope':
                 self._scope_reconnecting = False   # after the handle
             if error:
-                label.config(text=f"Error: {error}", fg="red")
+                label.config(text=f"Error: {error}", fg=uc.TEXT_ALERT)
                 messagebox.showerror("Connection Error", str(error))
                 return
             label.config(
                 text=f"Connected ({self._transport(inst)}): {inst.idn}",
-                fg="green")
+                fg=uc.TEXT_OK)
             if sync:
                 sync()
 
@@ -1534,7 +1535,7 @@ BASIC vs ADVANCED:
 
 APPLY vs OUTPUT:
 - "Apply CH<n> Settings" pushes the configuration ONLY
-- The Output button turns the physical output on/off (green = ON)
+- The Output button turns the physical output on/off (red = ON)
 - Workflow: configure -> Apply -> check preview/applied -> Output ON
 
 APPLIED READOUTS & PREVIEW:
@@ -1662,7 +1663,7 @@ ANALYSIS:
         status_frame = ttk.LabelFrame(lcr_frame, text="Connection", padding=10)
         status_frame.pack(fill='x', padx=10, pady=10)
         
-        self.lcr_status = tk.Label(status_frame, text="Not connected", fg="red")
+        self.lcr_status = tk.Label(status_frame, text="Not connected", fg=uc.TEXT_ALERT)
         self.lcr_status.pack(side=tk.LEFT)
         
         ttk.Button(status_frame, text="Reconnect", command=self.reconnect_lcr).pack(side=tk.RIGHT)
@@ -2075,7 +2076,7 @@ ANALYSIS:
             self.sweeping = False
             self._sweep_gen = object()   # retire the worker unconditionally
             self.sw_status.config(text="Stop requested — finishing current sample...",
-                                  foreground='orange')
+                                  foreground=uc.TEXT_ALERT)
 
     def _interruptible_sleep(self, seconds, chunk=0.05, alive=None):
         """Sleep in small chunks so cancellation stays snappy."""
@@ -2188,17 +2189,17 @@ ANALYSIS:
         if cancelled:
             msg = (f"Sweep cancelled after {samples_written}/{total_samples} samples. "
                    f"Partial data: {out_path}")
-            self.sw_status.config(text=msg, foreground='orange')
+            self.sw_status.config(text=msg, foreground=uc.TEXT_ALERT)
         else:
             msg = f"Sweep complete: {samples_written} samples written to {out_path}"
-            self.sw_status.config(text=msg, foreground='green')
+            self.sw_status.config(text=msg, foreground=uc.TEXT_OK)
         self.status_bar.config(text=msg)
 
     def _sweep_failed_ui(self, err, out_path, samples_written):
         self.sweeping = False
         self._set_sweep_ui_state(running=False)
         self.sw_status.config(text=f"Sweep failed after {samples_written} samples: {err}",
-                              foreground='red')
+                              foreground=uc.TEXT_ALERT)
         self.status_bar.config(text=f"Sweep failed: {err}")
         messagebox.showerror("Sweep error", f"{err}\n\nPartial CSV (if any): {out_path}")
 
@@ -2418,7 +2419,7 @@ ANALYSIS:
         status_frame = ttk.LabelFrame(scope_frame, text="Connection", padding=10)
         status_frame.pack(fill='x', padx=10, pady=10)
         
-        self.scope_status = tk.Label(status_frame, text="Not connected", fg="red")
+        self.scope_status = tk.Label(status_frame, text="Not connected", fg=uc.TEXT_ALERT)
         self.scope_status.pack(side=tk.LEFT)
         
         ttk.Button(status_frame, text="Reconnect", command=self.reconnect_scope).pack(side=tk.RIGHT)
@@ -2587,7 +2588,7 @@ ANALYSIS:
         status_frame = ttk.LabelFrame(sg_frame, text="Connection", padding=10)
         status_frame.pack(fill='x', padx=10, pady=10)
 
-        self.sg_status = tk.Label(status_frame, text="Not connected", fg="red")
+        self.sg_status = tk.Label(status_frame, text="Not connected", fg=uc.TEXT_ALERT)
         self.sg_status.pack(side=tk.LEFT)
 
         ttk.Button(status_frame, text="Reconnect", command=self.reconnect_sg).pack(side=tk.RIGHT)
@@ -2665,7 +2666,7 @@ ANALYSIS:
         status_frame = ttk.LabelFrame(psu_frame, text="Connection", padding=10)
         status_frame.pack(fill='x', padx=10, pady=10)
         self.psu_status = tk.Label(status_frame, text="Not connected",
-                                   fg="red")
+                                   fg=uc.TEXT_ALERT)
         self.psu_status.pack(side=tk.LEFT)
         ttk.Button(status_frame, text="Reconnect",
                    command=self.reconnect_psu).pack(side=tk.RIGHT)
@@ -2678,7 +2679,7 @@ ANALYSIS:
             side=tk.RIGHT, padx=12)
 
         note = tk.Label(
-            psu_frame, fg='#8a5a00', justify='left', anchor='w',
+            psu_frame, fg=uc.TEXT_ALERT, justify='left', anchor='w',
             text="Safety: Apply sets the voltage and current limit but never "
                  "switches the output — use the Output button (it confirms "
                  "before energizing). Closing the app leaves the supply as-is "
@@ -2720,7 +2721,7 @@ ANALYSIS:
                     f"Send the voltage and current limit to CH{ch}. Does NOT "
                     "switch the output on or off.").grid(row=0, column=4,
                                                          padx=10)
-        ttk.Label(setf, foreground='#555',
+        ttk.Label(setf, foreground=MUTED,
                   text="Dual-range:  ≤35 V → up to 3 A,   35–70 V → up to "
                        "1.5 A").grid(row=1, column=0, columnspan=5, sticky='w',
                                      pady=(6, 0))
@@ -2750,17 +2751,17 @@ ANALYSIS:
         w['rd_setv'].grid(row=0, column=1, sticky='w')
         ttk.Label(rdf, text="Power:").grid(row=1, column=0, sticky='e', padx=4)
         w['rd_power'] = tk.Label(rdf, text="—  W", width=12, anchor='w',
-                                 font=big, fg='#1f3a5f')
+                                 font=big, fg=uc.TEXT_ACCENT)
         w['rd_power'].grid(row=1, column=1, sticky='w')
         ttk.Label(rdf, text="Meas V:").grid(row=0, column=2, sticky='e',
                                             padx=(18, 4))
         w['rd_measv'] = tk.Label(rdf, text="—  V", width=12, anchor='w',
-                                 font=big, fg='#2e7d32')
+                                 font=big, fg=uc.TEXT_ACCENT)
         w['rd_measv'].grid(row=0, column=3, sticky='w')
         ttk.Label(rdf, text="Meas I:").grid(row=1, column=2, sticky='e',
                                             padx=(18, 4))
         w['rd_measi'] = tk.Label(rdf, text="—  A", width=12, anchor='w',
-                                 font=big, fg='#2e7d32')
+                                 font=big, fg=uc.TEXT_ACCENT)
         w['rd_measi'].grid(row=1, column=3, sticky='w')
 
         w['output'] = tk.BooleanVar(value=False)
@@ -2859,8 +2860,9 @@ ANALYSIS:
     def _psu_set_output_button(self, ch, on):
         btn = self.psu_channel_widgets[ch]['out_btn']
         if on:
-            btn.config(text="Output: ON", bg='#2e7d32', fg='white',
-                       activebackground='#1b5e20', activeforeground='white')
+            btn.config(text="Output: ON", bg=uc.FILL_LIVE, fg=uc.TEXT_ON_FILL,
+                       activebackground=uc.FILL_LIVE_ACTIVE,
+                       activeforeground=uc.TEXT_ON_FILL)
         else:
             bg = self.psu_channel_widgets[ch]['out_btn_bg']
             btn.config(text="Output: OFF", bg=bg, fg='black',
@@ -2941,7 +2943,7 @@ SETTING AN OUTPUT:
 2. Type Set Voltage and Current Limit, then "Apply V / I limit".
    - Apply NEVER switches the output -- it only stages V and the limit.
    - Values are range-checked (>1.5 A above 35 V is refused).
-3. Press "Output: OFF" to energize -- it asks first, then turns green "ON".
+3. Press "Output: OFF" to energize -- it asks first, then turns red "ON".
 
 PROTECTION:
 - OVP/OCP set the hardware trip points; set them before enabling output.
@@ -2971,7 +2973,7 @@ SAFETY:
 
         status_frame = ttk.LabelFrame(frame, text="Connection", padding=10)
         status_frame.pack(fill='x', padx=10, pady=10)
-        self.dmm_status = tk.Label(status_frame, text="Not connected", fg="red")
+        self.dmm_status = tk.Label(status_frame, text="Not connected", fg=uc.TEXT_ALERT)
         self.dmm_status.pack(side=tk.LEFT)
         ttk.Button(status_frame, text="Reconnect",
                    command=self.reconnect_dmm).pack(side=tk.RIGHT)
@@ -3004,9 +3006,9 @@ SAFETY:
 
         self.dmm_reading = tk.Label(meas, text="—",
                                     font=('TkDefaultFont', 28, 'bold'),
-                                    fg='#2e7d32')
+                                    fg=uc.TEXT_OK)
         self.dmm_reading.grid(row=1, column=0, columnspan=4, pady=(12, 0))
-        self.dmm_reading_sub = tk.Label(meas, text="", fg='#555')
+        self.dmm_reading_sub = tk.Label(meas, text="", fg=MUTED)
         self.dmm_reading_sub.grid(row=2, column=0, columnspan=4, pady=(0, 4))
 
         tips = ttk.Frame(frame)
@@ -3040,10 +3042,10 @@ SAFETY:
     def _dmm_show(self, fn, val):
         unit = self.dmm.unit(fn) if self.dmm else ''
         if val is None:
-            self.dmm_reading.config(text="OVLD", fg='#c62828')
+            self.dmm_reading.config(text="OVLD", fg=uc.TEXT_ALERT)
             self.dmm_reading_sub.config(text=f"{fn} — overload / no reading")
         else:
-            self.dmm_reading.config(text=self._eng(val, unit), fg='#2e7d32')
+            self.dmm_reading.config(text=self._eng(val, unit), fg=uc.TEXT_OK)
             self.dmm_reading_sub.config(text=f"{fn}    ({val:.6g} {unit})")
 
     def dmm_read_once(self):
@@ -3272,7 +3274,7 @@ LOGGING:
         # 2026-08-02): Edge Review measures every area against it, and an
         # unticked baseline silently made the first mid-run frame the
         # reference — every outline wrong with no error anywhere.
-        self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
+        self.sldea_summary = tk.Label(inp, text="", fg=uc.TEXT_ACCENT, anchor='w',
                                       justify='left')
         self.sldea_summary.grid(row=4, column=0, columnspan=8, sticky='w',
                                 pady=(4, 0))
@@ -3335,8 +3337,8 @@ LOGGING:
         # (sldea_profile.run_folder), redrawn at every keystroke and every
         # change of the Output dir, which Browse and New folder... set too.
         # A run name used before used to overwrite that run's setup.txt and
-        # data.csv without a word; the line warns, in words and in Tol's
-        # muted wine, when the folder already holds a run, and Run refuses
+        # data.csv without a word; the line warns, in words and in the
+        # alert brown, when the folder already holds a run, and Run refuses
         # it. The check behind the warning runs on a thread
         # (_sldea_folder_check). Row 2, under the Run name box. Its size
         # never follows its text, which changes at every keystroke: it asks
@@ -3439,7 +3441,7 @@ LOGGING:
         self.sldea_vars['conc_ml'] = conc
         # Says WHY the box is greyed, right beside it -- a disabled field
         # with no explanation is a support question.
-        self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
+        self.sldea_conc_note = tk.Label(outf, text='', fg=MUTED, anchor='w')
         self.sldea_conc_note.grid(row=6, column=2, columnspan=2, sticky='w')
         # Follow the electrode as it is SELECTED and as it is TYPED: the box
         # is free text, so a custom material never fires ComboboxSelected.
@@ -3539,7 +3541,7 @@ LOGGING:
                           "abort fires -- a single dip resets the clock, so "
                           "transients never trip it.")
         self.sldea_vars['wd_s'] = wd_s
-        tk.Label(wdf, fg='#8a5a00',
+        tk.Label(wdf, fg=uc.TEXT_ALERT,
                  text="waits until it is SURE — sustained overcurrent only"
                  ).pack(side=tk.LEFT, padx=12)
 
@@ -3653,7 +3655,7 @@ LOGGING:
             f"data.csv is not touched. No review queue: every row carries "
             f"the detector's own confidence and needs-review verdict.").pack(
             side=tk.LEFT, padx=(14, 0))
-        self.sldea_vid_info = tk.Label(vidf, text='', fg='#555')
+        self.sldea_vid_info = tk.Label(vidf, text='', fg=MUTED)
         self.sldea_vid_info.pack(side=tk.LEFT, padx=12)
 
         # The run row, the background job's line and the camera line stay
@@ -3739,7 +3741,7 @@ LOGGING:
                     "can be traced back to its numbers. Area "
                     "needs reviewed runs; current and power work on raw "
                     "ones.").pack(side=tk.LEFT, padx=(8, 0))
-        self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
+        self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg=MUTED)
         self.sldea_status.pack(side=tk.LEFT, padx=12)
         # The live view (#376), at the far right and packed AFTER the
         # status: the status line carries the run's alarms ("NOT ZEROED"),
@@ -3810,7 +3812,7 @@ LOGGING:
         # background job at startup, possibly after this tab is showing);
         # it reads two entry boxes and the lock dict, never the camera.
         self.sldea_cam_line = tk.Label(column, text="", anchor='w',
-                                       justify='left', fg='#555',
+                                       justify='left', fg=MUTED,
                                        wraplength=1100)
         self.sldea_cam_line.pack(fill='x', padx=14, pady=(0, 2))
 
@@ -3835,9 +3837,9 @@ LOGGING:
         if p:
             self.sldea_summary.config(
                 text=p.summary() + "   |   control 0–"
-                f"{control_v_for_kv(max(p.levels)):g} V", fg='#1f3a5f')
+                f"{control_v_for_kv(max(p.levels)):g} V", fg=uc.TEXT_ACCENT)
         else:
-            self.sldea_summary.config(text=f"⚠ {err}", fg='red')
+            self.sldea_summary.config(text=f"⚠ {err}", fg=uc.TEXT_ALERT)
         self._sldea_video_info(p)
         self._sldea_redraw()
 
@@ -3919,7 +3921,7 @@ LOGGING:
         c.create_line(x0, y1, x1, y1)
         c.create_line(x0, y0, x0, y1)
         if not p:
-            c.create_text(w / 2, h / 2, text="enter valid values", fill='#999')
+            c.create_text(w / 2, h / 2, text="enter valid values", fill=MUTED)
             self._sldea_plot = None
             return
         total = p.total_duration_s or 1.0
@@ -3950,9 +3952,9 @@ LOGGING:
         # clear of the baseline diamond, which sits on the origin
         c.create_text(x0 - 6 - 1.25 * r, y1, text="0", anchor='e', font=font)
         c.create_text(x1, y1 + 4, text=fmt_duration(total), anchor='ne',
-                      font=font, fill='#555')
+                      font=font, fill=MUTED)
         ly = 4 + lh / 2                          # legend row, top margin
-        frames = c.create_text(x0, ly, anchor='w', font=font, fill='#555',
+        frames = c.create_text(x0, ly, anchor='w', font=font, fill=MUTED,
                                text=f"{p.n_frames} frames")
         self._sldea_draw_legend(c, sldea_preview.legend_tags(p),
                                 c.bbox(frames)[2] + 22, ly, k)
@@ -3970,7 +3972,7 @@ LOGGING:
             self._sldea_draw_marker(c, tag, x + 1.4 * r, y, r, tags='legend')
             item = c.create_text(x + 2.8 * r + 5, y, anchor='w',
                                  text=sldea_preview.MARKERS[tag][2],
-                                 font=self.SLDEA_PREVIEW_FONT, fill='#222',
+                                 font=self.SLDEA_PREVIEW_FONT, fill=uc.TEXT,
                                  tags='legend')
             x = c.bbox(item)[2] + 16 * k
 
@@ -4037,16 +4039,18 @@ LOGGING:
         # 2026-07-25 — color was the only signal).
         if self.sldea_dryrun.get():
             self.sldea_dry_cb.config(text="DRY RUN — HV OFF",
-                                     bg='#fff3cd', fg='#8a5a00',
-                                     selectcolor='#fff3cd')
-            self.sldea_run_btn.config(text="▶ Run (DRY)", bg='#8a5a00',
-                                      activebackground='#6d4700')
+                                     bg=uc.ROW_DRY, fg=uc.TEXT,
+                                     selectcolor=uc.ROW_DRY)
+            self.sldea_run_btn.config(text="▶ Run (DRY)", bg=uc.FILL_DRY,
+                                      activebackground=uc.FILL_DRY_ACTIVE,
+                                      activeforeground=uc.TEXT_ON_FILL)
         else:
             self.sldea_dry_cb.config(text="⚡ LIVE — HV WILL BE DRIVEN",
-                                     bg='#f8d7da', fg='#a01010',
-                                     selectcolor='#f8d7da')
-            self.sldea_run_btn.config(text="▶ Run — LIVE HV", bg='#c62828',
-                                      activebackground='#8e1a1a')
+                                     bg=uc.ROW_LIVE, fg=uc.TEXT,
+                                     selectcolor=uc.ROW_LIVE)
+            self.sldea_run_btn.config(text="▶ Run — LIVE HV", bg=uc.FILL_LIVE,
+                                      activebackground=uc.FILL_LIVE_ACTIVE,
+                                      activeforeground=uc.TEXT_ON_FILL)
 
     def _sldea_out_locked(self):
         """True (+ a note) while an SLDEA run is on, LIVE or DRY: Output
@@ -4098,9 +4102,9 @@ LOGGING:
     SLDEA_FOLDER_POLL_MS = 100
     SLDEA_FOLDER_SLOW_S = 2.0
     SLDEA_FOLDER_RUN_MS = 500
-    # The job line's colors (#396): the repo's muted gray, and Paul Tol's
-    # muted wine for a warning (7.7:1 as text on the Windows background).
-    SLDEA_FOLDER_COLORS = {'ok': MUTED, 'warn': '#882255'}
+    # The line's colors (ui_colors, #462): the muted gray, and the alert
+    # brown for a warning (4.8:1 as text on the bench's #d9d9d9).
+    SLDEA_FOLDER_COLORS = {'ok': MUTED, 'warn': uc.TEXT_ALERT}
 
     def _sldea_folder_boxes(self):
         """(Output dir, Run name) as the line reads them. The name comes
@@ -5476,33 +5480,33 @@ LOGGING:
         lbl = tk.Label(win, image=photo)
         lbl.image = photo               # keep a reference
         lbl.pack(padx=8, pady=8)
-        tk.Label(win, text=rep['stats_line'], fg='#1f3a5f').pack()
-        tk.Label(win, text=hint, fg='#c62828' if gate else '#1f3a5f',
+        tk.Label(win, text=rep['stats_line'], fg=uc.TEXT_ACCENT).pack()
+        tk.Label(win, text=hint, fg=uc.TEXT_ALERT if gate else uc.TEXT_ACCENT,
                  wraplength=520,
                  font=('TkDefaultFont', 9, 'bold' if gate else 'normal')
                  ).pack(pady=(2, 0))
         # Advice, never a gate: a device that is not a disc refuses the
         # fit by design, and such runs are reviewed by hand.
         if rep['disc_line']:
-            tk.Label(win, text=rep['disc_line'], fg='#555',
+            tk.Label(win, text=rep['disc_line'], fg=MUTED,
                      wraplength=520).pack(pady=(2, 0))
-        tk.Label(win, text=rep['camera_line'], fg='#1f3a5f',
+        tk.Label(win, text=rep['camera_line'], fg=uc.TEXT_ACCENT,
                  wraplength=520).pack(pady=(4, 0))
         if mismatch:
             # the warning sign and the bold weight are the cue; the colour
             # only repeats it (#361)
-            tk.Label(win, text="⚠ " + mismatch, fg='#c62828', wraplength=520,
+            tk.Label(win, text="⚠ " + mismatch, fg=uc.TEXT_ALERT, wraplength=520,
                      justify='left', font=('TkDefaultFont', 9, 'bold')
                      ).pack(pady=(2, 0))
         if rep['mismatch']:
             tk.Label(win,
                      text="⚠ " + sldea_profile.PREVIEW_MISMATCH_HEADLINE,
-                     fg='#c62828', wraplength=520,
+                     fg=uc.TEXT_ALERT, wraplength=520,
                      font=('TkDefaultFont', 9, 'bold')).pack(pady=(2, 0))
-            tk.Label(win, text=rep['mismatch_line'], fg='#c62828',
+            tk.Label(win, text=rep['mismatch_line'], fg=uc.TEXT_ALERT,
                      wraplength=520).pack()
         tk.Label(win, text="Check: DEA centred in the circle · in focus · "
-                           "no glare / clipping", fg='#555').pack(pady=(0, 6))
+                           "no glare / clipping", fg=MUTED).pack(pady=(0, 6))
         bf = ttk.Frame(win)
         bf.pack(pady=(0, 10))
 
@@ -5843,7 +5847,7 @@ LOGGING:
             self.sldea_log.config(state='disabled')
         self.root.after(0, up)
 
-    def _sldea_set_status(self, text, fg='#555'):
+    def _sldea_set_status(self, text, fg=MUTED):
         self.root.after(0, lambda: self.sldea_status.config(text=text, fg=fg))
 
     def _sldea_worker(self, p, outdir, runname, sgch, vch, ich, dry,
@@ -6261,7 +6265,7 @@ LOGGING:
                             self._sldea_set_status(
                                 f"LIVE  waiting at 0 V for the scope "
                                 f"Reconnect: {shown}/{limit:g} s",
-                                fg='#a01010')
+                                fg=uc.TEXT_ALERT)
                         time.sleep(self.SLDEA_POLL_S)
                         continue
                     break
@@ -6740,7 +6744,7 @@ LOGGING:
                         f"{'DRY' if dry else 'LIVE'}  t={el:.0f}/"
                         f"{p.total_duration_s:.0f}s  ~{p.kv_at(el):.2f} kV  "
                         f"frames {si}/{len(snaps)}",
-                        fg='#8a5a00' if dry else '#a01010')
+                        fg=uc.TEXT_OK if dry else uc.TEXT_ALERT)
                     last_status = el
                 time.sleep(self.SLDEA_POLL_S)
             # THE LAST STILL OF A VIDEO RUN (adversarial review 2026-10-05).
@@ -6774,11 +6778,11 @@ LOGGING:
             if done == 'aborted':
                 stop_box = stop_words if base_stop else vid_stop
             if stop_box:
-                # Say WHY in words where the operator looks: a green
+                # Say WHY in words where the operator looks: an OK-blue
                 # "aborted" would read as their own Abort. The box is
                 # queued on the Tk thread; this thread goes straight on to
                 # the finally block and zeroes the SG without waiting.
-                self._sldea_set_status(stop_box['status'], fg='#c62828')
+                self._sldea_set_status(stop_box['status'], fg=uc.TEXT_ALERT)
                 # (sldea_alarm: a held launch box waits for it, #429)
                 try:
                     self.root.after(0, lambda: sldea_alarm(
@@ -6789,14 +6793,14 @@ LOGGING:
             else:
                 self._sldea_set_status(
                     f"{done} — {si} frames",
-                    fg='#c62828' if done == 'BREAKDOWN-ABORT' else '#2e7d32')
+                    fg=uc.TEXT_ALERT if done == 'BREAKDOWN-ABORT' else uc.TEXT_OK)
             if done == 'complete' and autoproc and si > 0:
                 self._sldea_log("auto-opening Edge Review…")
                 self.root.after(
                     0, lambda: self._sldea_open_edge_review(rundir, auto=True))
         except Exception as e:
             self._sldea_log(f"ERROR: {e}")
-            self._sldea_set_status("error", fg='red')
+            self._sldea_set_status("error", fg=uc.TEXT_ALERT)
         finally:
             # the tab is released whatever happens in here (outer finally):
             # an exception anywhere below used to be able to leave it
@@ -6834,7 +6838,7 @@ LOGGING:
                             "FRONT PANEL NOW.")
                         self._sldea_set_status(
                             "⚡ NOT ZEROED — turn off SG/Trek manually!",
-                            fg='#c62828')
+                            fg=uc.TEXT_ALERT)
                         # sldea_alarm: no held launch box may cover it (#429)
                         self.root.after(0, lambda: sldea_alarm(
                             self, messagebox.showerror,
@@ -7046,14 +7050,14 @@ LOGGING:
     # last word is still read when it comes; at most this long, because
     # Windows reuses process ids.
     SLDEA_JOB_GIVE_UP_S = 30 * 60
-    # The job line's colors (#396 review): the repo's muted gray (MUTED)
-    # while a job works, then Paul Tol's muted green and muted wine, the
-    # two muted Tol colors sldea_plot.GROUP_COLORS already uses. Their WCAG
-    # contrast as text on the Windows default background (#F0F0F0) is
-    # 6.5:1, 5.0:1 and 7.7:1; the repo's Tol yellows come to 1.7 and
-    # 1.9:1 there, too faint for words. The words carry the meaning, and
-    # the color only repeats it.
-    SLDEA_JOB_COLORS = {'busy': MUTED, 'done': '#117733', 'warn': '#882255'}
+    # The job line's colors (ui_colors, #462): the muted gray while a job
+    # works, then the OK blue or the alert brown. As text on the bench's
+    # #d9d9d9 they come to 6.9:1, 5.0:1 and 4.8:1. The muted green this
+    # line had before (#396 review) was 4.0:1 there, and beside the muted
+    # wine it could not clear the color-blind floor with the gray. The
+    # words carry the meaning, and the color only repeats it.
+    SLDEA_JOB_COLORS = {'busy': MUTED, 'done': uc.TEXT_OK,
+                        'warn': uc.TEXT_ALERT}
 
     def _sldea_job_watch(self, rundir, proc=None):
         """Follow the background video jobs of `rundir` on the job line
@@ -7184,7 +7188,7 @@ LOGGING:
                 dict(webcam.LOCKED_CONTROLS),
                 defaults=self._sldea_cam_defaults())
             self.sldea_cam_line.config(text=text,
-                                       fg='#8a5a00' if warn else '#555')
+                                       fg=uc.TEXT_ALERT if warn else MUTED)
         except Exception:
             pass
 
@@ -8044,7 +8048,7 @@ LOGGING:
         else:
             caption = f"{wave}  {freq:g} Hz  {amp:g} Vpp  {offset:+g} V"
         canvas.create_text(6, h - 6, anchor='sw', text=caption,
-                           fill='#666', font=('Arial', 8))
+                           fill=MUTED, font=('Arial', 8))
 
     @staticmethod
     def _set_entry(entry, value):
@@ -8198,9 +8202,10 @@ LOGGING:
     def _sg_set_output_button(self, ch, on):
         widgets = self.sg_channel_widgets[ch]
         if on:
-            widgets['out_btn'].config(text="Output: ON", bg='#2e7d32',
-                                      fg='white', activebackground='#1b5e20',
-                                      activeforeground='white')
+            widgets['out_btn'].config(text="Output: ON", bg=uc.FILL_LIVE,
+                                      fg=uc.TEXT_ON_FILL,
+                                      activebackground=uc.FILL_LIVE_ACTIVE,
+                                      activeforeground=uc.TEXT_ON_FILL)
         else:
             widgets['out_btn'].config(text="Output: OFF",
                                       bg=widgets['out_btn_bg'], fg='black',
@@ -9106,7 +9111,7 @@ LOGGING:
                 f"({reason})\n\n"
                 "Install on the bench, then relaunch:\n"
                 "    .venv/bin/pip install pandas matplotlib openpyxl"),
-                justify=tk.LEFT, fg="#8a5a00").pack(padx=20, pady=20,
+                justify=tk.LEFT, fg=uc.TEXT_ALERT).pack(padx=20, pady=20,
                                                     anchor="w")
             return
         from battery_tab import BatteryPane
@@ -9128,7 +9133,7 @@ LOGGING:
                    "    pip install opencv-python-headless Pillow numpy\n"
                    "or use Tools > Update Software (they're in requirements.txt).")
             tk.Label(tab, text=msg, justify=tk.LEFT, padx=20, pady=20,
-                     fg='#a00').pack(anchor='w')
+                     fg=uc.TEXT_ALERT).pack(anchor='w')
             return
 
         # --- device + preview controls ---
@@ -9256,7 +9261,7 @@ LOGGING:
         # --- preview image ---
         self.cam_view = tk.Label(tab, bg='black', width=80, height=24,
                                  anchor='center',
-                                 text="(preview off)", fg=MUTED)
+                                 text="(preview off)", fg=uc.TEXT_ON_DARK)
         self.cam_view.pack(fill='both', expand=True, padx=8, pady=4)
         # The view never shows a stopped preview as if it were live: the
         # PREVIEW OFF splash replaces the placeholder text at once, and
@@ -9544,7 +9549,7 @@ LOGGING:
         ctrls = webcam.list_controls(device)
         if not ctrls:
             ttk.Label(main if main is not None else self.camctl_grid,
-                      foreground='#8a5a00',
+                      foreground=uc.TEXT_ALERT,
                       text="no camera controls detected — plug the camera "
                            "in and press Read camera (under Advanced)"
                       ).grid(sticky='w')
@@ -9617,7 +9622,8 @@ LOGGING:
 
     def _cam_status(self, text, kind='busy'):
         """The camera settings' status line: `kind` 'busy' (muted), 'done'
-        or 'warn' (Tol muted green and wine). The words carry the state."""
+        or 'warn' (the OK blue and the alert brown). The words carry the
+        state."""
         self._cam_hint_on = False
         color = {'done': CAM_STATUS_DONE, 'warn': CAM_STATUS_WARN}.get(
             kind, MUTED)
@@ -10614,7 +10620,7 @@ LOGGING:
     def cam_toggle_timed(self):
         if self.cam_seq_running:
             self.cam_seq_running = False
-            self.cam_tm_status.config(text="Stopping\u2026", foreground='orange')
+            self.cam_tm_status.config(text="Stopping\u2026", foreground=uc.TEXT_ALERT)
         else:
             self._cam_start_timed()
 
@@ -10798,7 +10804,7 @@ LOGGING:
     def cam_toggle_sequence(self):
         if self.cam_seq_running:
             self.cam_seq_running = False
-            self.cam_seq_status.config(text="Stopping…", foreground='orange')
+            self.cam_seq_status.config(text="Stopping…", foreground=uc.TEXT_ALERT)
         else:
             self._cam_start_sequence()
 
@@ -10963,14 +10969,14 @@ LOGGING:
                     msg = f"Capture complete: {total} shots"
                     if csv_path:
                         msg += f"; focus -> {os.path.basename(csv_path)}"
-                    status.config(text=msg, foreground='green')
+                    status.config(text=msg, foreground=uc.TEXT_OK)
                     self.status_bar.config(text=msg)
                     final = True
                 elif kind == 'error':
                     self.cam_seq_running = False
                     btn.config(text=idle)
                     status.config(text=f"Capture failed: {evt[1]}",
-                                  foreground='red')
+                                  foreground=uc.TEXT_ALERT)
                     final = True
         except queue.Empty:
             pass
@@ -10978,7 +10984,7 @@ LOGGING:
             self.root.after(50, self._drain_cam_queue)
         elif not final:
             btn.config(text=idle)
-            status.config(text="Capture stopped", foreground='orange')
+            status.config(text="Capture stopped", foreground=uc.TEXT_ALERT)
 
 
 
@@ -10996,7 +11002,7 @@ def _startup_failed(exc):
     try:
         err = tk.Tk()
         err.title("SCPI Control failed to start")
-        tk.Label(err, fg='#a01010', justify='left', padx=14, pady=(12, 4),
+        tk.Label(err, fg=uc.TEXT_ALERT, justify='left', padx=14, pady=(12, 4),
                  font=('TkDefaultFont', 11, 'bold'),
                  text="The app could not start.").pack(anchor='w')
         tk.Label(err, justify='left', padx=14, wraplength=760,

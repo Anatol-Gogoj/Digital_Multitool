@@ -43,6 +43,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 
 import sldea_video as sv
+import ui_colors as uc
 import tk_checkmarks
 
 
@@ -270,7 +271,7 @@ class VideoReviewWindow:
         self.cv = tk.Canvas(w, width=self.CV_W, height=self.CV_H, bg='#111',
                             highlightthickness=0)
         self.cv.pack(padx=8, pady=(6, 2))
-        tk.Label(w, anchor='w', fg='#555555', wraplength=wrap,
+        tk.Label(w, anchor='w', fg=uc.TEXT_MUTED, wraplength=wrap,
                  text="Solid blue: the detector's outline on this frame. "
                       "Dashed grey: the resting disc. Display "
                       "contrast-stretched.").pack(fill='x', padx=8)

@@ -899,7 +899,7 @@
    },
    {
     "label": "Preview — kV vs time",
-    "what": "Live plot of the staircase. Each photo moment is marked by SHAPE as well as colour, so the marks read in any colour vision and in greyscale: open circle = camera warm-up, grey diamond = 0 kV baseline, blue triangle = post-ramp, yellow square = pre-ramp (legend along the top). Hover a mark for its landing, kV and time; a dashed black playhead tracks a running test."
+    "what": "Live plot of the staircase. Each photo moment is marked by SHAPE as well as colour, so the marks read in any colour vision and in greyscale: open circle = camera warm-up, red diamond = 0 kV baseline, blue triangle = post-ramp, yellow square = pre-ramp (legend along the top). Hover a mark for its landing, kV and time; a dashed black playhead tracks a running test."
    },
    {
     "label": "Output dir (Browse, New folder…) / Run name (blank = auto)",

@@ -1393,14 +1393,36 @@ def _wrap(text, width):
     return out
 
 
+# The three maps' color scale (#461, 2026-10-19): Paul Tol's sequential
+# 'iridescent' scheme, in place of matplotlib's 'magma', which is not one
+# of his. Pale is no change and dark the most. Its relative luminance
+# falls in equal steps (0.959 to 0.042, every color within 0.004 of a
+# straight line), which is why Tol says it also works in monochrome
+# vision and in a monochrome printout; tests/test_sldea_diag.py holds
+# that property, and magma fails it. The 23 colors and the bad-data
+# gray are copied from Paul Tol, "Colour Schemes", SRON/EPS/TN/09-002,
+# issue 3.2, 18 August 2021, Fig. 18, and checked against his
+# tol_colors.py v2022.10 (TOLcmaps.__iridescent,
+# sronpersonalpages.nl/~pault). As there, they are linearly interpolated.
+MAP_COLORS = ['#FEFBE9', '#FCF7D5', '#F5F3C1', '#EAF0B5', '#DDECBF',
+              '#D0E7CA', '#C2E3D2', '#B5DDD8', '#A8D8DC', '#9BD2E1',
+              '#8DCBE4', '#81C4E7', '#7BBCE7', '#7EB2E4', '#88A5DD',
+              '#9398D2', '#9B8AC4', '#9D7DB2', '#9A709E', '#906388',
+              '#805770', '#684957', '#46353A']
+MAP_BAD = '#999999'
+
+
 def figure(d, png, rundir=None):
     """Six panels: the three maps of the hottest frame, then drift,
     thresholds and the area sweep."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
     import cv2
 
+    maps_cmap = LinearSegmentedColormap.from_list('iridescent', MAP_COLORS)
+    maps_cmap.set_bad(MAP_BAD)
     fig, axs = plt.subplots(2, 3, figsize=(16, 9))
     per = d['frames']
     kv = [p['kv'] for p in per]
@@ -1426,7 +1448,7 @@ def figure(d, png, rundir=None):
                      'absdiff after gain+offset fit'),
                     (np.clip(tex, 0, 3),
                      'wrinkle map (detector texture ratio)')]):
-                ax.imshow(m, cmap='magma')
+                ax.imshow(m, cmap=maps_cmap)
                 ax.set_title(f"{t}\n{hot['kv']:g} kV", fontsize=9)
                 ax.set_xticks([])
                 ax.set_yticks([])

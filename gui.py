@@ -336,8 +336,8 @@ def sldea_box_after_run(app, title, text):
     A message box takes a grab (msgbox.tcl) and on Windows is owner-modal,
     so while one is open ■ Abort, which has no key binding, does not
     respond. Edge Review..., Tune params and Plot runs... stay enabled
-    during a run, and the worker opens Edge Review itself before its ramp
-    to 0, so a box that pops up 0.2 to 2 s after a launch could stand
+    during a run, and the worker opens Edge Review itself before it zeroes
+    the SG, so a box that pops up 0.2 to 2 s after a launch could stand
     between the operator and Abort. Nor may it cover an HV NOT ZEROED
     alarm. Meanwhile the caller's status line says what happened, and this
     looks again every SLDEA_LAUNCH_HOLD_MS with after(). The box comes in
@@ -904,9 +904,10 @@ class InstrumentControlGUI:
         """Safety shutdown on window close (user request 2026-07-20: the
         sig gen used to keep DRIVING after the app was closed). Best-effort
         per output -- a dead instrument must never block exit."""
-        # Stop a running SLDEA test FIRST so its worker performs the proper
-        # ramp-to-zero before we cut outputs (audit 2026-07-25: close never
-        # set _sldea_stop, racing the worker's 10 Hz drive).
+        # Stop a running SLDEA test FIRST so its worker sets its SG channel
+        # to 0 V and switches it off (a step, not a ramp) before we cut
+        # outputs (audit 2026-07-25: close never set _sldea_stop, racing
+        # the worker's 10 Hz drive).
         if getattr(self, '_sldea_running', False):
             self._sldea_stop = True
             for _ in range(30):                     # up to ~3 s
@@ -1300,7 +1301,7 @@ class InstrumentControlGUI:
             messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
             return
         # A LIVE SLDEA run owns the SG: nulling self.sg mid-run used to skip
-        # the safety ramp-down entirely (audit 2026-07-25, critical C1).
+        # the safety shutdown entirely (audit 2026-07-25, critical C1).
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
@@ -3498,7 +3499,7 @@ LOGGING:
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
-        # the breakdown + ramp to 0 + abort.
+        # the breakdown + abort (SG to 0 V, then output off).
         wdf = ttk.LabelFrame(left, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=6)
         wdf.pack(fill='x', padx=6, pady=(0, 4))
@@ -3514,7 +3515,8 @@ LOGGING:
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
-                    "breakdown captures a frame, ramps to 0 kV and aborts. "
+                    "breakdown captures a frame, then aborts: the SG is set "
+                    "to 0 V and switched off. "
                     "Unticked, only ■ Abort or the end of the run stops a "
                     "run that breaks down; Energize HV? says which. Ignored "
                     "on dry runs.").pack(side=tk.LEFT)
@@ -5740,7 +5742,8 @@ LOGGING:
 
     def sldea_abort(self):
         self._sldea_stop = True
-        self._sldea_log("abort requested — ramping to 0 and stopping…")
+        self._sldea_log("abort requested — stopping; on a LIVE run the SG "
+                        "is set to 0 V, then switched off…")
 
     def _sldea_finished(self):
         self._sldea_running = False
@@ -5908,7 +5911,7 @@ LOGGING:
         framedir = os.path.join(rundir, 'frames')
         fh = None
         # Capture the SG handle ONCE: a mid-run Reconnect nulls self.sg, and
-        # the finally-block ramp-down must always reach the instrument this
+        # the finally-block shutdown must always reach the instrument this
         # run actually drove (audit 2026-07-25, critical C1/C3 — HV could be
         # left energized while the UI reported 'complete').
         sg = self.sg if not dry else None
@@ -6547,7 +6550,8 @@ LOGGING:
                         self._sldea_log(
                             f"⚡ BREAKDOWN CONFIRMED — I={itxt}"
                             + f" sustained >{wd_s:g}s. Capturing frame, "
-                            f"ramping to 0, aborting.")
+                            f"then aborting (SG set to 0 V, then switched "
+                            f"off).")
                         # Date the trip electrically, from the very reading
                         # that tripped it — the frame capture below takes
                         # hundreds of ms and a fresh scope read, so its row
@@ -6810,8 +6814,9 @@ LOGGING:
                         rec.end_recording()
                     except Exception:
                         pass
-                # GUARANTEED HV shutdown: always ramp the SG this run drove
-                # (captured handle — survives a mid-run Reconnect), and NEVER
+                # GUARANTEED HV shutdown: always zero the SG this run drove
+                # (captured handle — survives a mid-run Reconnect): offset
+                # to 0 V, then output off, one write each, no ramp. And NEVER
                 # swallow a failure silently: the old bare `except: pass` let a
                 # dead link end a run green while the Trek stayed energized
                 # (audit 2026-07-25, criticals C1-C3).

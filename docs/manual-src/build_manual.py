@@ -35,7 +35,8 @@ _sh["workflow"][6] = ("7. Close the window when done — sig-gen outputs and "
                       "output is left as-is.")
 _sh["cautions"][0] = (
     "Closing the window switches off sig-gen outputs and LCR bias and stops "
-    "a running SLDEA test (best-effort, a few seconds to ramp) — but the DC "
+    "a running SLDEA test (best-effort: it gives the run up to about 3 s "
+    "to set the SG to 0 V and switch it off) — but the DC "
     "supply output is never touched. End a live HV run with ■ Abort, not the "
     "close button.")
 _sh["cautions"][1] = (
@@ -65,7 +66,8 @@ _sl["purpose"] = _sl["purpose"].replace(
     "single-layer dielectric elastomer actuator (SLDEA)")
 _sl["cautions"][0] = (
     "A live run drives real HV up to 10 kV through the Trek. Stop with "
-    "■ Abort (it ramps to 0 kV first); closing the window also stops the run "
+    "■ Abort (it sets the SG to 0 V, then switches it off: a step, not a "
+    "ramp); closing the window also stops the run "
     "best-effort — if the SG link is dead the Trek can stay energized and "
     "the app raises an HV NOT ZEROED alarm.")
 

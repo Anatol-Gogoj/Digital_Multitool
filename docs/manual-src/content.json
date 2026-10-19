@@ -67,7 +67,7 @@
    "7. Close the window when done — outputs are switched off automatically."
   ],
   "cautions": [
-   "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped and ramped down, and instruments return to front-panel control.",
+   "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped (best-effort: the run gets up to about 3 s to set the signal generator to 0 V and switch it off), and instruments return to front-panel control.",
    "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
@@ -935,7 +935,7 @@
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
-    "what": "Ticked by default. Watches Trek current during live runs: a current that stays Trip (µA) or more away from the baseline it learns at 0 kV, for Confirm (s) of consecutive reads, snapshots the breakdown, ramps to 0 and aborts. With fewer than 4 of its 8 baseline reads, or no scope at the arming line, it arms on the absolute rule |I| ≥ Trip instead, and run.log and setup.txt say so; a ticked LIVE run is left NOT ARMED only when it is stopped first. Transient spikes never trip it. The Energize HV? question says whether it is on (ON with its Trip and Confirm, or OFF and why), and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down. With it ticked, ▶ Run refuses a Trip or Confirm that is not a positive number. Beside it, every LIVE run with current reads also runs a second rule, the N-sigma rule, in shadow only: it stops nothing, marks in telemetry.csv when it would have tripped, and after the run lists what it saw in run.log and setup.txt (Watchdog shadow lines)."
+    "what": "Ticked by default. Watches Trek current during live runs: a current that stays Trip (µA) or more away from the baseline it learns at 0 kV, for Confirm (s) of consecutive reads, snapshots the breakdown and aborts the run (signal generator to 0 V, then output off). With fewer than 4 of its 8 baseline reads, or no scope at the arming line, it arms on the absolute rule |I| ≥ Trip instead, and run.log and setup.txt say so; a ticked LIVE run is left NOT ARMED only when it is stopped first. Transient spikes never trip it. The Energize HV? question says whether it is on (ON with its Trip and Confirm, or OFF and why), and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down. With it ticked, ▶ Run refuses a Trip or Confirm that is not a positive number. Beside it, every LIVE run with current reads also runs a second rule, the N-sigma rule, in shadow only: it stops nothing, marks in telemetry.csv when it would have tripped, and after the run lists what it saw in run.log and setup.txt (Watchdog shadow lines)."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
@@ -947,7 +947,7 @@
    },
    {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
-    "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
+    "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort sets the signal generator to 0 V, then switches its output off: a step, not a ramp."
    },
    {
     "label": "Camera for this run (the line under ▶ Run)",
@@ -992,7 +992,7 @@
    "7. Let it finish (or ■ Abort); Edge Review opens on the new run folder."
   ],
   "cautions": [
-   "A live run drives real HV up to 10 kV through the Trek. Always stop with ■ Abort (it ramps to 0 kV first); closing the app mid-run can leave the Trek energized.",
+   "A live run drives real HV up to 10 kV through the Trek. Always stop with ■ Abort (it sets the signal generator to 0 V, then switches it off); closing the app mid-run is only a best-effort stop and can leave the Trek energized.",
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
@@ -1015,7 +1015,7 @@
    },
    {
     "widget_text": "■ Abort",
-    "note": "Ramps to 0 kV, then stops"
+    "note": "Sets 0 V, then output off"
    },
    {
     "widget_text": "⚡ Breakdown watchdog (LIVE runs)",

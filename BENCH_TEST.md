@@ -301,7 +301,7 @@ want to see the prompts first.
 > **This section energizes the Trek to real kV.** Only for someone
 > trained and authorized on that rig. Two rules: instrument control is
 > **Linux-bench-only**, and a live run must be ended with **■ Abort** —
-> closing the app only attempts a best-effort ramp.
+> closing the app is only a best-effort stop.
 
 This verifies #159 and finishes the telemetry smoke. Sections M and N do
 not depend on it and should be done first. The camera rule in §M's setup
@@ -317,7 +317,7 @@ stops itself at its baseline frame.
    - [ ] a `watchdog baseline … µA` line appears before the ramp
    - [ ] `measured_kV` in `data.csv` tracks `nominal_kV` for the **whole** ramp — no blank tail (that was the 07-29 dropout)
 4. **■ Abort** partway through
-   - [ ] the ramp goes to 0 promptly and the log says `aborted`
+   - [ ] the SG goes to 0 V and then off promptly (one step, not a ramp) and the log says `aborted`
    - [ ] `telemetry.csv` is complete up to the abort
 5. If anything trips the watchdog, keep everything — the run folder is then the first live-recorded breakdown.
 

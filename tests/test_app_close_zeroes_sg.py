@@ -20,8 +20,11 @@ Trek. What is pinned here:
 * the run marks its channel after the DC write and before output ON, and
   _sldea_finished clears the mark; a DRY run never sets it;
 * end to end, on the real sldea_run and worker: a close during a scope
-  read that outlasts the wait leaves the channel at 0 V, and Abort during
-  a scope read writes no new level after it.
+  read that outlasts the wait leaves the channel at 0 V, Abort during a
+  scope read writes no new level after it, and a stop that comes while
+  the worker waits for the SG's I/O lock (another thread holding it)
+  stops the level too, because the stop is checked again under that
+  lock.
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
@@ -364,12 +367,64 @@ def test_abort_during_a_scope_read_writes_no_new_level():
             app.lines
 
 
+class _GateLock:
+    """The SG's I/O lock (what instruments._io_lock hands out), with a hook
+    run as a thread is let in, before the holder's first statement: the
+    moment a thread that was queued behind another holder gets the lock."""
+
+    def __init__(self, on_enter):
+        self.inner = threading.RLock()
+        self.on_enter = on_enter
+        self.entries = 0
+
+    def __enter__(self):
+        self.inner.acquire()
+        self.entries += 1
+        self.on_enter()
+        return self
+
+    def __exit__(self, *exc):
+        self.inner.release()
+        return False
+
+
+def test_a_stop_that_comes_while_the_run_waits_for_the_sg_lock_still_holds():
+    """Another thread (Continuous Logging reads the SG) holds the SG's I/O
+    lock past close's wait. The worker passed its first stop check before
+    the stop, and is let into the lock only after it: close or Abort has
+    set the stop meanwhile, and close's zero may already have gone in.
+    The worker checks again under the lock and writes no level."""
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)):
+        app = _live_app(tmp)
+        hit = []
+
+        def let_in():
+            if L._ramping(app) and not hit:
+                hit.append(len(app.sg.writes))
+                app._sldea_stop = True       # set while it waited
+        gate = _GateLock(let_in)
+        app.sg.__dict__['_io_rlock'] = gate
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        assert app.worker_error is None, repr(app.worker_error)
+        assert hit, "the drive write never took the SG's I/O lock"
+        after = app.sg.writes[hit[0]:]
+        assert after == [('set_offset', 1, 0.0), ('set_output', 1, False)], \
+            after
+        # every level the run wrote went through the lock, and so did the
+        # one it then did not write
+        levels = [w for w in app.sg.writes[:hit[0]] if w[0] == 'set_offset']
+        assert gate.entries == len(levels) + 1, (gate.entries, levels)
+
+
 def test_close_during_a_long_scope_read_leaves_the_run_channel_at_0v():
     """The worker is stuck in a scope read mid-ramp for longer than the
     close handler's ~3 s wait. Close zeroes the run's channel and switches
     both outputs off; when the read comes back, the worker writes no new
-    level, and its finally block zeroes the channel again. The last word
-    on CH1 is offset 0 V with the output off."""
+    level. Its finally block's zero still reaches this fake SG, which
+    takes writes after close(); in the app that session is closed by then
+    and those writes fail."""
     with tempfile.TemporaryDirectory() as tmp, \
             L._patched(L._MB(L.LIVE_OK)):
         app = _live_app(tmp)

@@ -42,7 +42,7 @@ import continuous_log
 import launch_check
 import presets_path
 import relaunch
-from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
+from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C, _io_lock
 import lcr_format
 import output_folder
 import scope_trace
@@ -919,13 +919,15 @@ class InstrumentControlGUI:
                     break
                 self.root.update()
                 time.sleep(0.1)
-        # A run still flagged now has not zeroed its channel: the flag
-        # clears only in _sldea_finished, which the worker queues after its
-        # zeroing attempt. Output off alone would leave the run's last level
-        # set for the next Output ON (#460), so zero it first, in the
-        # worker's order: offset, then output. Only the channel the run set
-        # to DC -- OFST in another mode (NOISE) is not bench-verified, and
-        # on the other channel it would rewrite the operator's set-up.
+        # A run still flagged now may not have zeroed its channel: the flag
+        # clears only in _sldea_finished, which the worker queues at the
+        # end of its finally block, after its zeroing attempt. Output off
+        # alone would leave the run's last level set for the next Output ON
+        # (#460), so zero it first, in the worker's order: offset, then
+        # output. A run that did zero gets a second 0 V on a channel still
+        # in DC. Only the channel the run set to DC -- OFST in another mode
+        # (NOISE) is not bench-verified, and on the other channel it would
+        # rewrite the operator's set-up.
         zero_ch = (getattr(self, '_sldea_sg_dc_ch', None)
                    if getattr(self, '_sldea_running', False) else None)
         try:
@@ -6672,16 +6674,26 @@ LOGGING:
                 # Never a new level once a stop is asked: the scope read
                 # above can outlast window close's wait, and a level written
                 # after close has zeroed the channel would stay set (#460).
-                # The finally block zeroes the channel as before.
+                # The stop is checked again under the SG's own I/O lock,
+                # which close's zero also takes, because another thread
+                # (Continuous Logging reads the SG) can hold that lock past
+                # the wait: whichever write gets it first, no level lands
+                # after the zero. The finally block zeroes as before.
                 if sg is not None and not self._sldea_stop:
                     kv = p.kv_at(el)
                     if last_kv is None or abs(kv - last_kv) > 1e-4:
-                        try:
-                            sg.set_offset(
-                                sgch, trek_sign * control_v_for_kv(kv))
-                        except Exception as e:
-                            self._sldea_log(f"SG set_offset error: {e}")
-                        last_kv = kv
+                        err = None
+                        with _io_lock(sg):
+                            if not self._sldea_stop:
+                                try:
+                                    sg.set_offset(
+                                        sgch,
+                                        trek_sign * control_v_for_kv(kv))
+                                except Exception as e:
+                                    err = e
+                                last_kv = kv
+                        if err is not None:
+                            self._sldea_log(f"SG set_offset error: {err}")
                 # A video run's stills come off the stream, and must be
                 # exposed like one-shot stills and taken no EARLIER than
                 # scheduled (adversarial review 2026-09-23). So: ask the

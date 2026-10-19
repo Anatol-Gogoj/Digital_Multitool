@@ -4719,20 +4719,37 @@ bench-checked yet; the check is in #369.
 - The loop skips its drive write once `_sldea_stop` is set. Abort, the
   watchdog trip and the baseline stop all set it, and none of them wants
   the drive raised afterwards. The finally block's zero is unchanged.
+- The stop is checked again inside the SG's own I/O lock
+  (`instruments._io_lock`), which the close's zero also takes. The
+  adversarial review found why: Continuous Logging reads both SG channels
+  on its own thread during a run, and one timed-out query holds that lock
+  for up to 5 s, past the close's wait. A worker that passed the first
+  check before the stop and then waited for the lock could otherwise land
+  its level after the zero. Python does not promise which waiter gets a
+  released lock, so the order cannot be left to chance.
 - Cost: on a dead SG link the close makes one more write, so up to one
   more 5 s timeout before the window goes.
 
-**Evidence.** `tests/test_app_close_zeroes_sg.py`, 13 cases. They cover
+**Evidence.** `tests/test_app_close_zeroes_sg.py`, 14 cases. They cover
 the close handler's call order on a recording SG (zero on the run's
 channel, then CH1 and CH2 off, then the session handed back), every case
-that must not write an offset, a dead link, and the mark's place between
-the DC write and output ON. Two of them run the real worker: a close
-during a scope read held past the wait leaves CH1's last writes at 0 V
-and output off, and Abort during a scope read makes the zero the next SG
-write. Six mutants of the fix are each caught by at least one case: no
-loop guard, no close zero, a zero without the running check, the mark
-set before the DC write, the mark kept after the run, and a zero on the
-claimed channel instead of the marked one. `SG_WRITERS` in
+that must not write an offset, and a dead link. Five run the real
+sldea_run and worker:
+
+- the mark lands between the DC write and output ON;
+- a DRY run never marks a channel;
+- Abort during a scope read makes the zero the next SG write;
+- a stop set while the worker waits for the SG's lock still stops the
+  level;
+- a close during a scope read held past the wait leaves CH1's last
+  writes at 0 V and output off.
+
+Seven mutants of the fix are each caught by at least one case: no check
+under the lock, no lock, no close zero, a zero without the running
+check, the mark set before the DC write, the mark kept after the run,
+and a zero on the claimed channel instead of the marked one. An eighth
+survives, and it is equivalent: dropping the stop check before the lock
+leaves the check under it, which stops the same writes. `SG_WRITERS` in
 tests/test_sg_live_lock.py lists the new `set_offset`.
 
 **Not changed.** Once the window is destroyed the close still cannot show

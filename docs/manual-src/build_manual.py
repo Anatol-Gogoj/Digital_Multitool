@@ -562,8 +562,10 @@ body.append(f"""
     </div>
   </div>
   {fig('30_tuner_selftest', 'Detection panels: baseline, mid-run, late frame with outlines', 'wide')}
-  <p class="cap">What the detector shows per frame: cyan = detected outline, orange = resting-disc
-  reference. Confidence and area (mm²) are printed above each panel.</p>
+  <p class="cap">What the detector shows per frame: its best outline solid, thick and lightly
+  filled (cyan), the second dashed (blue), the third dotted (yellow), each on a thin black edge:
+  the colors Edge Review gives its candidates A, B and C. Confidence and area (mm²) are printed
+  above each panel.</p>
   {fig('31_diag_selftest', 'Diagnostic self-test sheet', 'wide')}
   <p class="cap">The diagnostic's verdict panels — run <code>--selftest</code> any time to check the
   stack without data.</p>

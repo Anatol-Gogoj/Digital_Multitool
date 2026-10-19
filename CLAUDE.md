@@ -64,10 +64,11 @@ as of 2026-08-12; read them for background, never update them.
 ## Timeless traps
 
 - Closing the app does **not** switch off the BK 9174B output, and a live
-  SLDEA run must end via ■ Abort, which sets the SG to 0 V and then
-  switches it off (a step, not a ramp). Window close is only a
-  best-effort stop: it gives the run up to ~3 s to do that, then
-  switches both SG outputs off itself.
+  SLDEA run must end via ■ Abort, which sets the run's SG channel to
+  0 V and then switches it off (a step, not a ramp). Window close is
+  only a best-effort stop: it gives the run about 3 s to do that, then
+  switches both SG outputs off without zeroing the offset, so a run
+  that had not stopped by then keeps its last offset set.
 - The 4055B's USB is hard-capped at 52 bytes per command and a long
   transfer wedges the firmware — arbs go via LAN or flash drive
   (README §quirks has the full story; the probe that proves it lives in

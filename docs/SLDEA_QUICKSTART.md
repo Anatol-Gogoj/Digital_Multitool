@@ -264,7 +264,9 @@ monitoring says: "Run continues; watch the DEA and abort manually if in doubt."
   (only a best-effort stop). "V_Out off-screen" is not an Abort rule here (section 3, step 5).
 - What "Abort" does: it sets a stop flag, seen within about 0.1 s or after the photo in progress.
   The program then sets the signal generator offset to 0 V and only then switches its output OFF:
-  one step, not a slow ramp. The status reads "aborted" in green. Green does not mean safe.
+  one step, not a slow ramp. Older copies of the app log "abort requested — ramping to 0", and
+  the v1.4.5 manual says ramp too; the code never ramped. The status reads "aborted" in green.
+  Green does not mean safe.
 - If the watchdog trips ("BREAKDOWN CONFIRMED" in the log), the run takes one photo, stops and
   zeroes, and the status reads "BREAKDOWN-ABORT" in red. BENCH_TEST.md section O: "keep everything".
 

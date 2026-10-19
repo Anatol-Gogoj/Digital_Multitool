@@ -3515,8 +3515,8 @@ LOGGING:
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
-                    "breakdown captures a frame, then aborts: the SG is set "
-                    "to 0 V and switched off. "
+                    "breakdown captures a frame, then aborts: the run's SG "
+                    "channel is set to 0 V and switched off. "
                     "Unticked, only ■ Abort or the end of the run stops a "
                     "run that breaks down; Energize HV? says which. Ignored "
                     "on dry runs.").pack(side=tk.LEFT)
@@ -5742,8 +5742,8 @@ LOGGING:
 
     def sldea_abort(self):
         self._sldea_stop = True
-        self._sldea_log("abort requested — stopping; on a LIVE run the SG "
-                        "is set to 0 V, then switched off…")
+        self._sldea_log("abort requested — stopping; a LIVE run then sets "
+                        "its SG channel to 0 V and switches it off…")
 
     def _sldea_finished(self):
         self._sldea_running = False
@@ -6550,7 +6550,7 @@ LOGGING:
                         self._sldea_log(
                             f"⚡ BREAKDOWN CONFIRMED — I={itxt}"
                             + f" sustained >{wd_s:g}s. Capturing frame, "
-                            f"then aborting (SG set to 0 V, then switched "
+                            f"then aborting (its SG channel to 0 V, then "
                             f"off).")
                         # Date the trip electrically, from the very reading
                         # that tripped it — the frame capture below takes

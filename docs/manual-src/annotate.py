@@ -344,7 +344,7 @@ S["tab_sldea"] = {
         {"match": "▶ Run (DRY)", "badge_below": "Camera for this run",
          "label": "Starts the run — the label shows the mode"},
         {"match": "■ Abort", "badge_below": "Camera for this run",
-         "label": "Sets the SG to 0 V, then switches it off"},
+         "label": "Live run: its SG channel to 0 V, then off"},
         {"match": "🔍 Edge Review…", "badge_below": "Camera for this run",
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
         {"match": "🎚 Tune params…", "badge_below": "Camera for this run",

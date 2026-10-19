@@ -317,7 +317,7 @@ stops itself at its baseline frame.
    - [ ] a `watchdog baseline … µA` line appears before the ramp
    - [ ] `measured_kV` in `data.csv` tracks `nominal_kV` for the **whole** ramp — no blank tail (that was the 07-29 dropout)
 4. **■ Abort** partway through
-   - [ ] the SG goes to 0 V and then off promptly (one step, not a ramp) and the log says `aborted`
+   - [ ] once any photo in progress finishes, V_Out on the scope drops to 0 at once (no ramp down); afterwards that SG channel shows a 0 V offset with its output OFF, and the log says `aborted`
    - [ ] `telemetry.csv` is complete up to the abort
 5. If anything trips the watchdog, keep everything — the run folder is then the first live-recorded breakdown.
 

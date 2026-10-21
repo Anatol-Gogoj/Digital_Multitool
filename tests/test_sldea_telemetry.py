@@ -210,7 +210,7 @@ def test_blanks_and_rounding_match_the_data_csv_convention():
 def test_a_slow_share_stops_flushing_every_row():
     """The run loop is also the thread that services ■ Abort, and the
     bench's default output dir is a network share. Flushing 2 rows a
-    second into a stalling file system would put the ramp-down behind
+    second into a stalling file system would put the HV shutdown behind
     the file system, so a slow write degrades to periodic flushing."""
     ticks = [0.0, 0.6]                      # the first write "takes" 0.6 s
     with _tempfile.TemporaryDirectory() as tmp:

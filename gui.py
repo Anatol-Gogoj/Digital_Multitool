@@ -42,7 +42,7 @@ import continuous_log
 import launch_check
 import presets_path
 import relaunch
-from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
+from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C, _io_lock
 import lcr_format
 import output_folder
 import scope_trace
@@ -337,8 +337,8 @@ def sldea_box_after_run(app, title, text):
     A message box takes a grab (msgbox.tcl) and on Windows is owner-modal,
     so while one is open ■ Abort, which has no key binding, does not
     respond. Edge Review..., Tune params and Plot runs... stay enabled
-    during a run, and the worker opens Edge Review itself before its ramp
-    to 0, so a box that pops up 0.2 to 2 s after a launch could stand
+    during a run, and the worker opens Edge Review itself before it zeroes
+    the SG, so a box that pops up 0.2 to 2 s after a launch could stand
     between the operator and Abort. Nor may it cover an HV NOT ZEROED
     alarm. Meanwhile the caller's status line says what happened, and this
     looks again every SLDEA_LAUNCH_HOLD_MS with after(). The box comes in
@@ -717,6 +717,10 @@ class InstrumentControlGUI:
         self._sldea_profile = None
         self._sldea_running = False
         self._sldea_stop = False
+        # The SG channel a LIVE run has set to DC, from that write until the
+        # run has finished; what window close zeroes if the run has not
+        # (#460). Never a channel the run has not written.
+        self._sldea_sg_dc_ch = None
         # (V_Out, I_Out) scope channels a LIVE run reads, while it runs --
         # their settings and the shared ones are locked (2026-09-24)
         self._sldea_scope_chs = None
@@ -905,9 +909,10 @@ class InstrumentControlGUI:
         """Safety shutdown on window close (user request 2026-07-20: the
         sig gen used to keep DRIVING after the app was closed). Best-effort
         per output -- a dead instrument must never block exit."""
-        # Stop a running SLDEA test FIRST so its worker performs the proper
-        # ramp-to-zero before we cut outputs (audit 2026-07-25: close never
-        # set _sldea_stop, racing the worker's 10 Hz drive).
+        # Stop a running SLDEA test FIRST so its worker sets its SG channel
+        # to 0 V and switches it off (a step, not a ramp) before we cut
+        # outputs (audit 2026-07-25: close never set _sldea_stop, racing
+        # the worker's 10 Hz drive).
         if getattr(self, '_sldea_running', False):
             self._sldea_stop = True
             for _ in range(30):                     # up to ~3 s
@@ -915,6 +920,17 @@ class InstrumentControlGUI:
                     break
                 self.root.update()
                 time.sleep(0.1)
+        # A run still flagged now may not have zeroed its channel: the flag
+        # clears only in _sldea_finished, which the worker queues at the
+        # end of its finally block, after its zeroing attempt. Output off
+        # alone would leave the run's last level set for the next Output ON
+        # (#460), so zero it first, in the worker's order: offset, then
+        # output. A run that did zero gets a second 0 V on a channel still
+        # in DC. Only the channel the run set to DC -- OFST in another mode
+        # (NOISE) is not bench-verified, and on the other channel it would
+        # rewrite the operator's set-up.
+        zero_ch = (getattr(self, '_sldea_sg_dc_ch', None)
+                   if getattr(self, '_sldea_running', False) else None)
         try:
             self.cam_seq_running = False
             self.cam_stop_preview()
@@ -923,6 +939,11 @@ class InstrumentControlGUI:
         except Exception:
             pass
         if self.sg:
+            if zero_ch is not None:
+                try:
+                    self.sg.set_offset(zero_ch, 0.0)
+                except Exception:
+                    pass
             for ch in (1, 2):
                 try:
                     self.sg.set_output(ch, False)
@@ -1301,7 +1322,7 @@ class InstrumentControlGUI:
             messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
             return
         # A LIVE SLDEA run owns the SG: nulling self.sg mid-run used to skip
-        # the safety ramp-down entirely (audit 2026-07-25, critical C1).
+        # the safety shutdown entirely (audit 2026-07-25, critical C1).
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
@@ -3500,7 +3521,7 @@ LOGGING:
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
-        # the breakdown + ramp to 0 + abort.
+        # the breakdown + abort (SG to 0 V, then output off).
         wdf = ttk.LabelFrame(left, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=6)
         wdf.pack(fill='x', padx=6, pady=(0, 4))
@@ -3516,7 +3537,8 @@ LOGGING:
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
-                    "breakdown captures a frame, ramps to 0 kV and aborts. "
+                    "breakdown captures a frame, then aborts: the run's SG "
+                    "channel is set to 0 V and switched off. "
                     "Unticked, only ■ Abort or the end of the run stops a "
                     "run that breaks down; Energize HV? says which. Ignored "
                     "on dry runs.").pack(side=tk.LEFT)
@@ -5073,6 +5095,7 @@ LOGGING:
             # it ends (user decision 2026-07-25: lock the active channel,
             # leave the other usable, loud note on any attempt).
             self._sldea_live_ch = sgch if not dry else None
+            self._sldea_sg_dc_ch = None      # the worker sets it (#460)
             # ...and the scope channels its watchdog, telemetry and setup.txt
             # readback depend on, with the settings every channel shares
             # (user decision 2026-09-24: LIVE only, like the SG lock).
@@ -5744,11 +5767,13 @@ LOGGING:
 
     def sldea_abort(self):
         self._sldea_stop = True
-        self._sldea_log("abort requested — ramping to 0 and stopping…")
+        self._sldea_log("abort requested — stopping; a LIVE run then sets "
+                        "its SG channel to 0 V and switches it off…")
 
     def _sldea_finished(self):
         self._sldea_running = False
         self._sldea_live_ch = None
+        self._sldea_sg_dc_ch = None
         self._sldea_scope_chs = None
         # runs after the worker's final finally-block logs, so the SG
         # never-zeroed alarm still reaches run.log before detaching
@@ -5912,7 +5937,7 @@ LOGGING:
         framedir = os.path.join(rundir, 'frames')
         fh = None
         # Capture the SG handle ONCE: a mid-run Reconnect nulls self.sg, and
-        # the finally-block ramp-down must always reach the instrument this
+        # the finally-block shutdown must always reach the instrument this
         # run actually drove (audit 2026-07-25, critical C1/C3 — HV could be
         # left energized while the UI reported 'complete').
         sg = self.sg if not dry else None
@@ -6189,6 +6214,9 @@ LOGGING:
             if not dry and self.sg and not self._sldea_stop:
                 self.sg.set_load_polarity(sgch, load='HZ', polarity='NOR')
                 self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
+                # From here the channel holds the run's levels, so window
+                # close zeroes it if the run has not finished (#460)
+                self._sldea_sg_dc_ch = sgch
                 self.sg.set_output(sgch, True)
 
             # Arming the breakdown watchdog. One rule (owner decision
@@ -6551,7 +6579,8 @@ LOGGING:
                         self._sldea_log(
                             f"⚡ BREAKDOWN CONFIRMED — I={itxt}"
                             + f" sustained >{wd_s:g}s. Capturing frame, "
-                            f"ramping to 0, aborting.")
+                            f"then aborting (its SG channel to 0 V, then "
+                            f"off).")
                         # Date the trip electrically, from the very reading
                         # that tripped it — the frame capture below takes
                         # hundreds of ms and a fresh scope read, so its row
@@ -6646,15 +6675,29 @@ LOGGING:
                             datetime.now().isoformat(timespec='milliseconds'),
                             p.kv_at(el), ua=ua,
                             i_status=wst, kv=kv_t, v_status=vst_t or '')
-                if sg is not None:
+                # Never a new level once a stop is asked: the scope read
+                # above can outlast window close's wait, and a level written
+                # after close has zeroed the channel would stay set (#460).
+                # The stop is checked again under the SG's own I/O lock,
+                # which close's zero also takes, because another thread
+                # (Continuous Logging reads the SG) can hold that lock past
+                # the wait: whichever write gets it first, no level lands
+                # after the zero. The finally block zeroes as before.
+                if sg is not None and not self._sldea_stop:
                     kv = p.kv_at(el)
                     if last_kv is None or abs(kv - last_kv) > 1e-4:
-                        try:
-                            sg.set_offset(
-                                sgch, trek_sign * control_v_for_kv(kv))
-                        except Exception as e:
-                            self._sldea_log(f"SG set_offset error: {e}")
-                        last_kv = kv
+                        err = None
+                        with _io_lock(sg):
+                            if not self._sldea_stop:
+                                try:
+                                    sg.set_offset(
+                                        sgch,
+                                        trek_sign * control_v_for_kv(kv))
+                                except Exception as e:
+                                    err = e
+                                last_kv = kv
+                        if err is not None:
+                            self._sldea_log(f"SG set_offset error: {err}")
                 # A video run's stills come off the stream, and must be
                 # exposed like one-shot stills and taken no EARLIER than
                 # scheduled (adversarial review 2026-09-23). So: ask the
@@ -6814,8 +6857,9 @@ LOGGING:
                         rec.end_recording()
                     except Exception:
                         pass
-                # GUARANTEED HV shutdown: always ramp the SG this run drove
-                # (captured handle — survives a mid-run Reconnect), and NEVER
+                # GUARANTEED HV shutdown: always zero the SG this run drove
+                # (captured handle — survives a mid-run Reconnect): offset
+                # to 0 V, then output off, one write each, no ramp. And NEVER
                 # swallow a failure silently: the old bare `except: pass` let a
                 # dead link end a run green while the Trek stayed energized
                 # (audit 2026-07-25, criticals C1-C3).

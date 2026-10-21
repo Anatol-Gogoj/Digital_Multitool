@@ -169,8 +169,12 @@ Notes:
 - `content.json` is the manual's written copy (per-tab purpose, controls,
   steps, cautions). Edit it directly for wording changes — several entries
   were **corrected after a code audit** (notably: closing the app does NOT
-  switch off the DC supply output, and a live SLDEA run only gets a
-  best-effort ~3 s ramp — keep the shutdown wording precise).
+  switch off the DC supply output; ■ Abort sets the run's SG channel to
+  0 V and then switches it off, with no ramp; and closing the app during
+  a live SLDEA run is only a best-effort stop, which gives the run about
+  3 s to do that, sets the run's channel to 0 V itself if the run has
+  not finished by then, and switches both SG outputs off (#460) — keep
+  the shutdown wording precise).
 - `annotate.py` uses `C:/Windows/Fonts/arialbd.ttf`; on another OS point it
   at any bold TrueType font.
 - After rebuilding, spot-check the annotated PNGs in `build/annotated/` —

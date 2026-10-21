@@ -2038,7 +2038,7 @@ class TelemetryLog:
     every row is what makes an aborted run's file complete, but the run
     loop is also the thread that services ■ Abort, and the bench's
     default output directory is a network share -- one stalled flush is
-    the ramp-down waiting on the file system. So each write is TIMED, and
+    the HV shutdown waiting on the file system. So each write is TIMED, and
     a directory that behaves like a slow share flushes only periodically
     (`.slow`), on a window sized to CLEAR the worst write seen so far --
     a fixed window shorter than the write is no throttle at all. The

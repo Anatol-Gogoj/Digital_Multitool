@@ -4211,14 +4211,26 @@ LOGGING:
         label."""
         try:
             outdir, name = self._sldea_folder_redraw()
-            if self._sldea_folder_pause is not None:
-                self.root.after_cancel(self._sldea_folder_pause)
-                self._sldea_folder_pause = None
+            self._sldea_folder_unpause()
             if self._sldea_folder_wanted(outdir, name):
                 self._sldea_folder_pause = self.root.after(
-                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_check)
+                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_paused)
         except Exception:
             pass
+
+    def _sldea_folder_unpause(self):
+        """Cancel the pause the last key armed, if it still waits."""
+        pause, self._sldea_folder_pause = self._sldea_folder_pause, None
+        if pause is not None:
+            try:
+                self.root.after_cancel(pause)
+            except Exception:
+                pass
+
+    def _sldea_folder_paused(self):
+        """The pause after the last key is up: check the folder."""
+        self._sldea_folder_pause = None
+        self._sldea_folder_check()
 
     def _sldea_folder_show(self, outdir, name, found, slow=False):
         text, warn, full = sldea_profile.run_folder_line(
@@ -4268,8 +4280,14 @@ LOGGING:
         """Send the check of the run folder the boxes name out on its
         thread, or, while one is still out, ask for another when it is
         back. A check stuck on a folder the boxes no longer name is
-        abandoned instead of waited for."""
-        self._sldea_folder_pause = None
+        abandoned instead of waited for.
+
+        When the poll calls this itself, a key's pause may still wait: it
+        is cancelled, as this check reads the boxes now and a later key
+        arms another. Left to run, it asked for the same folder again once
+        this check was back, and the line's <Destroy> could not cancel it
+        (#459)."""
+        self._sldea_folder_unpause()
         try:
             outdir, name = self._sldea_folder_boxes()
             if not self._sldea_folder_wanted(outdir, name):

@@ -161,7 +161,7 @@ or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from 
 
 `python sldea_diag.py --selftest out.png` runs it against synthetic runs — one that expands, one that only wrinkles, one that drifts — without needing any data.
 
-In `sldea_diag.png` the top row's three maps run from pale (the map's lowest value) to dark (its highest), and each has a color bar in its own units: gray levels for the two differences, the texture ratio for the wrinkle map. An older sheet in a run folder may read differently: before v1.4.6 the maps were magma, where bright meant more, and v1.4.6's sheets have dark = more but no color bar.
+In `sldea_diag.png` the top row's three maps run from pale (the map's lowest value) to dark (its highest), and each has a color bar in its own units: gray levels for the two differences, the texture ratio for the wrinkle map. On the wrinkle map 1.0 means as textured as the baseline and below 1.0 smoother, so its pale end means no more texture than the baseline, or smoother; the bar shows where 1.0 falls. A map with no variation at all, as from a frozen camera, draws pale. An older sheet in a run folder may read differently: before v1.4.6 the maps were magma, where bright meant more, and v1.4.6's sheets have dark = more but no color bar.
 
 ### Plotting runs against each other
 

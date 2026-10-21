@@ -485,49 +485,99 @@ def test_maps_are_drawn_in_tol_iridescent():
         assert to_hex(cmap.get_bad()).upper() == TOL_IRIDESCENT_BAD
 
 
-def test_each_map_has_a_color_bar_that_says_dark_is_more():
-    """Iridescent draws high values dark. Magma, before #461, drew them
-    bright, and the sheet had no key, so an old sldea_diag.png and a new
-    one read in opposite directions (#475). Each map now has a color bar
-    beside it, as tall as the picture, with the dark end at the top and a
-    label that says what dark means. imshow scales each map to its own
-    min..max, so the bar's numbers are the map's own values, not a
-    0..1 stand-in. A NaN pixel takes Tol's bad-data gray."""
+# What each map's color bar must say, by the map's title: its unit and
+# what dark means in that map's terms, plus words that belong to the OTHER
+# kind of map and so must not appear (#475).
+MAP_KEYS = {
+    'raw absdiff': (('gray levels', 'dark = more change'), ('texture',)),
+    'absdiff after gain+offset fit': (('gray levels', 'dark = more change'),
+                                      ('texture',)),
+    'wrinkle map (detector texture ratio)': (
+        ('ratio', 'dark = more texture'), ('gray levels', 'change')),
+}
+
+
+def _diag_maps(frozen=False):
+    """figure() on the self-test's expanding run -> [(title, ax, image,
+    rgb at the map's center)], read after the figure is drawn, so the bars
+    sit where they show and their tick labels exist. frozen=True first
+    copies the baseline over the hottest frame, as a frozen camera would
+    hand it back, so all three maps are constant."""
     import shutil
     import matplotlib
     matplotlib.use('Agg')
-    from matplotlib.colors import to_hex
     from matplotlib.figure import Figure
     root = tempfile.mkdtemp(prefix='diag_key_')
     maps = []
     real = Figure.savefig
 
     def spy(fig, *a, **kw):
-        out = real(fig, *a, **kw)     # drawn, so each bar sits where shown
+        out = real(fig, *a, **kw)
+        fig.canvas.draw()
+        buf = np.asarray(fig.canvas.buffer_rgba())
         for ax in fig.axes:
-            maps.extend((ax, im) for im in ax.get_images())
+            for im in ax.get_images():
+                x, y = ax.transAxes.transform((0.5, 0.5))
+                rgb = buf[int(buf.shape[0] - y), int(x), :3].astype(int)
+                maps.append((ax.get_title().splitlines()[0], ax, im, rgb))
         return out
-    Figure.savefig = spy
     try:
         run = sd._synth_run(_os.path.join(root, 'SLDEA_k'), 'expand')
-        sd.figure(sd.analyze(run), _os.path.join(root, 'fig.png'),
-                  rundir=run)
+        d = sd.analyze(run)
+        if frozen:
+            r = sd.se.load_run(run)
+            hot = max(d['frames'], key=lambda p: p['kv'])
+            shutil.copyfile(sd.se.frame_path(r, r['rows'][d['baseline_row']]),
+                            _os.path.join(r['frames_dir'], hot['file']))
+        Figure.savefig = spy
+        try:
+            sd.figure(d, _os.path.join(root, 'fig.png'), rundir=run)
+        finally:
+            Figure.savefig = real
     finally:
-        Figure.savefig = real
         shutil.rmtree(root, ignore_errors=True)
-    assert len(maps) == 3, f"expected the three maps, saw {len(maps)}"
-    labels = []
-    for ax, im in maps:
+    return maps
+
+
+def test_each_map_has_a_color_bar_that_says_dark_is_more():
+    """Iridescent draws high values dark. Magma, before #461, drew them
+    bright, and the sheet had no key, so an old sldea_diag.png and a new
+    one read in opposite directions (#475). Each map now has a color bar
+    beside it, as tall as the picture, with the dark end at the top and a
+    label that gives that map's unit and what dark means in its terms.
+    imshow scales each map to its own min..max, and the bar shows at
+    least two numbers from that range, so it reads in the map's own
+    values. A NaN pixel takes Tol's bad-data gray."""
+    from matplotlib.colors import to_hex
+    maps = _diag_maps()
+    assert [t for t, _a, _i, _p in maps] == list(MAP_KEYS), (
+        [t for t, _a, _i, _p in maps])
+    for title, ax, im, _rgb in maps:
         bar = im.colorbar
-        assert bar is not None, f"{ax.get_title()!r} has no key"
+        assert bar is not None, f"{title!r} has no key"
         label = bar.ax.get_ylabel()
-        assert 'dark = more' in label, label
-        labels.append(label)
+        wanted, foreign = MAP_KEYS[title]
+        for words in wanted:
+            assert words in label, (title, label)
+        for words in foreign:
+            assert words not in label, (title, label)
         data = np.asarray(im.get_array(), float)
-        assert bar.norm.vmin == np.nanmin(data), (bar.norm.vmin, label)
-        assert bar.norm.vmax == np.nanmax(data), (bar.norm.vmax, label)
-        lo, hi = bar.ax.get_ylim()
-        assert lo < hi, "the bar's high end must be at the top"
+        lo, hi = bar.norm.vmin, bar.norm.vmax
+        assert lo == np.nanmin(data) and hi == np.nanmax(data), (lo, hi)
+        shown = []
+        for tick in bar.ax.yaxis.get_major_ticks():
+            if not lo <= tick.get_loc() <= hi:
+                continue                  # outside the bar: not drawn
+            for text in (tick.label1, tick.label2):
+                if text.get_visible() and text.get_text().strip():
+                    shown.append((tick.get_loc(), text.get_text()))
+        assert len(shown) >= 2, f"{title!r} bar shows {shown}"
+        for loc, text in shown:
+            value = float(text.replace('−', '-'))
+            assert lo <= value <= hi, (title, text, lo, hi)
+            assert abs(value - loc) <= 0.01 * (hi - lo), (title, text, loc)
+        y0, y1 = bar.ax.get_ylim()
+        assert y0 < y1, "the bar's high end must be at the top"
         assert to_hex(bar.cmap(1.0)).upper() == TOL_IRIDESCENT[-1]
         assert to_hex(bar.cmap(0.0)).upper() == TOL_IRIDESCENT[0]
         pic, key = ax.get_position(), bar.ax.get_position()
@@ -535,8 +585,31 @@ def test_each_map_has_a_color_bar_that_says_dark_is_more():
         assert abs(key.height - pic.height) < 0.01 * pic.height, (
             f"bar {key.height:.4f} vs picture {pic.height:.4f}")
         assert to_hex(im.cmap(np.nan)).upper() == TOL_IRIDESCENT_BAD
-    assert all('gray levels' in t for t in labels[:2]), labels
-    assert 'texture' in labels[2], labels
+
+
+def test_a_constant_map_stays_pale_beside_its_bar():
+    """A frozen camera hands back the baseline byte for byte, and all
+    three maps come out constant: |diff| 0, texture ratio 1.0. A color
+    bar widens a norm with no range to +-0.1 around the value, and that
+    drew these maps mid-scale blue (#81C4E7 measured), so no change
+    looked like change (#475 review). Each now draws, with its bar
+    present, at the pale end, and its bar starts at its value."""
+    from matplotlib.colors import to_hex, to_rgb
+    maps = _diag_maps(frozen=True)
+    assert len(maps) == 3, f"expected the three maps, saw {len(maps)}"
+    pale = np.array([round(c * 255) for c in to_rgb(TOL_IRIDESCENT[0])])
+    values = []
+    for title, _ax, im, rgb in maps:
+        data = np.asarray(im.get_array(), float)
+        v = float(data.flat[0])
+        assert (data == v).all(), f"{title!r} is not constant"
+        values.append(v)
+        assert im.colorbar is not None, f"{title!r} has no key"
+        drawn = to_hex(im.to_rgba(np.array([[v]]))[0, 0]).upper()
+        assert drawn == TOL_IRIDESCENT[0], (title, drawn)
+        assert np.abs(rgb - pale).max() <= 2, (title, rgb, pale)
+        assert im.colorbar.norm.vmin == v, (title, im.colorbar.norm.vmin)
+    assert values == [0.0, 0.0, 1.0], values
 
 
 def test_the_figure_builds_its_maps_without_a_pending_deprecation():

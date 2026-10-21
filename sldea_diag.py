@@ -1485,11 +1485,19 @@ def figure(d, png, rundir=None):
             # with no key cannot say which way it runs. imshow scales
             # each map to its own min..max, so the bar's numbers are that
             # map's own values: gray levels for the two differences, the
-            # detector's texture ratio (1 = as textured as the baseline)
-            # for the wrinkle map. The bar is an inset in axes
+            # detector's texture ratio for the wrinkle map. There 1 is as
+            # textured as the baseline (foil and glint are pinned to it),
+            # so pale means no more texture than the baseline, or
+            # smoother, not "no change". The bar is an inset in axes
             # coordinates, so it keeps the image's height once imshow's
             # equal aspect has shrunk the axes to the picture; a
             # gridspec bar takes the whole cell and stands taller.
+            # A constant map (a frozen camera hands back the baseline
+            # byte for byte) has no range to scale. The bar would widen
+            # it to +-0.1 around the value and the map would draw
+            # mid-scale blue, so no change would look like change. It is
+            # pinned to the pale end instead, the bar starting at its
+            # value.
             for ax, (m, t, key) in zip(axs[0], [
                     (cv2.absdiff(img, base), 'raw absdiff',
                      '|diff|, gray levels: dark = more change'),
@@ -1499,7 +1507,12 @@ def figure(d, png, rundir=None):
                     (np.clip(tex, 0, 3),
                      'wrinkle map (detector texture ratio)',
                      'ratio, capped at 3: dark = more texture')]):
-                im = ax.imshow(m, cmap=maps_cmap)
+                lo = hi = None
+                vals = np.asarray(m, float)
+                vals = vals[np.isfinite(vals)]
+                if vals.size and vals.min() == vals.max():
+                    lo, hi = float(vals[0]), float(vals[0]) + 1.0
+                im = ax.imshow(m, cmap=maps_cmap, vmin=lo, vmax=hi)
                 bar = fig.colorbar(
                     im, cax=ax.inset_axes([1.02, 0.0, 0.03, 1.0]))
                 bar.set_label(key, fontsize=8)

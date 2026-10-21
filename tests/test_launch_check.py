@@ -318,6 +318,13 @@ def _check_ms():
     return launch_check.CHECK_MS if launch_check else 2000
 
 
+def _cmds(b):
+    """The commands the stand-ins were started with, for a failure's
+    message. Not b.swap.calls itself: each call's keywords carry the
+    whole environment, which a pasted failure would publish."""
+    return [cmd for cmd, _kw in b.swap.calls]
+
+
 def _exited(b):
     """Wait, without pumping Tk, until every stand-in `b` has started has
     exited (proc.wait: the OS's word, not the check's), so the launch
@@ -331,7 +338,7 @@ def _exited(b):
         except subprocess.TimeoutExpired:
             raise AssertionError(
                 f"a stand-in that exits at once still ran after "
-                f"{EXIT_WAIT_S} s: {b.swap.calls}") from None
+                f"{EXIT_WAIT_S} s: {_cmds(b)}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +356,7 @@ def test_a_program_that_dies_at_once_is_said_with_its_last_lines():
         for program in PROGRAMS:
             apps[program] = app = _app(b.root, b.run)
             _press(app, program, b.run)
-        assert len(b.swap.procs) == len(PROGRAMS), b.swap.calls
+        assert len(b.swap.procs) == len(PROGRAMS), _cmds(b)
         _exited(b)
         _until(b.root, lambda: len(b.boxes.errors) >= len(PROGRAMS),
                timeout=_check_ms() / 1000.0 + 5.0)
@@ -466,6 +473,7 @@ def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
             while len(logged()) < 3 and time.monotonic() < end:
                 time.sleep(0.05)
             lines = logged()
+            assert len(lines) >= 3, lines
             assert lines[0].startswith('# Edge Review, started '), lines
             assert 'sldea_edge_gui.py' in lines[1], lines
             told = json.loads(lines[2])

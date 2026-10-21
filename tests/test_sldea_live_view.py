@@ -572,10 +572,17 @@ def _tk():
 
 
 def _pump(root, secs):
+    """Run Tk for `secs`, then once more. That last update() comes after
+    the time is up, so a tick that fell due inside it always runs, even
+    when this thread's 20 ms sleep ran on past the end, as it can on a
+    busy PC. Without it the view might not have looked at all, and the
+    case failed on the state from before the change it pumped for
+    (#479)."""
     end = _time.monotonic() + secs
     while _time.monotonic() < end:
         root.update()
         _time.sleep(0.02)
+    root.update()
 
 
 class _App:

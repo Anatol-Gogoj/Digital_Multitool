@@ -187,6 +187,13 @@ Notes:
   tall at 100 %, 86 px at 175 %), so image-relative numbers moved with the
   display that captured them. Read them off `widgets.json` as the widget's
   `x, y` minus the shot's `client_offset`.
+- A capsule round a label and the entry or combobox it names takes
+  `"with_field": True`, not a hand-measured `extend_right`. Fields have no
+  `text=` to match on, so `with_field` adds the nearest field right of each
+  matched label, using that field's box from `widgets.json`. A label with
+  no field next to it fails the build like any other miss (#477: the
+  `extend_right` numbers had drifted to end inside LCR Mode, DC Supply
+  Current Limit, DMM Function and the SLDEA Electrode dropdown).
 - Scaled displays: the capture scripts make the process DPI-aware (so the
   screenshot and the widget boxes share one pixel grid) and pin Tk to
   96 dpi with `pin_96dpi()`, so every window lays out exactly as on a

@@ -1102,6 +1102,35 @@ def test_a_close_that_only_switched_off_a_marked_channel_keeps_the_alarm():
         assert not _close_lines(app), app.lines
 
 
+def test_the_close_reads_the_mark_once_it_holds_the_sg_lock():
+    """The run marks CH1 while the close waits for the SG's lock (with
+    #471, a close that comes during the run's start writes waits for all
+    of them, the mark included). The close reads the mark only once it
+    holds the lock, so it zeroes CH1 and records that, and run.log says
+    CH1 is at 0 V and off. Read before the lock, the mark would be missed:
+    CH1 only switched off, and the alarm. The mark is set by hand as the
+    close takes the lock."""
+    class MarkOnAcquire(_CloseLock):
+        def acquire(self):
+            if threading.current_thread() is threading.main_thread():
+                app._sldea_sg_dc_ch = 1
+            return super().acquire()
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)) as mb:
+        app = _live_app(tmp, sg=_SessionSG())
+        app.sg.__dict__['_io_rlock'] = MarkOnAcquire()
+        closing = _close_mid_ramp(
+            app, before_close=lambda: setattr(app, '_sldea_sg_dc_ch', None))
+        assert closing == ([('set_offset', 1, 0.0)] + OUTPUTS_OFF
+                           + SESSION_END), closing
+        rec = app._sldea_close_zeroed
+        assert (rec is not None and rec[0] is app.sg
+                and rec[1:] == (1, True)), rec
+        assert _alarmed(app, mb) == (False, False, False), \
+            (app.lines, app.statuses, mb.calls)
+        assert _close_lines(app) == [CLOSE_LINE], app.lines
+
+
 def test_a_failed_zero_with_no_close_keeps_the_alarm():
     """No close at all: the link dies mid-run, Abort, and the run's own
     zero fails. The alarm, as before. With no close begun the run reads no

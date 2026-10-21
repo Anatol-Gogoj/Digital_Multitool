@@ -71,6 +71,25 @@ def client(img, x, y):
     return x + ox, y + oy
 
 
+FIELD_CLASSES = ("TEntry", "Entry", "TCombobox", "TSpinbox", "Spinbox")
+
+
+def field_of(img, label):
+    """The entry or combobox a label names: the nearest field widget to
+    its right whose box spans the label's middle row. None if none.
+
+    Fields carry no text= to match on, so a capsule reached them with a
+    hand-measured extend_right, and those numbers drifted from the
+    fields: the capsules round LCR Mode, DC Supply Current Limit and DMM
+    Function ended inside their fields in the v1.4.6 build (#477)."""
+    cy = label["y"] + label["h"] / 2
+    right = label["x"] + label["w"]
+    hits = [w for w in img["widgets"]
+            if w["class"] in FIELD_CLASSES and w["x"] >= right - 2
+            and w["y"] <= cy <= w["y"] + w["h"]]
+    return min(hits, key=lambda w: w["x"]) if hits else None
+
+
 def resolve(img, spec):
     """Spec -> pixel rect [x, y, w, h] or None."""
     if "rect" in spec:
@@ -85,6 +104,15 @@ def resolve(img, spec):
             MISSES.append((img["name"], t))
             continue
         boxes.append((w["x"], w["y"], w["x"] + w["w"], w["y"] + w["h"]))
+        if spec.get("with_field"):
+            # the capsule takes in the field this label names, measured
+            # from widgets.json rather than an extend_right guess
+            f = field_of(img, w)
+            if f is None:
+                print(f"  !! no field right of {t!r} in {img['name']}")
+                MISSES.append((img["name"], f"{t} (with_field)"))
+                continue
+            boxes.append((f["x"], f["y"], f["x"] + f["w"], f["y"] + f["h"]))
     if not boxes:
         return None
     x0 = min(b[0] for b in boxes)
@@ -128,7 +156,7 @@ S["overview"] = {
 
 S["tab_lcr"] = {
     "callouts": [
-        {"match": "Mode:", "extend_right": 195, "label": "Measurement pair — CPD = capacitance + dissipation"},
+        {"match": "Mode:", "with_field": True, "label": "Measurement pair — CPD = capacitance + dissipation"},
         {"union": ["Frequency (Hz):", "Voltage (V):"], "extend_right": 160,
          "label": "AC test signal — meter clamps at 2.0 V and 500 kHz"},
         {"union": ["Open Correction...", "Short Correction..."],
@@ -176,7 +204,7 @@ S["tab_siggen"] = {
 
 S["tab_psu"] = {
     "callouts": [
-        {"union": ["Set Voltage (V):", "Current Limit (A):"], "extend_right": 55,
+        {"union": ["Set Voltage (V):", "Current Limit (A):"], "with_field": True,
          "label": "Stage voltage and current ceiling (CC — not a fuse)"},
         {"match": "Apply V / I limit", "label": "Sends values — output stays untouched"},
         {"match": "Protection", "label": "OVP / OCP hardware trips — set these first"},
@@ -190,7 +218,7 @@ S["tab_dmm"] = {
     "callouts": [
         {"match": "IP:", "extend_right": 95, "label": "The meter's LAN address — this unit is Ethernet-only"},
         {"match": "Reconnect", "label": "Connect / retry at this IP"},
-        {"match": "Function:", "extend_right": 130, "label": "What to measure — V, A, Ω, Hz, F (auto-ranged)"},
+        {"match": "Function:", "with_field": True, "label": "What to measure — V, A, Ω, Hz, F (auto-ranged)"},
         {"match": "Live reading", "badge_at": [300, 92],
          "label": "Continuous display, ~2 readings per second"},
         {"match": "Read once", "label": "Single measurement"},
@@ -320,10 +348,12 @@ S["tab_sldea"] = {
         # after"). Trek inverts therefore stays OUT of the union. Film
         # thickness (#398) joined the device rows under Concentration.
         # The px-to-mm warning stays inline: it is the one field here that
-        # can silently corrupt every area in the run.
+        # can silently corrupt every area in the run. with_field, not an
+        # extend_right: 175 ended 6 px inside the Electrode dropdown in the
+        # v1.4.6 shots (#477).
         {"union": ["DEA active area diam (mm):", "Electrode:",
                    "Concentration (mL):", "Film thickness (µm):"],
-         "extend_right": 175,
+         "with_field": True,
          "label": "Defines the device: active-area diameter (sets the px→mm "
                   "scale — a wrong value corrupts every area), electrode "
                   "material, ink concentration (greyed for non-inks), film "
@@ -368,9 +398,12 @@ S["20_arb_editor"] = {
         # badge in the empty title bar above the capsule (negative client
         # y): the automatic top-right corner covered the Full-scale value
         # "10" (v1.4.4 and v1.4.5 shots), and there is no free room beside
-        # or below this row.
+        # or below this row. Above the capsule's right end, not its middle:
+        # Windows draws the title at the display scale, and at 175 % it
+        # runs to about x 355, so x 299 sat on its "-" (v1.4.6, #477).
+        # At x 418 the badge's edge clears it by about 48 px.
         {"union": ["Points:", "Full-scale ±V:"], "extend_right": 45,
-         "badge_at": [299, -12],
+         "badge_at": [418, -12],
          "label": "Resolution (samples) and the volt scale (max ±10 V)"},
         {"rect": [16, 62, 226, 270], "badge_at": [200, 262],
          # in the table's own empty rows: "br" met the Segment badge
@@ -442,6 +475,28 @@ S["22_arb_easywavex_export"] = {
 }
 
 # ------------------------------------------------------------ drawing
+
+
+EDGE_MARGIN = 3     # px of canvas kept beyond a capsule that ran off the shot
+
+
+def edge_pads(rects, img_w, img_h, margin=EDGE_MARGIN):
+    """(left, top, right, bottom) px to add round the shot so every
+    capsule rect [x, y, w, h] lies inside it, with `margin` to spare on a
+    side that needed any. All 0 when every capsule already fits: PIL
+    draws a capsule's outline inside its rect, so a rect inside the image
+    is drawn whole."""
+    if not rects:
+        return (0, 0, 0, 0)
+    x0 = min(r[0] for r in rects)
+    y0 = min(r[1] for r in rects)
+    x1 = max(r[0] + r[2] for r in rects)
+    y1 = max(r[1] + r[3] for r in rects)
+    return tuple(int(math.ceil(p)) for p in (
+        -x0 + margin if x0 < 0 else 0,
+        -y0 + margin if y0 < 0 else 0,
+        x1 - (img_w - 1) + margin if x1 > img_w - 1 else 0,
+        y1 - (img_h - 1) + margin if y1 > img_h - 1 else 0))
 
 
 def rects_overlap(a, b, pad=2):
@@ -561,6 +616,29 @@ def annotate(name, spec):
             continue
         rect = [rect[0] - 5, rect[1] - 5, rect[2] + 10, rect[3] + 10]
         resolved.append((rect, c["label"], c))
+
+    # A capsule round a widget on the window's edge ran off the shot and
+    # lost its outline there: the overview's status bar and version label
+    # (5 and 6) were cut by the image's bottom edge (v1.4.6, #477). The
+    # canvas grows instead, transparent, so the page shows through and
+    # the screenshot itself is untouched. Every coordinate shifts with it.
+    pads = edge_pads([r for r, _, _ in resolved], img_w, img_h)
+    if any(pads):
+        pad_l, pad_t, pad_r, pad_b = pads
+        canvas = Image.new("RGBA", (img_w + pad_l + pad_r,
+                                    img_h + pad_t + pad_b), (0, 0, 0, 0))
+        canvas.paste(im, (pad_l, pad_t))
+        im = canvas
+        d = ImageDraw.Draw(im)
+        img_w, img_h = im.size
+        ox, oy = src.get("client_offset", [0, 0])
+        src = dict(src, client_offset=[ox + pad_l, oy + pad_t],
+                   widgets=[dict(w, x=w["x"] + pad_l, y=w["y"] + pad_t)
+                            for w in src["widgets"]])
+        resolved = [([r[0] + pad_l, r[1] + pad_t, r[2], r[3]], lab, c)
+                    for r, lab, c in resolved]
+        print(f"  {name}: canvas grown by {pads} (left, top, right, "
+              "bottom) for capsules on the window's edge")
 
     occupied = [r for r, _, _ in resolved]
     soft = [[w["x"], w["y"], w["w"], w["h"]] for w in src["widgets"]

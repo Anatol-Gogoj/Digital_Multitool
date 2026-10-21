@@ -19,7 +19,11 @@ matplotlib's default cycle (#454, 2026-10-19):
     points on the edge, and `#215` measured that a wider stroke there moves
     hand placement (+2.07 % diameter at 3 px). So their widths, dashes and
     halos are pinned here at the values those measurements were made with;
-    only the colors changed.
+    only the colors changed;
+  * drawings no test had looked at (#476): the contact sheet's foil
+    outline, the two-point calibration's chord, and the pre-flight
+    dialog's own call of the reticle, which is now one reticle with the
+    live view's, white on a black halo.
 
 The cases that open a Tk window are skipped, and counted as skipped, when
 there is no display.
@@ -450,6 +454,83 @@ def test_diag_contact_sheet_draws_only_tol_colors():
     assert halos and inks and max(halos) < min(inks), (halos, inks)
 
 
+def _foil_run(d):
+    """Edge Review's synthetic run with two crinkled electrode strips
+    beside the disc on every frame, and the strips' mask. The plain run
+    has no foil: sldea_edge.foil_mask's thickness gate drops a sharp disc
+    rim, and nothing else in it has texture. Two strips of 70 x 80 px of
+    noise (sigma 40 gray levels) are kept whole; at 70 x 60 px they were
+    not kept at all."""
+    import cv2
+    import test_sldea_edge_gui as edge
+    run = edge._fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+    yy, xx = np.mgrid[0:240, 0:320]
+    strips = ((((xx >= 4) & (xx < 74)) | ((xx >= 246) & (xx < 316)))
+              & (yy >= 80) & (yy < 160))
+    tex = 180 + np.random.default_rng(1).normal(0, 40, int(strips.sum()))
+    frames = os.path.join(run, 'frames')
+    for fn in os.listdir(frames):
+        p = os.path.join(frames, fn)
+        g = cv2.imread(p, cv2.IMREAD_GRAYSCALE).astype(float)
+        g[strips] = tex
+        cv2.imwrite(p, np.clip(g, 0, 255).astype(np.uint8))
+    return run, strips
+
+
+def test_diag_contact_sheet_draws_the_foil_black_dashed_thin():
+    """The contact sheet's foil footprint, which the synthetic run never
+    showed (#476). On a run whose baseline has two foil strips, the
+    baseline panel outlines each one in Tol black, dashed, 0.9 pt wide,
+    beside the resting disc's solid white 2 pt line: thin and dashed, so
+    the footprint never reads as the disc."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.figure import Figure
+    import sldea_diag as sd
+    import sldea_edge as se
+    assert sd.SHEET_FOIL == '#000000', sd.SHEET_FOIL
+    d = tempfile.mkdtemp(prefix='tol_foil_')
+    seen = []
+    real = Figure.savefig
+
+    def spy(fig, *a, **k):
+        for ax in fig.axes:
+            if not ax.get_title(loc='left').startswith('baseline'):
+                continue
+            for ln in ax.lines:
+                seen.append((str(ln.get_color()).upper(), ln.get_linestyle(),
+                             float(ln.get_linewidth()),
+                             np.asarray(ln.get_xdata(), float),
+                             np.asarray(ln.get_ydata(), float)))
+        return real(fig, *a, **k)
+    Figure.savefig = spy
+    try:
+        run, strips = _foil_run(d)
+        rows = se.load_run(run)
+        base = se.load_gray(se.frame_path(rows, rows['rows'][0]))
+        foil = se.foil_mask(base)
+        assert foil is not None and (foil & strips).sum() >= \
+            0.9 * strips.sum(), "the strips were not taken for foil"
+        sd.contact_sheet(run, os.path.join(d, 'sheet.png'), count=3)
+    finally:
+        Figure.savefig = real
+        shutil.rmtree(d, ignore_errors=True)
+    disc = [s for s in seen if s[:3] == (sd.SHEET_DISC, '-', 2.0)]
+    footprint = [s for s in seen if s[:3] != (sd.SHEET_DISC, '-', 2.0)]
+    assert len(disc) == 1, [s[:3] for s in seen]
+    assert len(footprint) >= 2, [s[:3] for s in seen]
+    assert {s[:3] for s in footprint} == {('#000000', '--', 0.9)}, \
+        {s[:3] for s in footprint}
+    # each strip has an outline drawn around it, not merely somewhere
+    left = np.mgrid[0:240, 0:320][1] < 160
+    for side in (left, ~left):
+        ys, xs = np.nonzero(strips & side)
+        assert any(x.min() <= xs.min() and x.max() >= xs.max()
+                   and y.min() <= ys.min() and y.max() >= ys.max()
+                   for _c, _s, _w, x, y in footprint), \
+            (xs.min(), xs.max(), ys.min(), ys.max())
+
+
 def test_diag_figure_draws_only_tol_colors():
     """sldea_diag.figure on the self-test's expanding run (the manual's
     31_diag_selftest): every line, including the 1 sigma and the
@@ -511,9 +592,18 @@ def test_preflight_reticle_is_white_on_a_black_halo():
     a black halo 1 px wider on each side, on the frame. Across the
     vertical line near the top the pixels read frame, black, white, black,
     frame. Where the two lines cross, both stay white: every halo goes
-    down before any white, so one line's halo never cuts the other."""
+    down before any white, so one line's halo never cuts the other.
+
+    The live view draws the same reticle (#476), so its colors are pinned
+    here as values: on the membrane's gray 147 the white alone stands off
+    by 3.07:1, and Tol cyan, the live view's color before, by 1.67:1."""
     from PIL import Image
     import gui
+    import sldea_liveview as lv
+    assert (lv.RETICLE_INK, lv.RETICLE_HALO) == ('#FFFFFF', '#000000')
+    assert _contrast(lv.RETICLE_INK, MEMBRANE) >= 3.0
+    assert _contrast(lv.TOL_CYAN, MEMBRANE) < 3.0
+    assert _contrast(lv.RETICLE_HALO, MEMBRANE) >= 3.0
     img = Image.new('RGB', (520, 292), (147, 147, 147))
     gui.draw_preflight_reticle(img)
     a = np.asarray(img).astype(int)
@@ -529,12 +619,96 @@ def test_preflight_reticle_is_white_on_a_black_halo():
     cross = ''.join(kind(a[yy, cx]) for yy in (cy - 1, cy, cy + 1)) + \
         ''.join(kind(a[cy, xx]) for xx in (cx - 1, cx + 1))
     assert cross == 'WWWWW', cross
+    # The circle, off the cross: down each column 40 and 60 px either side
+    # of the centre, across the top and the bottom arc, the frame meets
+    # black, then at least 2 px of white, then black again. A halo all on
+    # one side of the ring (the live view's before #476) or a 1 px ring
+    # fails here.
+    import re
+    r = 292 * 0.32
+    for dx in (-60, -40, 40, 60):
+        for side in (-1, 1):
+            yc = int(round(cy + side * (r * r - dx * dx) ** 0.5))
+            col = ''.join(kind(a[yy, cx + dx])
+                          for yy in range(yc - 8, yc + 9))
+            assert re.fullmatch(r'F+K+W{2,}K+F+', col), (dx, side, col)
     colors = {tuple(px) for px in a.reshape(-1, 3)}
     assert colors <= {(147, 147, 147), (0, 0, 0), (255, 255, 255)}, \
         colors - {(147, 147, 147), (0, 0, 0), (255, 255, 255)}
 
 
+def test_the_live_view_draws_the_preflights_reticle():
+    """#476: the live view drew the pre-flight's reticle in Tol cyan, and
+    its circle's halo lay all inside the ring (the box was not grown to
+    center it). It now draws the very same reticle: on the same picture,
+    the live view's frame below its banner is the pre-flight's, pixel
+    for pixel."""
+    from PIL import Image
+    import gui
+    import sldea_liveview as lv
+    thumb = np.full((270, 480, 3), 147, np.uint8)
+    pre = Image.fromarray(thumb.copy())
+    gui.draw_preflight_reticle(pre)
+    live = lv.render(thumb, 'live')
+    a, b = np.asarray(pre), np.asarray(live)
+    assert a.shape == b.shape, (a.shape, b.shape)
+    band = 25                       # the banner covers rows 0 to 24
+    assert (a[band:] != 147).any(), "no reticle was drawn"
+    diff = np.argwhere((a[band:] != b[band:]).any(axis=2))
+    assert not len(diff), f"{len(diff)} pixels differ, first {diff[:3]}"
+
+
 # ------------------------------------------------------------- needs Tk
+
+def test_the_preflight_dialog_shows_the_reticle_it_drew():
+    """The test above draws the reticle by hand. Here the REAL pre-flight
+    dialog (test_sldea_preflight's driver, on its synthetic disc frame)
+    calls draw_preflight_reticle on the frame it took, scaled to 520 px
+    wide, and shows that very picture: on screen, the pixel where the
+    vertical line crosses the top of the picture is the reticle's white,
+    and a pixel off the reticle is the frame's own (#476)."""
+    from PIL import Image
+    import tkinter as tk
+    import gui
+    import sldea_liveview as lv
+    import test_sldea_preflight as pf
+    calls, shown = [], {}
+    real = gui.draw_preflight_reticle
+
+    def spy(img):
+        calls.append((img.size, np.asarray(img).copy()))
+        return real(img)
+
+    def probe(dlg, app, mb):
+        [lbl] = [w for w in dlg.win.winfo_children()
+                 if isinstance(w, tk.Label) and str(w.cget('image'))]
+        name = str(lbl.cget('image'))
+
+        def px(x, y):
+            got = dlg.win.tk.splitlist(dlg.win.tk.call(name, 'get', x, y))
+            return tuple(int(str(v)) for v in got)
+        shown['on'], shown['off'] = px(260, 10), px(20, 10)
+        dlg.start.invoke()
+
+    gui.draw_preflight_reticle = spy
+    try:
+        go, _app, _mb, _cam, _lock = pf._dialog(pf.GOOD, {}, probe)
+    except pf._Skip as why:
+        raise _Skip(str(why))
+    finally:
+        gui.draw_preflight_reticle = real
+    assert go is True
+    assert len(calls) == 1, [c[0] for c in calls]
+    h, w = pf.GOOD.shape[:2]
+    want = np.asarray(Image.fromarray(pf.GOOD).resize(
+        (520, int(h * (520 / w)))))
+    size, before = calls[0]
+    assert size == (want.shape[1], want.shape[0]), size
+    assert np.array_equal(before, want), "the reticle went on another picture"
+    white = tuple(int(lv.RETICLE_INK[i:i + 2], 16) for i in (1, 3, 5))
+    assert shown['on'] == white, shown
+    assert shown['off'] == tuple(int(v) for v in want[10, 20]), \
+        (shown, want[10, 20])
 
 def test_tracer_draws_its_tol_colors_at_the_widths_215_measured():
     """The hand tracer on a gray frame with every overlay on, three points
@@ -607,10 +781,11 @@ def test_tracer_draws_its_tol_colors_at_the_widths_215_measured():
                and it['fill'] == gui.TRACE_FACE for it in rings), rings
 
 
-def _cal_items(mode, click=None):
+def _cal_items(mode, clicks=()):
     """Open the real calibration dialog on the synthetic run in `mode`,
-    optionally click one point at ORIGINAL px `click`, and return what its
-    canvas holds (and the dialog's stroke style) before closing it."""
+    click each point of `clicks` (ORIGINAL px) in turn, and return what
+    its canvas holds, the dialog's stroke style and the points placed in
+    the current round (in VIEW px) before closing it."""
     import sldea_edge_gui as gui
     import test_sldea_edge_gui as edge
     root = _tk_root()
@@ -626,12 +801,13 @@ def _cal_items(mode, click=None):
 
         def look(win):
             edge._cal_onscreen(root, win)
-            if click is not None:
+            for click in clicks:
                 edge._click_at_original(app, click)
             p = app._cal_probe
             assert p and p['mode_var'].get(), "the dialog published no probe"
             got['stroke'] = p['stroke_var'].get()
             got['items'] = _items(p['canvas'])
+            got['views'] = [p['vt'].to_view(x, y) for x, y in p['st']['ptsv']]
             win.destroy()
         app.root.wait_window = look
         app._calibrate_scale(mode=mode)
@@ -692,7 +868,7 @@ def test_calibration_two_point_marker_is_a_1px_white_ring_on_black():
     """TWOPOINT after one click: a 1 px white ring with a 1 px black ring
     just outside it, and white crosshair arms, never a filled dot."""
     import sldea_edge_gui as gui
-    got = _cal_items('twopoint', click=(80.0, 120.0))
+    got = _cal_items('twopoint', clicks=[(80.0, 120.0)])
     items = got['items']
     assert _colors(items) <= {gui.CAL_INK, gui.CAL_HALO}, _colors(items)
     ovals = sorted((it['width'], it['outline'], it['fill'])
@@ -702,6 +878,41 @@ def test_calibration_two_point_marker_is_a_1px_white_ring_on_black():
     arms = [it for it in items if it['kind'] == 'line']
     assert arms and all(it['fill'] == gui.CAL_INK and it['width'] == 1.0
                         for it in arms), arms
+
+
+def test_calibration_two_point_chord_is_a_1px_white_dashed_line():
+    """TWOPOINT with both points of a round placed (#476: the case above
+    clicks once, so the chord was never drawn). Every round but the last
+    banks on its second click and clears, so the chord stays on screen
+    only in the last one; the clicks go through all five rounds. It is a
+    single 1 px white line dashed (3, 5) that stops CAL_MARK_GAP_VIEW
+    short of each point, so its ink never touches a judged pixel, and the
+    only dashed line in the dialog. The markers at both points stay 1 px
+    rings."""
+    import math
+    import sldea_edge_gui as gui
+    clicks = [(80.0, 120.0), (240.0, 120.0)] * gui.CAL_ROUNDS_TWOPOINT
+    got = _cal_items('twopoint', clicks=clicks)
+    items = got['items']
+    assert _colors(items) <= {gui.CAL_INK, gui.CAL_HALO}, _colors(items)
+    assert len(got['views']) == 2, got['views']
+    chords = [it for it in items if it['kind'] == 'line' and it['dash']]
+    assert len(chords) == 1, chords
+    ch = chords[0]
+    assert (ch['fill'], ch['width'], ch['dash']) == \
+        (gui.CAL_INK, 1.0, (3, 5)), ch
+    p1, p2 = got['views']
+    want = gui.chord_segment(p1, p2)
+    assert want and np.allclose(ch['coords'], want, atol=0.5), \
+        (ch['coords'], want)
+    ends = (ch['coords'][:2], ch['coords'][2:])
+    for x, y in (p1, p2):
+        near = min(math.hypot(ex - x, ey - y) for ex, ey in ends)
+        assert near >= gui.CAL_MARK_GAP_VIEW - 0.5, (near, (x, y), ends)
+    ovals = sorted((it['width'], it['outline'], it['fill'])
+                   for it in items if it['kind'] == 'oval')
+    assert ovals == sorted([(1.0, gui.CAL_INK, ''),
+                            (1.0, gui.CAL_HALO, '')] * 2), ovals
 
 
 def test_labels_and_round_sets_name_the_palette_they_were_drawn_in():

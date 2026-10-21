@@ -103,6 +103,25 @@ TOL_RED = '#EE6677'
 TOL_CYAN = '#66CCEE'
 TOL_GREY = '#BBBBBB'
 
+# The centering reticle, here and on the camera pre-flight (one drawing,
+# draw_reticle): Tol white on a Tol black halo (#476; this view drew it
+# in Tol cyan before). Measured 2026-10-20 on run P3_6's baseline, 2.5 kV
+# and 10 kV frames as the pre-flight and this view show them, with gray
+# 111 to 175 under the ink (5th to 95th percentile): white stands off
+# the frame by a median 2.8 to 3.3:1, cyan by 1.5 to 1.8:1; the 5th
+# percentile of the worst-case CIEDE2000 between ink and frame (normal
+# and simulated color-blind vision) is 21.4 to 25.6 for white and 16.2
+# to 19.5 for cyan, against the house floor of 18. Both are taken over
+# every ink pixel: 300-pixel samples moved white's by up to 4.3 and
+# cyan's by up to 0.3, so a sampled value is not one to quote. On the
+# halo white is 21:1 and cyan 11.4:1. On a flat dark frame (gray 66) the
+# halo is only 2.1:1, so the ink carries the reticle alone: white 10:1,
+# cyan 5.5:1.
+# Cyan is also Edge Review's candidate A, so a cyan circle reads as a
+# detected outline; this one is only a framing guide.
+RETICLE_INK = '#FFFFFF'
+RETICLE_HALO = '#000000'
+
 # What each display state is called on the picture (banner) and its
 # colour. The words carry the meaning; the colour only repeats it. LIVE
 # is Tol cyan (information), not green: next to high voltage, green reads
@@ -284,18 +303,40 @@ def _text_w(draw, text, font):
         return 7 * len(text)
 
 
+def draw_reticle(img):
+    """Draw the centering reticle on the PIL image `img`, in place: a
+    cross through the middle and a circle 0.32 of the height in radius.
+    The camera pre-flight (gui.draw_preflight_reticle) and this view both
+    draw it with this function, so the two are one reticle (#476).
+
+    A framing guide, not an edge to place points on, so it may be widened:
+    RETICLE_INK on a RETICLE_HALO 1 px wider on each side (#454; it was
+    the Material green #00e676 alone, 1.84:1 on the gray membrane), which
+    reads on the dark rim, the membrane and the bright foil it crosses.
+    Both halos go down before either ink line. PIL draws an ellipse's
+    width inward, so the halo's box is 1 px larger to center it."""
+    from PIL import ImageDraw
+    dr = ImageDraw.Draw(img)
+    cx, cy = img.width / 2, img.height / 2
+    r = img.height * 0.32
+    for col, pad in ((RETICLE_HALO, 1), (RETICLE_INK, 0)):
+        dr.line([(cx, 0), (cx, img.height)], fill=col, width=1 + 2 * pad)
+        dr.line([(0, cy), (img.width, cy)], fill=col, width=1 + 2 * pad)
+        dr.ellipse([cx - r - pad, cy - r - pad, cx + r + pad, cy + r + pad],
+                   outline=col, width=2 + 2 * pad)
+
+
 def render(thumb, kind, size=None):
     """The picture for one display state -> a PIL image.
 
     `thumb` is the view's own thumbnail (or None for a black field of
-    `size`); it is copied, never drawn on. With a picture, the pre-flight
-    reticle is drawn on it (same geometry as gui._sldea_preflight: a
-    crosshair through the centre and a circle of 0.32 x the height), in
-    Tol cyan over a black under-stroke so it shows on light and dark
-    backgrounds. Every state gets a banner naming it; the NO FRAME states
-    also get the words large in the middle, on black. RECORDING ENDED
-    keeps the last frame under its grey banner (words on black only when
-    there is no frame)."""
+    `size`); it is copied, never drawn on. With a picture, the pre-flight's
+    reticle is drawn on it (draw_reticle: a crosshair through the centre
+    and a circle of 0.32 x the height, white on a black halo, so it shows
+    on light and dark backgrounds). Every state gets a banner naming it;
+    the NO FRAME states also get the words large in the middle, on black.
+    RECORDING ENDED keeps the last frame under its grey banner (words on
+    black only when there is no frame)."""
     import numpy as np
     from PIL import Image, ImageDraw
     banner, color = BANNERS.get(kind, (str(kind).upper(), TOL_GREY))
@@ -307,13 +348,7 @@ def render(thumb, kind, size=None):
     dr = ImageDraw.Draw(img)
     w, h = img.width, img.height
     if thumb is not None and kind not in ('stalled', 'closed', 'error'):
-        cx, cy = w / 2.0, h / 2.0
-        r = h * 0.32
-        for fill, lw, cw in (('#000000', 3, 4), (TOL_CYAN, 1, 2)):
-            dr.line([(cx, 0), (cx, h)], fill=fill, width=lw)
-            dr.line([(0, cy), (w, cy)], fill=fill, width=lw)
-            dr.ellipse([cx - r, cy - r, cx + r, cy + r], outline=fill,
-                       width=cw)
+        draw_reticle(img)
     if kind in ('stalled', 'closed', 'waiting', 'idle', 'error',
                 'finishing'):
         big = {'stalled': ("NO FRAME", "(stream stalled)"),

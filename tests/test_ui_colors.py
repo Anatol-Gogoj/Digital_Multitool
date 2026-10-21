@@ -278,7 +278,14 @@ def _is_color(text):
 
 def _parsed_colors(name, src):
     """(line, literal) of every color string kept in an UPPER_CASE
-    constant, and of either branch of a color keyword's conditional."""
+    constant, and of either branch of a color keyword's conditional.
+
+    A constant may hold any string (a title, a path), so there only what
+    _is_color reads as a color counts. A branch of a color keyword is a
+    color by where it stands, so every string there counts, Tk names
+    _is_color does not know included ('firebrick', 'gray40'), except ''
+    (Tk's "no color, use the default"), which _KW never matches either
+    (#476)."""
     found = []
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -304,7 +311,8 @@ def _parsed_colors(name, src):
                     if isinstance(branch, ast.IfExp):
                         todo.append(branch)
                     elif (isinstance(branch, ast.Constant)
-                          and isinstance(branch.value, str)):
+                          and isinstance(branch.value, str)
+                          and branch.value != ''):
                         found.append((branch.lineno, branch.value))
     return found
 
@@ -336,7 +344,10 @@ def test_the_moved_modules_write_no_word_in_a_stray_color():
 def test_the_scan_finds_what_it_is_looking_for():
     """The source scan above passes on a file with no colors at all, so
     show it catching each kind of literal it is meant to catch, and
-    passing the Tol and drawn-line ones it must leave alone."""
+    passing the Tol and drawn-line ones it must leave alone. A
+    conditional's '' branch is Tk's default color, not a stray; the
+    other branch of the same conditional is still read, and so is a Tk
+    color name the color pattern does not know (#476)."""
     src = ("tk.Label(f, fg='#c62828')\n"
            "x.config(highlightbackground='#999')\n"
            "c.create_text(1, 2, text='a', font=('A', 8), fill='#999')\n"
@@ -346,12 +357,15 @@ def test_the_scan_finds_what_it_is_looking_for():
            "STATE_COLORS = {'ok': '#2255AA', 'bad': 'dark green'}\n"
            "tk.Label(f, fg=uc.TEXT_OK if ok else '#a01010')\n"
            "tk.Label(f, fg=COLORS['warn' if warn else 'ok'])\n"
+           "tk.Label(f, fg=X if a else '')\n"
+           "tk.Label(f, bg=X if a else ('' if b else '#a01010'))\n"
+           "tk.Label(f, fg=X if a else 'firebrick')\n"
            "CAND_COLORS = ['#00c853']\n"
            "TITLE = 'Edge Review'\n")
     found = _strays('sldea_edge_gui.py', src)
     want = ['sldea_edge_gui.py:' + s for s in (
         '1 #c62828', '3 #999', '4 #555', '5 red', '6 #8a8a8a',
-        '7 dark green', '8 #a01010')]
+        '7 dark green', '8 #a01010', '11 #a01010', '12 firebrick')]
     assert found == want, found
 
 
@@ -452,13 +466,53 @@ def test_on_the_built_app_every_colored_word_reads():
     assert not bad, "\n  ".join(['words that do not read:'] + bad)
 
 
+def _pending_afters(win):
+    """The after() callbacks `win` itself scheduled and Tk has not run
+    yet, as after ids."""
+    import tkinter as tk
+    own = {str(c) for c in (getattr(win, '_tclCommands', None) or ())}
+    out = []
+    for aid in win.tk.splitlist(win.tk.call('after', 'info')):
+        try:
+            script = win.tk.splitlist(win.tk.call('after', 'info', aid))[0]
+        except tk.TclError:
+            continue
+        if str(script) in own:
+            out.append(aid)
+    return out
+
+
+def _dangling_afters(root):
+    """Pending after() scripts whose command no longer exists. Each one
+    prints 'invalid command name' on stderr when its time comes: Tk
+    deletes a window's Python callbacks with the window, but not the
+    timers that would call them."""
+    import tkinter as tk
+    out = []
+    for aid in root.tk.splitlist(root.tk.call('after', 'info')):
+        try:
+            script = root.tk.splitlist(root.tk.call('after', 'info', aid))[0]
+            cmd = root.tk.splitlist(script)[0]
+        except (tk.TclError, IndexError):
+            continue
+        if not root.tk.call('info', 'commands', cmd):
+            out.append(str(script))
+    return out
+
+
 def test_the_arb_editor_and_its_export_dialogs_open_and_read():
     """The Waveform Editor and its two export dialogs are windows of their
     own, so the walk above never sees them. After #462 the editor did not
     open at all: its _build_ui named a local Combobox `uc`, which made the
     ui_colors alias local to the whole method, so the first uc.TEXT_MUTED
     raised. Each window here is built for real, and its colored words
-    reach the bar."""
+    reach the bar.
+
+    The editor fits its view 50 ms after it opens (after(50, _fit_all)).
+    Destroyed before that, it left the timer behind, and the next update
+    printed "invalid command name" (#476). So the fit is let run before
+    the windows close, and nothing they scheduled is left dangling."""
+    import time
     import arb_editor
     root, app = _app()
     bad, windows = [], []
@@ -479,12 +533,19 @@ def test_the_arb_editor_and_its_export_dialogs_open_and_read():
                     if r < need:
                         bad.append(f"{w} fg {fg} on {against}: {r:.2f}:1")
         assert _colored_words(ed), "the editor's walk found no colored word"
+        assert _pending_afters(ed), "the editor no longer defers its fit"
+        deadline = time.monotonic() + 5.0
+        while _pending_afters(ed) and time.monotonic() < deadline:
+            ed.after(20)
+            ed.update()
+        assert not _pending_afters(ed), "the editor's fit never ran"
     finally:
         for win in reversed(windows):
             try:
                 win.destroy()
             except Exception:
                 pass
+    assert not _dangling_afters(root), _dangling_afters(root)
     assert not bad, "\n  ".join(['words that do not read:'] + bad)
 
 

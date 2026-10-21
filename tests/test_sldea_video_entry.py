@@ -839,8 +839,10 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
             # environment with PYTHONUNBUFFERED=1, and its stdout and
             # stderr in one log file per start
             for k in (kw, plot_kw, edge_kw):
+                # the key names only: k['env'] is the whole environment,
+                # which a pasted failure would publish (#476)
                 assert set(k) == {'start_new_session', 'stdout', 'stderr',
-                                  'env'}, k
+                                  'env'}, sorted(k)
                 assert k['start_new_session'] is True
                 assert k['stderr'] == subprocess.STDOUT
                 assert k['env'] == dict(os.environ, PYTHONUNBUFFERED='1')

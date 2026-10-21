@@ -181,10 +181,12 @@ class ArbWaveformEditor(tk.Toplevel):
         pc.bind('<<ComboboxSelected>>', lambda e: self._set_periods())
         ttk.Label(view, text="Time unit:").pack(side=tk.LEFT, padx=(12, 2))
         self.unit_var = tk.StringVar(value=self.time_unit)
-        uc = ttk.Combobox(view, width=4, state='readonly', textvariable=self.unit_var,
-                          values=list(_UNIT_FACTORS.keys()))
-        uc.pack(side=tk.LEFT)
-        uc.bind('<<ComboboxSelected>>', lambda e: self._set_unit())
+        # not `uc`: that is the ui_colors alias this method reads (#462)
+        unit_box = ttk.Combobox(view, width=4, state='readonly',
+                                textvariable=self.unit_var,
+                                values=list(_UNIT_FACTORS.keys()))
+        unit_box.pack(side=tk.LEFT)
+        unit_box.bind('<<ComboboxSelected>>', lambda e: self._set_unit())
         ttk.Button(view, text="Undo", command=self.undo).pack(side=tk.RIGHT, padx=2)
         ttk.Button(view, text="Redo", command=self.redo).pack(side=tk.RIGHT, padx=2)
         self.hbar = ttk.Scrollbar(self, orient='horizontal', command=self._on_scroll)

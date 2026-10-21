@@ -452,6 +452,42 @@ def test_on_the_built_app_every_colored_word_reads():
     assert not bad, "\n  ".join(['words that do not read:'] + bad)
 
 
+def test_the_arb_editor_and_its_export_dialogs_open_and_read():
+    """The Waveform Editor and its two export dialogs are windows of their
+    own, so the walk above never sees them. After #462 the editor did not
+    open at all: its _build_ui named a local Combobox `uc`, which made the
+    ui_colors alias local to the whole method, so the first uc.TEXT_MUTED
+    raised. Each window here is built for real, and its colored words
+    reach the bar."""
+    import arb_editor
+    root, app = _app()
+    bad, windows = [], []
+    try:
+        ed = arb_editor.ArbWaveformEditor(app, 1)
+        windows.append(ed)
+        for cls in (arb_editor.BinExportDialog,
+                    arb_editor.EasyWaveXExportDialog):
+            windows.append(cls(ed))
+        for win in windows:
+            win.update_idletasks()
+            words = _colored_words(win)
+            for w, fg, bg, on_default, large in words:
+                need = LARGE_TEXT_MIN if large else TEXT_MIN
+                f, b = _hex(w, fg), _hex(w, bg)
+                for against in ((b, BENCH_BG) if on_default else (b,)):
+                    r = _contrast(f, against)
+                    if r < need:
+                        bad.append(f"{w} fg {fg} on {against}: {r:.2f}:1")
+        assert _colored_words(ed), "the editor's walk found no colored word"
+    finally:
+        for win in reversed(windows):
+            try:
+                win.destroy()
+            except Exception:
+                pass
+    assert not bad, "\n  ".join(['words that do not read:'] + bad)
+
+
 def test_the_dry_live_row_says_its_state_in_words_and_tol_colors():
     _root, app = _app()
     seen = {}

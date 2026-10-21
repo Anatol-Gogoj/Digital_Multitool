@@ -535,8 +535,14 @@ def test_a_tag_never_lands_on_an_earlier_tag():
     """#477: each letter tag goes at its outline's rightmost point, and
     two outlines can share that point (B and C on the manual's bench
     frame). C's tag, drawn later, sat on B's and hid it. Now every pixel
-    of B's tag drawn alone survives with C beside it, and C's tag shows
-    beside its own outline's right edge, within C's height."""
+    of B's tag drawn with A survives with C beside it too, and C's tag
+    shows beside its own outline's right edge, within C's height.
+
+    Three outlines share the point, at the card's top edge so no tag can
+    step up: A stays, B steps down one, C down two. With only B and C,
+    a version that recorded each tag's box where it started rather than
+    where it went passed (review of #477): B never moved there. With A
+    first, B moves, and C landed on it."""
     import sldea_edge_gui as gui
     # the pure step: a free spot stays, a taken one steps down a tag
     # height (halo included), or up when the card has no room below
@@ -556,19 +562,22 @@ def test_a_tag_never_lands_on_an_earlier_tag():
         i = app.frame_rows[1]
         app.pos = app.frame_rows.index(i)
         app.cand_var.set(0)
-        # slot A is skipped (a contour of 2 points), so the outlines are
-        # B and C, and both start at the rightmost point (200, 40)
+        # A, B and C all start at the rightmost point (200, 10); a
+        # contour of 2 points is skipped, so C can be left out
+        def box(left, bottom):
+            return np.array([[left, 10], [200, 10], [200, bottom],
+                             [left, bottom]], np.int32)
         skip = {'method': 'disc-fit',
                 'contour': np.array([[0, 0], [1, 1]], np.int32)}
-        b = {'method': 'diff-hi', 'contour': _square(40, 200)}
-        c = {'method': 'diff-lo', 'contour': np.array(
-            [[60, 40], [200, 40], [200, 180], [60, 180]], np.int32)}
+        a = {'method': 'disc-fit', 'contour': box(80, 220)}
+        b = {'method': 'diff-hi', 'contour': box(40, 200)}
+        c = {'method': 'diff-lo', 'contour': box(60, 180)}
         b_col, c_col = _rgb(gui.CAND_COLORS[1]), _rgb(gui.CAND_COLORS[2])
-        right = slice(204, None)         # right of both lines and halos
-        b_alone = np.all(_card_pixels(app, i, [skip, b])[:, right] == b_col,
-                         axis=2)
+        right = slice(204, None)         # right of the lines and halos
+        b_alone = np.all(
+            _card_pixels(app, i, [a, b, skip])[:, right] == b_col, axis=2)
         assert b_alone.sum() > 40, b_alone.sum()
-        both = _card_pixels(app, i, [skip, b, c])[:, right]
+        both = _card_pixels(app, i, [a, b, c])[:, right]
         b_both = np.all(both == b_col, axis=2)
         lost = b_alone & ~b_both
         assert not lost.any(), (
@@ -577,7 +586,7 @@ def test_a_tag_never_lands_on_an_earlier_tag():
         c_tag = np.argwhere(np.all(both == c_col, axis=2))
         assert len(c_tag) > 40, len(c_tag)
         ys, xs = c_tag[:, 0], c_tag[:, 1] + 204
-        assert 40 <= ys.min() and ys.max() <= 180, (ys.min(), ys.max())
+        assert 10 <= ys.min() and ys.max() <= 180, (ys.min(), ys.max())
         assert 206 <= xs.min() and xs.max() <= 206 + gui.TAG_PX, \
             (xs.min(), xs.max())
     finally:

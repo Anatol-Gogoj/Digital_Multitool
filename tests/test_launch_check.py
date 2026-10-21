@@ -17,6 +17,10 @@ and what it printed went to the bench app's own output. Pinned here:
 * a program that stays up reads "starting" until launch_check.CHECK_MS
   has passed, then "opened", unless something else has used the status
   bar meanwhile;
+* the look goes on after "opened" (#473): a program that dies before
+  launch_check.WATCH_MS is said the same way, once, and its box waits for
+  a run too; one that closes normally then is not said; the window's
+  close ends the look and lets go of the program;
 * each look is one poll() on the Tk thread, and the launcher returns
   without waiting for its program;
 * a healthy program starts as before: the same arguments, working folder
@@ -81,8 +85,33 @@ TELLS = [sys.executable, '-c',
 CHATTY = [sys.executable, '-c',
           'import sys\nfor i in range(20): print("progress", i)\n'
           'raise RuntimeError("the real error")']
-# ...and one that closes normally at once
+# ...one that closes normally at once
 CLOSES = [sys.executable, '-c', 'import sys; sys.exit(0)']
+
+
+def _waits(go):
+    """...and one that runs until the file `go` exists, as a window that
+    has read as opened (#473), then writes a line to stderr and exits
+    with the code in that file (_go). It gives up after 300 s, so a test
+    that died cannot leave it running for long."""
+    return [sys.executable, '-c',
+            'import os, sys, time\n'
+            'end = time.time() + 300\n'
+            'while not os.path.exists(sys.argv[1]) and time.time() < end:\n'
+            '    time.sleep(0.05)\n'
+            'sys.stderr.write("late boom from the child\\n")\n'
+            'sys.exit(int(open(sys.argv[1]).read()) '
+            'if os.path.exists(sys.argv[1]) else 9)', go]
+
+
+def _go(go, code):
+    """Tell the _waits(go) stand-ins to exit with `code`. The file appears
+    whole (written beside it, then renamed), so none reads it half
+    written."""
+    part = go + '.part'
+    with open(part, 'w') as f:
+        f.write(str(code))
+    os.replace(part, go)
 
 # program -> (its script, the title of its boxes)
 PROGRAMS = {
@@ -280,10 +309,12 @@ def _press(app, program, run):
 class _Bench:
     """A Tk root, a run folder, gui's subprocess and messagebox swapped
     for stand-ins, and the launch logs in the test's own folder; restores
-    all of it and stops every child it started."""
+    all of it and stops every child it started. `watch_ms`, when given,
+    stands in for launch_check.WATCH_MS meanwhile."""
 
-    def __init__(self, child):
+    def __init__(self, child, watch_ms=None):
         self.swap, self.boxes = _Swap(child), _Boxes()
+        self.watch_ms = watch_ms
 
     def __enter__(self):
         self.gui = _gui()
@@ -292,7 +323,8 @@ class _Bench:
         os.makedirs(self.run)
         self.logs = os.path.join(self.tmp, 'launch_logs')
         self.saved = (self.gui.subprocess, self.gui.messagebox,
-                      launch_check.LOG_DIR if launch_check else None)
+                      launch_check.LOG_DIR if launch_check else None,
+                      getattr(launch_check, 'WATCH_MS', None))
         self.root = None
         try:
             self.root = _tk_root()
@@ -302,6 +334,8 @@ class _Bench:
         self.gui.subprocess, self.gui.messagebox = self.swap, self.boxes
         if launch_check is not None:
             launch_check.LOG_DIR = self.logs
+            if self.watch_ms is not None:
+                launch_check.WATCH_MS = self.watch_ms
         return self
 
     def __exit__(self, *exc):
@@ -309,6 +343,8 @@ class _Bench:
         self.gui.subprocess, self.gui.messagebox = self.saved[:2]
         if launch_check is not None:
             launch_check.LOG_DIR = self.saved[2]
+            if self.saved[3] is not None:
+                launch_check.WATCH_MS = self.saved[3]
         _destroy(self.root)
         shutil.rmtree(self.tmp, ignore_errors=True)
         return False
@@ -406,13 +442,14 @@ def test_a_program_that_stays_up_reads_starting_then_opened():
         other = _app(b.root, b.run)
         _press(other, 'Edge Review', b.run)
         other.status_bar.config(text="Preset saved")
-        opened_at = {}
+        opened_at, looks_at = {}, {}
 
         def all_opened():
             for program, app in apps.items():
                 if program not in opened_at and \
                         app.status() == f"{program} opened on {name}":
                     opened_at[program] = time.monotonic() - t0
+                    looks_at[app] = len(app.root.spans)
             return len(opened_at) == len(apps)
         # still starting a little before the check passes
         _until(b.root, lambda: False, timeout=_check_ms() / 2000.0)
@@ -424,18 +461,210 @@ def test_a_program_that_stays_up_reads_starting_then_opened():
             {p: a.status() for p, a in apps.items()}
         assert min(opened_at.values()) >= _check_ms() / 1000.0 - 0.05, \
             opened_at
+        looks_at[other] = len(other.root.spans)
         _until(b.root, lambda: False, timeout=0.5)
         assert other.status() == "Preset saved", other.status()
         assert not (b.boxes.errors or b.boxes.infos), b.boxes.errors
         for p in b.swap.procs:
             assert p.poll() is None, "the stand-in program stopped"
+        # and after "opened" it goes on looking (#473), every LATE_POLL_MS
+        # (waited for, not timed: an after() can come late)
+        assert _until(b.root, lambda: all(
+            len(a.root.spans) > n for a, n in looks_at.items()),
+            timeout=launch_check.LATE_POLL_MS / 1000.0 + 10.0), \
+            {a.status(): (n, len(a.root.spans)) for a, n in looks_at.items()}
         for app in list(apps.values()) + [other]:
             spans = app.root.spans
             # it kept looking, every POLL_MS, until the check passed (each
             # after() can come late, so fewer looks than CHECK_MS/POLL_MS)
             looks = _check_ms() // launch_check.POLL_MS
-            assert looks // 2 <= len(spans) <= looks + 1, spans
+            assert looks // 2 <= looks_at[app] <= looks + 1, spans
             assert max(spans) < LOOK_MAX_S, max(spans)
+
+
+# The look outlasts every wait in the #473 cases below (EXIT_WAIT_S for a
+# stand-in's exit, then the pumping after it), so whether a death is said
+# never hangs on how long a held start took. The 30 s default itself is
+# pinned with a fake clock (test_after_up_the_look_goes_on_to_watch_ms).
+LONG_WATCH_MS = (EXIT_WAIT_S + 60) * 1000
+
+
+def _watches(app):
+    """The launch looks `app` keeps (gui.sldea_launch_keep)."""
+    return list(getattr(app, '_sldea_launch_watches', None) or [])
+
+
+def _opened(b, apps, name):
+    """Pump until every app's program reads opened. The _waits stand-ins
+    run until told, so each is still running at CHECK_MS however long its
+    start was held."""
+    assert _until(b.root, lambda: all(
+        a.status() == f"{p} opened on {name}" for p, a in apps.items()),
+        timeout=_check_ms() / 1000.0 + 5.0), \
+        {p: a.status() for p, a in apps.items()}
+
+
+def test_a_program_that_dies_after_it_opened_is_said_too():
+    """THE #473 BUG. The look stopped at "opened". On a Windows PC that
+    holds a Python start about 5 s (#458) a real window reads "opened"
+    while it is still starting, and if it then died nobody was told. Now
+    a death before WATCH_MS is said as a death at once is: on the status
+    bar and in a box, with its exit code, its last lines and its log.
+    Once: the look ends at the death, and neither the bar nor the box
+    comes again."""
+    gd = _tmp()
+    go = os.path.join(gd, 'go')
+    try:
+        with _Bench(_waits(go), watch_ms=LONG_WATCH_MS) as b:
+            name = os.path.basename(b.run)
+            apps = {}
+            for program in PROGRAMS:
+                apps[program] = app = _app(b.root, b.run)
+                _press(app, program, b.run)
+            _opened(b, apps, name)
+            assert not b.boxes.errors, b.boxes.errors
+            for app in apps.values():
+                [w] = _watches(app)
+                assert not w.done and w.proc is not None, \
+                    "the look ended at opened"
+            _go(go, 3)
+            _exited(b)
+            assert _until(b.root, lambda: len(b.boxes.errors) >= len(PROGRAMS),
+                          timeout=launch_check.LATE_POLL_MS / 1000.0 + 5.0), (
+                f"{len(b.boxes.errors)} boxes for {len(PROGRAMS)} programs "
+                f"that died after they opened; the status lines read "
+                f"{sorted(a.status() for a in apps.values())}")
+            for p in b.swap.procs:
+                assert p.poll() == 3, p.poll()
+            titles = sorted(t for t, _m in b.boxes.errors)
+            assert titles == sorted(t for _s, t in PROGRAMS.values()), titles
+            for program, (_script, title) in PROGRAMS.items():
+                app = apps[program]
+                [text] = [m for t, m in b.boxes.errors if t == title]
+                head = text.split('\n', 1)[0]
+                lead = f"{program} stopped within "
+                assert head.startswith(lead), text
+                assert head.endswith(" s of starting (exit code 3)."), text
+                secs = int(head[len(lead):].split()[0])
+                assert secs >= _check_ms() / 1000.0, head
+                assert "late boom from the child" in text, text
+                log = text.rsplit('\n', 1)[-1]
+                assert os.path.dirname(log) == b.logs, text
+                st = app.status()
+                assert st == (f"{program} stopped on {name} within {secs} s "
+                              f"of starting (exit code 3)"), st
+                [w] = _watches(app)
+                assert w.done and w.job is None, \
+                    "the look went on after the death"
+                assert w.proc is None, "the ended look kept the handle"
+                # something newer on the bar is not overwritten again
+                app.status_bar.config(text="Preset saved")
+            _until(b.root, lambda: False,
+                   timeout=3 * launch_check.LATE_POLL_MS / 1000.0)
+            assert len(b.boxes.errors) == len(PROGRAMS), b.boxes.errors
+            for app in apps.values():
+                assert app.status() == "Preset saved", app.status()
+                spans = app.root.spans
+                assert spans and max(spans) < LOOK_MAX_S, spans
+            assert not b.boxes.infos, b.boxes.infos
+    finally:
+        shutil.rmtree(gd, ignore_errors=True)
+
+
+def test_a_program_closed_after_it_opened_is_not_said():
+    """#473: exit code 0 after "opened" is its user closing it. The look
+    sees it (and ends), and says nothing: no box, and the status line
+    keeps "opened"."""
+    gd = _tmp()
+    go = os.path.join(gd, 'go')
+    try:
+        with _Bench(_waits(go), watch_ms=LONG_WATCH_MS) as b:
+            name = os.path.basename(b.run)
+            apps = {}
+            for program in PROGRAMS:
+                apps[program] = app = _app(b.root, b.run)
+                _press(app, program, b.run)
+            _opened(b, apps, name)
+            looks = [w for a in apps.values() for w in _watches(a)]
+            assert len(looks) == len(apps), looks
+            _go(go, 0)
+            _exited(b)
+            # the look has seen every exit: it ends there
+            assert _until(b.root, lambda: all(w.done for w in looks),
+                          timeout=launch_check.LATE_POLL_MS / 1000.0 + 5.0)
+            for p in b.swap.procs:
+                assert p.poll() == 0, p.poll()
+            _until(b.root, lambda: False, timeout=0.3)
+            assert not (b.boxes.errors or b.boxes.infos), b.boxes.errors
+            for program, app in apps.items():
+                assert app.status() == f"{program} opened on {name}", \
+                    app.status()
+    finally:
+        shutil.rmtree(gd, ignore_errors=True)
+
+
+def test_a_death_after_opened_during_a_run_waits_for_the_run_too():
+    """#473 with the #429 review's hold, HV-relevant: a box from a death
+    after "opened" must not stand between the operator and Abort either. The worker opens Edge Review itself at a run's end, so its
+    late death can come while the run is going: the status line says it
+    at once, and the box waits for the run's end."""
+    gui = _gui()
+    hold_s = gui.SLDEA_LAUNCH_HOLD_MS / 1000.0
+    gd = _tmp()
+    go = os.path.join(gd, 'go')
+    try:
+        with _Bench(_waits(go), watch_ms=LONG_WATCH_MS) as b:
+            name = os.path.basename(b.run)
+            app = _app(b.root, b.run)
+            app._sldea_running = True
+            app._sldea_open_edge_review(b.run)
+            _opened(b, {'Edge Review': app}, name)
+            _go(go, 3)
+            _exited(b)
+            assert _until(b.root, lambda: 'stopped' in app.status(),
+                          timeout=launch_check.LATE_POLL_MS / 1000.0 + 5.0), \
+                app.status()
+            _until(b.root, lambda: False, timeout=3 * hold_s)
+            assert b.boxes.errors == [], (
+                f"a box opened during the run: {b.boxes.errors}")
+            st = app.status()
+            assert st.startswith(f"Edge Review stopped on {name} within "), st
+            assert st.endswith(" s of starting (exit code 3)"
+                               + gui.SLDEA_LAUNCH_HELD), st
+            app._sldea_running = False
+            assert _until(b.root, lambda: b.boxes.errors,
+                          timeout=hold_s + 3.0)
+            [(title, text)] = b.boxes.errors
+            assert title == 'Edge Review' and '(exit code 3)' in text, text
+            assert 'late boom from the child' in text, text
+    finally:
+        shutil.rmtree(gd, ignore_errors=True)
+
+
+def test_the_look_ends_when_the_window_closes():
+    """#473: the look now outlives "opened" by up to WATCH_MS, so a window
+    closed in that time takes its timer with it: none is left to fire
+    into a window that is gone (Tk would say "invalid command name"), and
+    the look lets go of the program's handle, as _sldea_folder_stop does
+    for the run folder line. The program itself is not touched."""
+    with _Bench(STAYS) as b:
+        name = os.path.basename(b.run)
+        app = _app(b.root, b.run)
+        _press(app, 'Plot window', b.run)
+        _opened(b, {'Plot window': app}, name)
+        [w] = _watches(app)
+        job = w.job
+        assert not w.done and job is not None, (w.done, job)
+
+        def pending():
+            return set(b.root.tk.splitlist(b.root.tk.call('after', 'info')))
+        assert job in pending(), (job, pending())
+        b.root.destroy()
+        assert w.done and w.job is None and w.proc is None, \
+            (w.done, w.job, w.proc)
+        assert job not in pending(), (job, pending())
+        assert _watches(app) == []
+        assert b.swap.procs[0].poll() is None, "the program was stopped"
 
 
 def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
@@ -452,8 +681,10 @@ def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
             script = os.path.join(os.path.dirname(os.path.abspath(
                 b.gui.__file__)), 'sldea_edge_gui.py')
             assert cmd == [sys.executable, script, b.run, '--auto'], cmd
+            # the key names only: kw['env'] is the whole environment, which
+            # a pasted failure would publish (#476)
             assert set(kw) == {'start_new_session', 'stdout', 'stderr',
-                               'env'}, kw
+                               'env'}, sorted(kw)
             assert kw['start_new_session'] is True
             assert kw['stderr'] == subprocess.STDOUT
             assert kw['env'] == dict(os.environ, PYTHONUNBUFFERED='1')
@@ -758,6 +989,14 @@ def test_the_report_names_the_code_the_lines_and_the_log():
             'Edge tuner stopped before it opened (exit code 1).'), text
         assert 'ImportError: no cv2' in text and '# h' not in text, text
         assert text.endswith('\n' + path), text
+        # a death the look saw after "opened" (#473): when, as an upper
+        # bound from the time of that look, and the same lines and log
+        late = launch_check.report(run, 1, 6.2)
+        assert late.startswith(
+            'Edge tuner stopped within 7 s of starting (exit code 1).'), late
+        assert late.split('\n', 1)[1] == text.split('\n', 1)[1], late
+        assert launch_check.when_words(None) == 'before it opened'
+        assert launch_check.when_words(3.0) == 'within 3 s of starting'
         with open(path, 'wb') as f:
             f.write(b'# h\n')
         assert 'It printed nothing.' in launch_check.report(run, 2)
@@ -860,19 +1099,29 @@ def test_the_default_log_folder_is_beside_the_other_local_logs():
 
 class _FakeRoot:
     """Records after() calls; `gone` makes them raise, as Tk does once
-    the window is destroyed."""
+    the window is destroyed. after_cancel() drops a job, as Tk's does."""
 
     def __init__(self):
         self.jobs, self.gone = [], False
+        self.ids, self.canceled, self.n = [], [], 0
 
     def after(self, ms, fn=None, *a):
         if self.gone:
             raise RuntimeError('application has been destroyed')
+        self.n += 1
         self.jobs.append((ms, fn))
-        return len(self.jobs)
+        self.ids.append(self.n)
+        return self.n
+
+    def after_cancel(self, job):
+        self.canceled.append(job)
+        if job in self.ids:
+            i = self.ids.index(job)
+            del self.jobs[i], self.ids[i]
 
     def run_next(self):
         _ms, fn = self.jobs.pop(0)
+        self.ids.pop(0)
         fn()
 
 
@@ -942,6 +1191,104 @@ def test_the_look_calls_exactly_one_of_up_and_down():
                        check_ms=0, poll_ms=200, clock=clock)
     root.run_next()
     assert root.jobs == []
+
+
+def test_after_up_the_look_goes_on_to_watch_ms():
+    """#473, with a fake clock. Given a `late`, the look goes on after
+    up() every LATE_POLL_MS until WATCH_MS (30 s by default) after the
+    start; a death in that time calls late(code, secs) once, and the
+    look ends there, as it does at WATCH_MS. Then it holds neither the
+    process nor the callbacks. cancel() ends it at once."""
+    t = [0]                             # ms, so the sums stay exact
+
+    def clock():
+        return t[0] / 1000.0
+    said = []
+
+    def go(codes):
+        root, proc = _FakeRoot(), _FakeProc(codes)
+        w = launch_check.watch(root, proc, lambda: said.append('up'),
+                               lambda c: said.append(('down', c)),
+                               lambda c, s: said.append(('late', c, s)),
+                               clock=clock)
+        return root, w
+
+    def looks(root, n=None):
+        """Run each look when its time comes: `n` of them, or all to the
+        look's end (at most 10000, so a look that never ends fails the
+        case rather than hanging it) -> how many ran."""
+        ran, n = 0, 10000 if n is None else n
+        while root.jobs and ran < n:
+            t[0] += root.jobs[0][0]
+            root.run_next()
+            ran += 1
+        return ran
+    assert launch_check.WATCH_MS == 30000, launch_check.WATCH_MS
+    early = launch_check.CHECK_MS // launch_check.POLL_MS   # up() at the last
+    chk = launch_check.CHECK_MS / 1000.0
+    late_ms = launch_check.LATE_POLL_MS
+    # stays up: up() at CHECK_MS, then a look every LATE_POLL_MS until the
+    # first one at or after WATCH_MS, and nothing more
+    said.clear()
+    t[0] = 0
+    root, w = go([None])
+    n = looks(root)
+    late_looks = -(-(launch_check.WATCH_MS - launch_check.CHECK_MS)
+                   // late_ms)
+    assert said == ['up'] and root.jobs == [], (said, root.jobs)
+    assert n == early + late_looks, n
+    assert t[0] == launch_check.CHECK_MS + late_looks * late_ms, t[0]
+    assert w.done and w.proc is None and w.job is None
+    assert (w.up, w.down, w.late) == (None, None, None)
+    # dies after up: late() once, with the time of that look (the third
+    # late look), then nothing
+    said.clear()
+    t[0] = 0
+    root, w = go([None] * (early + 2) + [3])
+    looks(root)
+    assert said == ['up', ('late', 3, chk + 3 * late_ms / 1000.0)], said
+    assert root.jobs == [] and w.done and w.proc is None
+    # exit code 0 is the caller's to judge: late() is called all the same
+    said.clear()
+    t[0] = 0
+    root, w = go([None] * early + [0])
+    looks(root)
+    assert said == ['up', ('late', 0, chk + late_ms / 1000.0)], said
+    # a Tk thread held up past WATCH_MS still reports the exit it missed
+    said.clear()
+    t[0] = 0
+    root, w = go([None] * early + [1])
+    looks(root, early)
+    assert said == ['up'] and len(root.jobs) == 1, said
+    t[0] = 45000
+    root.run_next()
+    assert said == ['up', ('late', 1, 45.0)] and w.done, said
+    # an early death is still down(), never late()
+    said.clear()
+    t[0] = 0
+    root, w = go([None, 2])
+    looks(root)
+    assert said == [('down', 2)] and w.done, said
+    # cancel() during the late looks: its job is gone, nothing more runs
+    said.clear()
+    t[0] = 0
+    root, w = go([None])
+    looks(root, early + 2)
+    assert said == ['up'] and len(root.jobs) == 1 and w.job is not None
+    job = w.job
+    w.cancel()
+    assert root.canceled == [job] and root.jobs == [], root.canceled
+    assert w.done and w.proc is None and w.job is None
+    w.cancel()                          # again: nothing, no error
+    assert root.canceled == [job]
+    # a late() that raises ends the look and never reaches Tk
+    said.clear()
+    t[0] = 0
+    root, proc = _FakeRoot(), _FakeProc([None] * early + [3])
+    w = launch_check.watch(root, proc, lambda: None, lambda c: None,
+                           lambda c, s: 1 / 0, clock=clock)
+    looks(root)
+    assert w.done and root.jobs == []
 
 
 # ---------------------------------------------------------------------------

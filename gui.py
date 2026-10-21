@@ -396,6 +396,14 @@ def sldea_launch(app, program, cmd, target, title=None):
     output is in that log, a local file (launch_check), never a pipe it
     could fill.
 
+    The look goes on after "opened", until launch_check.WATCH_MS after
+    the start (#473): on some Windows PCs a Python start is held about
+    5 s, so a program can read as opened while it is still starting. One
+    that dies in that time is said the same way, as "stopped on <run>
+    within N s of starting", once; one that closes normally then (exit
+    code 0, its user closed it) is not said. The window's close ends
+    every look still going (sldea_launch_stop).
+
     Started as before: the same arguments, working folder and
     start_new_session, and the same environment but for
     PYTHONUNBUFFERED=1 (launch_check). The look is after() polls of
@@ -421,20 +429,58 @@ def sldea_launch(app, program, cmd, target, title=None):
         if app.status_bar.cget('text') == starting:
             app.status_bar.config(text=f"{program} opened on {name}")
 
+    def stopped(code, secs=None):
+        said = (f"{program} stopped on {name} "
+                f"{launch_check.when_words(secs)} "
+                f"({launch_check.exit_words(code)})")
+        if sldea_run_going(app):
+            said += SLDEA_LAUNCH_HELD
+        app.status_bar.config(text=said)
+        sldea_box_after_run(app, title, launch_check.report(run, code, secs))
+
     def down(code):
         if code == 0:
             if app.status_bar.cget('text') == starting:
                 app.status_bar.config(text=f"{program} closed on {name}")
             return
-        said = (f"{program} stopped on {name} before it opened "
-                f"({launch_check.exit_words(code)})")
-        if sldea_run_going(app):
-            said += SLDEA_LAUNCH_HELD
-        app.status_bar.config(text=said)
-        sldea_box_after_run(app, title, launch_check.report(run, code))
+        stopped(code)
 
-    launch_check.watch(app.root, run.proc, up, down)
+    def late(code, secs):
+        # exit code 0 after "opened": its user closed it, nothing to say
+        if code != 0:
+            stopped(code, secs)
+
+    sldea_launch_keep(app, launch_check.watch(app.root, run.proc, up, down,
+                                              late))
     return run.proc
+
+
+def sldea_launch_keep(app, watch):
+    """Keep a launch's look (a launch_check.Watch) on `app` while it goes
+    on, so the window's close can end it (#473). The first one binds
+    <Destroy> of the status bar, which every look reports on, to
+    sldea_launch_stop."""
+    watches = getattr(app, '_sldea_launch_watches', None)
+    if watches is None:
+        watches = []
+        try:
+            app.status_bar.bind('<Destroy>',
+                                lambda _e: sldea_launch_stop(app), add='+')
+        except Exception:
+            pass
+    app._sldea_launch_watches = [w for w in watches if not w.done] + [watch]
+
+
+def sldea_launch_stop(app):
+    """<Destroy> of the status bar: the window is closing. Cancel every
+    launch look still going (#473), so none fires into a window that is
+    gone and none keeps its program's handle, as _sldea_folder_stop does
+    for the run folder line. The programs themselves are not touched:
+    they outlive the app."""
+    watches = getattr(app, '_sldea_launch_watches', None) or []
+    app._sldea_launch_watches = []
+    for w in watches:
+        w.cancel()
 
 
 def sldea_video_after_run(app, runlog):

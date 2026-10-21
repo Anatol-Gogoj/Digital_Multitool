@@ -1007,10 +1007,11 @@ def test_a_stuck_check_of_another_folder_never_claims_the_line():
                 line.cget('text')
 
 
-# A key's pause three times the poll's slowest look (5 x POLL_MS, once a
-# check is slow), so the poll is sure to check the folder named now itself
-# while that key's pause still waits.
-LONG_PAUSE_MS = 3 * 5 * gui.InstrumentControlGUI.SLDEA_FOLDER_POLL_MS
+# A key's pause six times the poll's slowest look (5 x POLL_MS, once a
+# check is slow), so the poll checks the folder named now itself while
+# that key's pause still waits, with over 2 s to spare for a stall on a
+# loaded machine (about 1 s misses are seen there under load).
+LONG_PAUSE_MS = 6 * 5 * gui.InstrumentControlGUI.SLDEA_FOLDER_POLL_MS
 
 
 def _past_the_pause(root, key):
@@ -1030,6 +1031,7 @@ def _line_timers(root):
             script = root.tk.splitlist(root.tk.call('after', 'info', aid))[0]
         except Exception:                # fired or cancelled since
             continue
+        script = str(script)             # may come back a Tcl_Obj
         if '_sldea_folder_' in script:
             out.append(script)
     return out
@@ -1099,7 +1101,8 @@ def test_the_lines_timers_all_end_with_it():
     ..._sldea_folder_check" was printed after a test's window closed. Once
     the poll has checked that folder with the key's pause still waiting,
     stopping the line leaves none of its timers pending, and nothing
-    asks the check out for another look."""
+    asks the check out for another look. A key's pause still waiting when
+    the line goes is cancelled with it."""
     with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app), \
             _hanging_share():
         app.SLDEA_FOLDER_SLOW_S = 0.3
@@ -1122,6 +1125,12 @@ def test_the_lines_timers_all_end_with_it():
         _past_the_pause(root, key)
         assert app._sldea_folder_job is job
         assert not job['again'], job
+        # a key's pause that still waits is one of the timers stop ends
+        app.sldea_runname_var.set('ABC')
+        assert any('_sldea_folder_paused' in s for s in _line_timers(root)), \
+            _line_timers(root)
+        app._sldea_folder_stop()
+        assert _line_timers(root) == [], _line_timers(root)
 
 
 def test_the_line_names_the_running_runs_folder():

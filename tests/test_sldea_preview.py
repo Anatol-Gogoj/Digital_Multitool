@@ -15,15 +15,23 @@ What these pin down (2026-09-23):
     stricter of the two bars.) The old green/red pair is held to the same
     bar and must FAIL it, so the check is one that can fail. Since #461
     (2026-10-19) the baseline is held to it too, beside post-ramp,
-    pre-ramp, the staircase and the warm-up ring, and the grey it
+    pre-ramp, the staircase and the warm-up ring (that set of four is
+    pinned, so none can be dropped quietly; #476), and the grey it
     replaced must fail it;
   * marker size follows the room between landings, within its limits,
     and the markers made smaller in #401 keep the old hover reach;
   * the hover text names each snapshot in the tab's own words;
+  * Edge Review's area_vs_voltage.png marks each tag with the preview's
+    shape, fill, black edge and legend text (#478, 2026-10-20). Both
+    sides are read as drawn: the canvas items, and the matplotlib
+    artists of the figure Save writes, each outline named by its
+    geometry rather than by a constant;
   * on the real tab: the two timing fields sit together under their tags'
     names and still drive the profile, the canvas draws one marker per
-    scheduled snapshot plus a legend, the playhead is not the old red,
-    and hovering a marker describes it.
+    scheduled snapshot plus a legend, each in its tag's shape and fill,
+    the playhead is not the old red, hovering a marker describes it, and
+    the area plot of the same schedule marks every tag it draws as the
+    canvas does.
 
 Run: .venv/bin/python tests/test_sldea_preview.py
 """
@@ -130,6 +138,122 @@ def _profiles():
             sp.SldeaProfile(end_kv=2, step_kv=1, snap_post=False)]
 
 
+def _outline_shape(pts, curved=False):
+    """Name the outline `pts` [(x, y), ...] (y UP) draws: 'circle',
+    'square', 'diamond', 'triangle' (apex up) or 'other'. From geometry
+    alone, so a shape is read off what was drawn, not off a constant.
+    `curved` says the outline is a curve, whose `pts` then only bound it."""
+    xs = [x for x, _y in pts]
+    ys = [y for _x, y in pts]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    tol = 1e-3 * span
+    if curved:
+        round_ = abs((max(xs) - min(xs)) - (max(ys) - min(ys))) < tol
+        return 'circle' if round_ else 'other'
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]                        # a repeated closing vertex
+    cx = sum(x for x, _y in pts) / len(pts)
+    cy = sum(y for _x, y in pts) / len(pts)
+    rel = [(x - cx, y - cy) for x, y in pts]
+    if len(rel) == 4:
+        if all(min(abs(dx), abs(dy)) < tol for dx, dy in rel) and abs(
+                max(abs(dx) for dx, _ in rel)
+                - max(abs(dy) for _, dy in rel)) < tol:
+            return 'diamond'          # corners on the axes, as wide as tall
+        if all(abs(abs(dx) - abs(dy)) < tol for dx, dy in rel):
+            return 'square'                   # corners on the diagonals
+    if len(rel) == 3:
+        apex = max(rel, key=lambda p: p[1])
+        (bx0, by0), (bx1, by1) = [p for p in rel if p is not apex]
+        if abs(apex[0]) < tol and abs(by0 - by1) < tol \
+                and abs(bx0 + bx1) < tol and by0 < apex[1]:
+            return 'triangle'
+    return 'other'
+
+
+def _canvas_shape(kind, coords):
+    """The shape a Tk canvas item draws, from its type and coords (Tk's
+    y grows DOWN, so it is flipped first)."""
+    if kind == 'oval':
+        x0, y0, x1, y1 = coords
+        return _outline_shape([(x0, -y0), (x1, -y1)], curved=True)
+    if kind == 'polygon':
+        return _outline_shape([(coords[i], -coords[i + 1])
+                               for i in range(0, len(coords), 2)])
+    return 'other'
+
+
+def _mpl_shape(marker):
+    """The shape matplotlib draws for `marker` (a Line2D's get_marker()),
+    read off the marker's own path."""
+    from matplotlib.markers import MarkerStyle
+    from matplotlib.path import Path
+    ms = MarkerStyle(marker)
+    path = ms.get_path().transformed(ms.get_transform())
+    codes = (list(path.codes) if path.codes is not None
+             else [Path.LINETO] * len(path.vertices))
+    pts = [(float(x), float(y)) for (x, y), c in zip(path.vertices, codes)
+           if c != Path.CLOSEPOLY]
+    if not pts:
+        return 'other'
+    curved = any(c in (Path.CURVE3, Path.CURVE4) for c in codes)
+    return _outline_shape(pts, curved=curved)
+
+
+def _hex(colour):
+    from matplotlib import colors as mcolors
+    return mcolors.to_hex(colour).upper()
+
+
+def _area_plot_marks(rows):
+    """Run Edge Review's real Save plot (`_save_plot`) on `rows` and read
+    back what the figure holds: ({label: mark}, [legend entry, ...]) where
+    a mark is {'shape', 'fill', 'edge', 'alpha', 'z', 'xs'} and a legend entry
+    is (text, shape, fill, edge), in the legend's order."""
+    import shutil
+    import tempfile
+    import types
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.figure import Figure
+    import sldea_edge_gui
+    d = tempfile.mkdtemp(prefix='preview_area_plot_')
+    seen = {}
+    real = Figure.savefig
+
+    def spy(fig, *a, **k):
+        ax = fig.axes[0]
+        seen['lines'] = [
+            (ln.get_label(), {'shape': _mpl_shape(ln.get_marker()),
+                              'fill': _hex(ln.get_markerfacecolor()),
+                              'edge': _hex(ln.get_markeredgecolor()),
+                              'alpha': ln.get_alpha(),
+                              'z': ln.get_zorder(),
+                              'xs': [float(x) for x in ln.get_xdata()]})
+            for ln in ax.lines]
+        leg = ax.get_legend()
+        handles = (getattr(leg, 'legend_handles', None)
+                   or getattr(leg, 'legendHandles', []))
+        seen['legend'] = [(t.get_text(), _mpl_shape(h.get_marker()),
+                           _hex(h.get_markerfacecolor()),
+                           _hex(h.get_markeredgecolor()))
+                          for t, h in zip(leg.get_texts(), handles)]
+        return real(fig, *a, **k)
+    Figure.savefig = spy
+    try:
+        stub = types.SimpleNamespace(
+            rundir=d, run={'rows': rows},
+            results={i: {'area_px': 100.0 + i} for i in range(len(rows))})
+        sldea_edge_gui.EdgeReviewApp._save_plot(stub, None)
+    finally:
+        Figure.savefig = real
+        shutil.rmtree(d, ignore_errors=True)
+    lines = seen.get('lines', [])
+    labels = [label for label, _m in lines]
+    assert len(set(labels)) == len(labels), f"one label twice: {labels}"
+    return dict(lines), seen.get('legend', [])
+
+
 # ---------------------------------------------------------------- headless
 
 def test_every_scheduled_tag_has_a_marker():
@@ -206,6 +330,93 @@ def test_the_old_grey_baseline_fails_that_bar():
                        'baseline vs warm-up ring'], worst
     assert 15.9 < worst['baseline vs pre-ramp'] < 16.1, worst
     assert 15.3 < worst['baseline vs warm-up ring'] < 15.5, worst
+
+
+def test_the_baseline_is_held_against_every_neighbour():
+    # also from #476: the two tests above share _baseline_pairs, and the
+    # grey one names only the two pairs the grey fails. A pair dropped
+    # from the helper (the grey passes beside post-ramp and the staircase)
+    # would pass both, so the whole set is pinned here, partners included.
+    probe = '#123456'
+    pairs = _baseline_pairs(probe)
+    assert all(a == probe for _name, a, _b in pairs), pairs
+    names = [name for name, _a, _b in pairs]
+    assert len(names) == len(set(names)), names
+    assert {name: b for name, _a, b in pairs} == {
+        'baseline vs post-ramp': pv.MARKERS['post-ramp'][1],
+        'baseline vs pre-ramp': pv.MARKERS['pre-ramp'][1],
+        'baseline vs staircase': pv.LINE,
+        'baseline vs warm-up ring': pv.HOLLOW}, pairs
+
+
+def test_the_shape_reader_tells_the_four_shapes_apart():
+    # the reader the two tests below rely on: it must name each outline
+    # right, and must not name a wrong one as any of the four
+    assert _outline_shape([(0, 0), (2, 2)], curved=True) == 'circle'
+    assert _outline_shape([(0, 0), (3, 2)], curved=True) == 'other'
+    assert _outline_shape([(-1, -1), (1, -1), (1, 1), (-1, 1)]) == 'square'
+    assert _outline_shape([(0, -1), (1, 0), (0, 1), (-1, 0)]) == 'diamond'
+    assert _outline_shape([(0, 1), (-1, -1), (1, -1)]) == 'triangle'
+    assert _outline_shape([(0, -1), (-1, 1), (1, 1)]) == 'other'   # apex down
+    assert _outline_shape([(-2, -1), (2, -1), (2, 1), (-2, 1)]) == 'other'
+    assert _mpl_shape('v') == 'other' and _mpl_shape('d') == 'other'
+
+
+def test_matplotlib_marks_are_the_canvas_shapes():
+    # #478: mpl_style is how a figure off the canvas marks a tag. Both
+    # outlines are read as drawn, the canvas polygon from marker_coords
+    # and the path matplotlib draws for the marker code, and must name
+    # the tag's shape. Fill, edge and legend text are the canvas's too.
+    assert len(set(pv.MPL_MARKERS.values())) == len(pv.MPL_MARKERS)
+    for tag, (shape, fill, label) in pv.MARKERS.items():
+        kind, co = pv.marker_coords(shape, 100.0, 50.0, pv.R_MAX)
+        assert _canvas_shape(kind, co) == shape, (tag, kind, co)
+        style = pv.mpl_style(tag)
+        assert _mpl_shape(style['marker']) == shape, (tag, style['marker'])
+        assert style['markerfacecolor'] == fill, (tag, style)
+        assert style['markeredgecolor'] == pv.OUTLINE, (tag, style)
+        assert style['label'] == label and style['linestyle'] == '', style
+        assert 'alpha' not in style, style
+
+
+def test_the_area_plot_marks_each_tag_as_the_preview_does():
+    # Edge Review's area_vs_voltage.png, read off the figure Save writes
+    # (#478). Until then it drew the baseline as a black triangle and
+    # post-ramp as a circle, the preview's post-ramp and warm-up shapes.
+    # The 07-23 era's 'post'/'pre' tags join post-ramp and pre-ramp; the
+    # warm-up frame and a watchdog breakdown row are not plotted.
+    rows = [{'nominal_kV': '0', 'tag': 'warmup'},
+            {'nominal_kV': '0', 'tag': 'baseline'},
+            {'nominal_kV': '1', 'tag': 'post-ramp'},
+            {'nominal_kV': '1', 'tag': 'pre-ramp'},
+            {'nominal_kV': '2', 'tag': 'post'},
+            {'nominal_kV': '2', 'tag': 'pre'},
+            {'nominal_kV': '2.5', 'tag': 'breakdown'}]
+    drawn, legend = _area_plot_marks(rows)
+    by_label = {label: tag for tag, (_s, _f, label) in pv.MARKERS.items()}
+    unknown = set(drawn) - set(by_label)
+    assert not unknown, f"area plot labels the preview does not use: {unknown}"
+    tags = [by_label[label] for label in drawn]
+    assert tags == ['baseline', 'post-ramp', 'pre-ramp'], tags
+    assert tags == [t for t in pv.LEGEND_ORDER if t in tags], \
+        "not drawn in the preview's legend order"
+    for label, mark in drawn.items():
+        shape, fill, _label = pv.MARKERS[by_label[label]]
+        assert mark['shape'] == shape, (label, mark)
+        assert mark['fill'] == fill.upper(), (label, mark)
+        assert mark['edge'] == pv.OUTLINE, (label, mark)
+        assert mark['alpha'] in (None, 1.0), (label, mark)
+    assert drawn['baseline 0 kV']['xs'] == [0.0]
+    assert drawn['post-ramp']['xs'] == [1.0, 2.0]
+    assert drawn['pre-ramp']['xs'] == [1.0, 2.0]
+    # opaque marks hide what is under them: the triangle, which fits in
+    # the square, goes on top, so a landing whose two snapshots measure
+    # the same area still shows both
+    assert drawn['post-ramp']['z'] > drawn['pre-ramp']['z'], drawn
+    assert drawn['post-ramp']['z'] > drawn['baseline 0 kV']['z'], drawn
+    want = [(pv.MARKERS[t][2], pv.MARKERS[t][0], pv.MARKERS[t][1].upper(),
+             pv.OUTLINE) for t in tags]
+    assert legend == want, legend
 
 
 def test_marker_radius_follows_the_room():
@@ -372,6 +583,23 @@ def _app():
     return root, app
 
 
+def _canvas_mark(c, item):
+    """(shape, fill, outline) of one canvas item, read as drawn."""
+    return (_canvas_shape(c.type(item), [float(v) for v in c.coords(item)]),
+            c.itemcget(item, 'fill').upper(),
+            c.itemcget(item, 'outline').upper())
+
+
+def _canvas_marks(c):
+    """{tag: {(shape, fill, outline), ...}} over the preview's markers."""
+    out = {}
+    for item in c.find_withtag('marker'):
+        tag = next(t[len('marker-'):] for t in c.gettags(item)
+                   if t.startswith('marker-'))
+        out.setdefault(tag, set()).add(_canvas_mark(c, item))
+    return out
+
+
 def _texts(widget):
     """Every Label text under `widget`, depth first."""
     out = []
@@ -419,6 +647,12 @@ def test_the_canvas_draws_every_scheduled_snapshot_by_shape():
             want = sum(1 for s in p.snapshots if s['tag'] == tag)
             got = len(c.find_withtag(f'marker-{tag}'))
             assert got == want, (tag, got, want)
+        # ...each in its tag's shape, fill and black edge, read off the
+        # items as drawn (#478)
+        assert set(_canvas_marks(c)) == set(pv.legend_tags(p))
+        for tag, marks in _canvas_marks(c).items():
+            shape, fill, _label = pv.MARKERS[tag]
+            assert marks == {(shape, fill.upper(), pv.OUTLINE)}, (tag, marks)
         # read the legend the way a person does: left to right on screen
         legend_items = sorted((i for i in c.find_withtag('legend')
                                if c.type(i) == 'text'),
@@ -426,6 +660,11 @@ def test_the_canvas_draws_every_scheduled_snapshot_by_shape():
         legend = [c.itemcget(i, 'text') for i in legend_items]
         assert legend == [pv.MARKERS[t][2] for t in pv.legend_tags(p)], \
             legend
+        glyphs = [_canvas_mark(c, i) for i in sorted(
+            (i for i in c.find_withtag('legend') if c.type(i) != 'text'),
+            key=lambda i: c.bbox(i)[0])]
+        assert glyphs == [(pv.MARKERS[t][0], pv.MARKERS[t][1].upper(),
+                           pv.OUTLINE) for t in pv.legend_tags(p)], glyphs
         # ...and it starts at the LEFT, which is always on screen: the tab
         # scrolls sideways when narrow, and a right-aligned legend was lost
         assert c.bbox(legend_items[0])[0] < c.winfo_width() / 4, \
@@ -445,6 +684,39 @@ def test_the_canvas_draws_every_scheduled_snapshot_by_shape():
                 assert val not in OLD_COLOURS, (c.type(i), opt, val)
     finally:
         root.destroy()
+
+
+def test_the_preview_and_the_area_plot_mark_each_tag_alike():
+    # #478: the tab's preview and Edge Review's area_vs_voltage.png of the
+    # same schedule, both read as drawn. Every tag the area plot draws
+    # has the canvas's shape, fill and edge, and the two legends use the
+    # same words in the same order. The area plot leaves the warm-up
+    # frame out, so the preview's open circle is not in it.
+    root, app = _app()
+    try:
+        c = app.sldea_canvas
+        p = app._sldea_profile
+        on_canvas = _canvas_marks(c)
+        legend_items = sorted((i for i in c.find_withtag('legend')
+                               if c.type(i) == 'text'),
+                              key=lambda i: c.bbox(i)[0])
+        canvas_legend = [c.itemcget(i, 'text') for i in legend_items]
+    finally:
+        root.destroy()
+    assert 'warmup' in on_canvas, "the tab's defaults no longer warm up"
+    rows = [{'nominal_kV': f"{s['nominal_kv']:g}", 'tag': s['tag']}
+            for s in p.snapshots]
+    drawn, legend = _area_plot_marks(rows)
+    by_label = {label: tag for tag, (_s, _f, label) in pv.MARKERS.items()}
+    assert set(drawn) <= set(by_label), set(drawn) - set(by_label)
+    in_plot = {by_label[label]: (m['shape'], m['fill'], m['edge'])
+               for label, m in drawn.items()}
+    assert set(in_plot) == {'baseline', 'post-ramp', 'pre-ramp'}, in_plot
+    for tag, mark in in_plot.items():
+        assert on_canvas[tag] == {mark}, (tag, on_canvas[tag], mark)
+    assert [text for text, _s, _f, _e in legend] == [
+        t for t in canvas_legend if t != pv.MARKERS['warmup'][2]], \
+        (legend, canvas_legend)
 
 
 def test_hovering_a_marker_describes_it():

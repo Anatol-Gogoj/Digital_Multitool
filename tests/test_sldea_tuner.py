@@ -339,7 +339,13 @@ def test_selftest_candidates_stand_clear_of_each_other():
     reaches 2 pt (1.9 frame px) either side of its centre, and a 1 pt
     line clears it from 2.3 frame px out. Measured 2026-10-20: 4.0 px
     or more with the soft edge; with the old hard one the best and the
-    2nd were 0.6 to 0.8 px apart."""
+    2nd were 0.6 to 0.8 px apart.
+
+    And the late panel's best outline is the disc (nominal r 70 px), a
+    diff tier at r 71.9: with the wrinkle stripes laid across the ramp
+    too, the texture channel won at r 89.7, past the outermost changed
+    pixel (81.6), and the figure filled a ring of unchanged background
+    as the best outline (review of #477)."""
     import math
     import shutil
     import tempfile
@@ -363,6 +369,11 @@ def test_selftest_candidates_stand_clear_of_each_other():
                     f"{p['label']}: candidates {k + 1} and {k + 2} "
                     f"({cl[k]['method']}, {cl[k + 1]['method']}) are "
                     f"{gap:.2f} px apart; the figure would hide one")
+        late = cands[content[1]['idx']][0]
+        r_late = math.sqrt(late['area_px'] / math.pi)
+        assert late['method'] == 'diff-lo' and abs(r_late - 70.0) <= 4.0, (
+            f"late best is {late['method']} at r {r_late:.1f} px; the "
+            f"disc is 70 px")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

@@ -265,7 +265,14 @@ def _selftest_run(d):
     line. On the hard-edged discs this used before #477 the three diff
     thresholds (0.6x, 1x and 1.5x Otsu) cut within a pixel of each other,
     so the best outline, drawn last and thickest, hid the dashed 2nd one
-    in the manual's figure, whose caption names all three."""
+    in the manual's figure, whose caption names all three.
+
+    The late disc's stripes (the wrinkle texture) cover only its full
+    level, inside the ramp. Striped across the ramp too, the texture
+    channel's blurred map grew past the changed pixels and its outline
+    won the late panel at an equal-area radius near 90 px against 70 px
+    nominal, so the figure filled a ring of unchanged background as the
+    best outline (review of #477)."""
     import csv
 
     import cv2
@@ -283,7 +290,9 @@ def _selftest_run(d):
         rr = np.hypot(xx - 160.0, yy - 120.0)
         weight = np.clip((r + SELFTEST_EDGE_PX - rr)
                          / (2 * SELFTEST_EDGE_PX), 0.0, 1.0)
-        img += weight * (level + (30 * ((xx // 4) % 2) if texture else 0))
+        img += weight * level
+        if texture:
+            img += np.where(weight >= 1.0, 30 * ((xx // 4) % 2), 0)
         return np.clip(img, 0, 255).astype(np.uint8)
 
     rows = []

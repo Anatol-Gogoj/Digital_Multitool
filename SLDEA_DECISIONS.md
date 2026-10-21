@@ -7222,6 +7222,73 @@ Observation → decision:
   it. The correlation with "no prior edge detection" was incidental:
   nothing in the tuner ever required a detection pass.
 
+## The diagnostic's maps carry a color bar, because the old and new color scales run opposite ways (2026-10-21)
+
+**TL;DR:** each of the three maps in `sldea_diag.png` now has a color
+bar that says what dark means: "dark = more change" on the two difference
+maps, "dark = more texture" on the wrinkle map. The bar is numbered in the
+map's own values. Which way an archived sheet reads depends on when it was
+written: before v1.4.6 bright meant more (magma), v1.4.6's sheets mean dark
+= more but have no bar, and sheets from now on carry the bar (`#475`).
+
+**Observation.**
+
+- `#464` (`#461`, shipped in v1.4.6) moved the maps from matplotlib's
+  magma to Paul Tol's iridescent. Magma's high end is its brightest color;
+  iridescent's is its darkest (`#46353A`). The figure had no key, so a
+  sheet already in a run folder and a new one read in opposite directions,
+  and nothing on either said which way it ran.
+- `imshow` scales each map to its own minimum and maximum, and the sheet
+  never showed either number. On the self-test's expanding run at 6 kV
+  (the manual's `31_diag_selftest`) the raw difference runs 0 to 42 gray
+  levels, the difference after the gain+offset fit 0 to 41.6, and the
+  wrinkle ratio 0.80 to 3.00, where 3 is the figure's cap.
+- On the wrinkle map pale is the map's lowest ratio (0.80 there), not a
+  fixed "no change" value. 1.0 means as textured as the baseline. On that
+  self-test map 22.2 % of the pixels sit exactly at 1.0 (foil and glint
+  are pinned there), 55.6 % below it and 22.2 % above. So the pale half of
+  the map is "no more texture than the baseline, or smoother", not mostly
+  smoother.
+- A constant map has no range for the bar to number. A frozen camera hands
+  back the baseline byte for byte, and then all three maps are constant
+  (|diff| 0, ratio 1.0). matplotlib's color bar widens such a norm to
+  +-0.1 around the value, and the maps then drew mid-scale blue
+  (`#81C4E7`), so no change looked like change.
+- matplotlib 3.11.2 warns that `Colormap.set_bad` will be deprecated
+  (`PendingDeprecationWarning`, "Use cmap.with_extremes(bad=...)").
+
+**Decision.**
+
+- Each map gets a slim color bar at its right, labeled with its unit and
+  its direction. The bar is an inset in the map's axes coordinates, so it
+  stays as tall as the picture once the equal aspect has shrunk the axes.
+  A bar taken from the grid cell instead measured 0.416 of the figure
+  height beside a 0.321 picture.
+- Each map keeps its own scale. A shared or fixed scale would change what
+  the maps show, and the bar now gives each scale's numbers.
+- A constant map is pinned to the pale end, its bar running from its value
+  to one unit above, so a frozen camera's maps read as no change.
+- The bad-data gray is set with `with_extremes(bad=MAP_BAD)`, which every
+  matplotlib `requirements.txt` allows (>= 3.5) has. Same colors, no
+  warning.
+- To read an archived sheet: a bar means read the bar. No bar and pale
+  backgrounds (iridescent) mean dark = more. No bar and a black background
+  (magma) mean bright = more.
+
+**Pinned by** three tests in `tests/test_sldea_diag.py`:
+
+- `test_each_map_has_a_color_bar_that_says_dark_is_more`: a bar per map,
+  beside it and as tall as it, high end at the top, at least two numbers
+  drawn from the map's own range, and a label with that map's unit and
+  direction and none of the other map's words. NaN takes `MAP_BAD`.
+- `test_a_constant_map_stays_pale_beside_its_bar`: the frozen-camera
+  maps draw pale with their bars present.
+- `test_the_figure_builds_its_maps_without_a_pending_deprecation`.
+
+Each fails on its mutant: no bar, a label without the direction, a
+difference map labeled "more texture", a bar with no numbers, a
+grid-cell bar, no pin for a constant map, and `set_bad`.
+
 ## The diagnostic crashed on its own report text again (2026-08-05)
 
 **TL;DR:** `sldea_diag.py --selftest` died on the Windows analysis PC

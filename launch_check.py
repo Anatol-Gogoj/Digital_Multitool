@@ -17,6 +17,19 @@ with after() polls of proc.poll() every POLL_MS over CHECK_MS, and calls
 here waits: poll() is a non-blocking waitpid, and the only reads are of
 the local log, once, after the process has exited.
 
+Why the look goes on after up() (#473). On some Windows PCs about 1 in 30
+Python starts is held about 5 s before Python runs: 36 of 1080 starts of
+the venv's python lived 5.08 to 5.21 s with under 0.1 s of CPU (Gogojster,
+2026-10-19, #458). So a program can still be starting at CHECK_MS, read as
+up, and then die on an import or a run it cannot take. watch() therefore
+keeps looking, every LATE_POLL_MS, until WATCH_MS after the start, and
+calls `late(code, secs)` if the program exits in that time. WATCH_MS is a
+bound, not a measurement: about six times that hold, plus the 0.2 to
+0.33 s these programs take to import on ClaudeBox (PR #445's body). A
+program that dies later than that is still not said. At its end the
+watch lets go of the process, and the caller's window can end it at once
+(Watch.cancel).
+
 Why a file and not a pipe. The program outlives the app, so nothing would
 drain a pipe once the app has gone, and a full pipe stops the program at
 its next print. A file needs no reader. Both streams go to the one file.
@@ -53,6 +66,7 @@ Tk-free: watch() takes anything with after(ms, fn), so the cases run
 anywhere. Self-test: .venv/bin/python tests/test_launch_check.py
 """
 import locale
+import math
 import os
 import shlex
 import subprocess
@@ -63,6 +77,8 @@ import tk_stall
 
 CHECK_MS = 2000      # a program still running this long after start is up
 POLL_MS = 200        # how often watch() looks before then
+WATCH_MS = 30000     # a death up to this long after start is still said
+LATE_POLL_MS = 500   # how often watch() looks between CHECK_MS and that
 TAIL_LINES = 12      # lines of a stopped program's output shown in its box
 TAIL_BYTES = 8192    # read at most this much of the log's end for them
 LINE_CHARS = 200     # a longer output line is cut to this in the box
@@ -236,10 +252,23 @@ def exit_words(code):
     return f"exit code {code}"
 
 
-def report(launch, code):
-    """The text of the box for a program that stopped as it started: its
-    exit code, the last lines it printed, and where all of them are."""
-    head = f"{launch.program} stopped before it opened ({exit_words(code)})."
+def when_words(secs=None):
+    """When a program stopped, for its status line and box: 'before it
+    opened' for one that stopped within CHECK_MS (`secs` None), or, for
+    one watch() saw stop later (#473), 'within 7 s of starting', from
+    the time of the look that found it gone: the exit came before that
+    look, so the number is an upper bound."""
+    if secs is None:
+        return "before it opened"
+    return f"within {max(1, math.ceil(secs))} s of starting"
+
+
+def report(launch, code, secs=None):
+    """The text of the box for a program that stopped as it started (or,
+    with `secs`, soon after it read as opened, #473): its exit code, the
+    last lines it printed, and where all of them are."""
+    head = (f"{launch.program} stopped {when_words(secs)} "
+            f"({exit_words(code)}).")
     if launch.path is None:
         return (f"{head}\n\nIts output was not kept: no log file could be "
                 f"made ({launch.why}). It went to this app's own output.")
@@ -253,41 +282,105 @@ def report(launch, code):
     return f"{head}\n\n{said}\n\nAll of its output:\n{launch.path}"
 
 
-def watch(root, proc, up, down, check_ms=None, poll_ms=None,
-          clock=time.monotonic):
+class Watch:
+    """One watch() of a started program (#473). `done` once it has ended:
+    it called down() or late(), its time ran out, a callback raised, the
+    window refused its next after(), or cancel() ended it. At its end it
+    lets go of the process and of the callbacks (which hold the Launch),
+    so a program nobody watches any more is not held here. `job` is its
+    pending after() id, or None."""
+
+    def __init__(self, root, proc, up, down, late):
+        self.root, self.proc = root, proc
+        self.up, self.down, self.late = up, down, late
+        self.job = None
+        self.done = False
+
+    def _end(self):
+        self.done = True
+        self.proc = self.up = self.down = self.late = None
+
+    def cancel(self):
+        """End the watch now, telling nobody: for the caller's window as
+        it closes, so no look fires into a window that is gone. Never
+        raises; a watch already ended is left as it is."""
+        job, self.job = self.job, None
+        self._end()
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+
+def watch(root, proc, up, down, late=None, check_ms=None, poll_ms=None,
+          watch_ms=None, late_poll_ms=None, clock=time.monotonic):
     """Look at `proc` from the Tk thread of `root`: every `poll_ms`
     (POLL_MS) until `check_ms` (CHECK_MS) after this call. The first look
     that finds it exited calls `down(code)`; a look at or after `check_ms`
     that finds it running calls `up()`. Exactly one of them is called,
-    unless the window goes first. Each look is one proc.poll() and a clock
-    read, and the exit is looked for before the time, so a Tk thread held
-    up past `check_ms` still reports an exit it missed. Never raises into
-    Tk: a poll that raises counts as running, and a callback that raises
-    is dropped."""
+    unless the window goes first.
+
+    After up(), with a `late`, the look goes on every `late_poll_ms`
+    (LATE_POLL_MS) until `watch_ms` (WATCH_MS) after this call (#473): a
+    look that finds the program exited calls `late(code, secs)`, `secs`
+    being the time of that look since this call, and the first look at or
+    after `watch_ms` that finds it running ends the watch. Exit code 0
+    included; what it means is the caller's to say. With no `late`, up()
+    ends the watch, as before #473. At most one of down() and late() is
+    ever called, and the watch has ended before it is.
+
+    Each look is one proc.poll() and a clock read, and the exit is looked
+    for before the time, so a Tk thread held up past either time still
+    reports an exit it missed. Never raises into Tk: a poll that raises
+    counts as running, and a callback that raises ends the watch.
+    -> the Watch, whose cancel() ends it."""
     check_ms = CHECK_MS if check_ms is None else check_ms
     poll_ms = POLL_MS if poll_ms is None else poll_ms
+    watch_ms = WATCH_MS if watch_ms is None else watch_ms
+    late_poll_ms = LATE_POLL_MS if late_poll_ms is None else late_poll_ms
+    w = Watch(root, proc, up, down, late)
     t0 = clock()
+    opened = False
 
     def look():
-        try:
-            code = proc.poll()
-        except Exception:
-            code = None
-        try:
-            if code is not None:
-                down(code)
-                return
-            if (clock() - t0) * 1000.0 >= check_ms:
-                up()
-                return
-        except Exception:
+        nonlocal opened
+        w.job = None
+        if w.done:
             return
         try:
-            root.after(poll_ms, look)
+            code = w.proc.poll()
         except Exception:
-            pass                # the window is gone: nobody left to tell
+            code = None
+        up, down, late = w.up, w.down, w.late
+        try:
+            if code is not None:
+                w._end()            # first: one report for one exit
+                if not opened:
+                    down(code)
+                else:
+                    late(code, clock() - t0)
+                return
+            ms = (clock() - t0) * 1000.0
+            if not opened and ms >= check_ms:
+                opened = True
+                up()
+                if late is None:
+                    w._end()
+                    return
+            if opened and ms >= watch_ms:
+                w._end()
+                return
+        except Exception:
+            w._end()
+            return
+        nxt(late_poll_ms if opened else poll_ms)
 
-    try:
-        root.after(poll_ms, look)
-    except Exception:
-        pass
+    def nxt(ms):
+        try:
+            w.job = root.after(ms, look)
+        except Exception:
+            w._end()            # the window is gone: nobody left to tell
+
+    nxt(poll_ms)
+    return w

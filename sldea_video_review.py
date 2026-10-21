@@ -707,18 +707,24 @@ def _tell(text, root=None, error=True):
     its own (#395), with no console that anyone reads, so what it has to
     say goes on screen as well, as Edge Review says it for the window it
     opens in its own process. With no display only the console line is
-    left, which is what the command line had before."""
+    left, which is what the command line had before.
+
+    -> True once the box has shown, False when it could not be shown
+    (#473 review: main() then exits nonzero, so the SLDEA tab says what
+    nobody saw)."""
     try:
         print(text)
     except Exception:               # a console that cannot encode it
         pass
     own = root is None
+    shown = False
     try:
         if own:
             root = tk.Tk()
         root.withdraw()
         show = messagebox.showerror if error else messagebox.showinfo
         show("Video review", text, parent=root)
+        shown = True
     except Exception:
         pass
     finally:
@@ -727,6 +733,7 @@ def _tell(text, root=None, error=True):
                 root.destroy()
             except Exception:
                 pass
+    return shown
 
 
 def open_standalone(root, rundir):
@@ -759,16 +766,24 @@ def main(argv):
     # SLDEA tab starts this program without looking in the folder itself.
     if not (sv.has_video(rundir) or os.path.exists(
             os.path.join(rundir, sv.VIDEO_EDGES_FILENAME))):
-        _tell(f"There is no video of {os.path.basename(rundir)} to review "
-              f"yet: neither {sv.VIDEO_FILENAME} with "
-              f"{sv.VIDEO_INDEX_FILENAME} nor {sv.VIDEO_EDGES_FILENAME} is "
-              f"in\n{rundir}\nor that folder cannot be reached.\n\n"
-              f"When a run records video, a separate program moves the "
-              f"recording into its run folder after the run, after edge "
-              f"detection on every frame when that was ticked. Its "
-              f"progress, or the reason it stopped, is in run.log in that "
-              f"folder.", error=False)
-        return 2
+        shown = _tell(
+            f"There is no video of {os.path.basename(rundir)} to review "
+            f"yet: neither {sv.VIDEO_FILENAME} with "
+            f"{sv.VIDEO_INDEX_FILENAME} nor {sv.VIDEO_EDGES_FILENAME} is "
+            f"in\n{rundir}\nor that folder cannot be reached.\n\n"
+            f"When a run records video, a separate program moves the "
+            f"recording into its run folder after the run, after edge "
+            f"detection on every frame when that was ticked. Its "
+            f"progress, or the reason it stopped, is in run.log in that "
+            f"folder.", error=False)
+        # 0, not 2, once the box has shown (#473): it has said it, and it
+        # is not a failure. The SLDEA tab says any other exit code in the
+        # first launch_check.WATCH_MS (30 s) as one, in an error box of
+        # its own, so a 2 here put a second box behind this one whenever
+        # OK came in that time. A box that could not be shown told
+        # nobody, so that stays 2 and the tab says it. "Could not open"
+        # below stays 1: that is a failure.
+        return 0 if shown else 2
     root = tk.Tk()
     if open_standalone(root, rundir) is None:
         return 1

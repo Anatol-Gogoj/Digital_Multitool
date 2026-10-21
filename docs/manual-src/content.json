@@ -959,7 +959,7 @@
    },
    {
     "label": "🔍 Edge Review… / 🎚 Tune params…",
-    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt. These two, 📊 Plot runs… and 🎞 Video review… each start a program of their own: the status bar says starting, then opened once it has run for 2 s. One that fails before then is named on the status bar, with a box giving its exit code, its last lines and its log file (in launch_logs, beside tk_stall.log); during a run the box waits until the run has ended."
+    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt. These two, 📊 Plot runs… and 🎞 Video review… each start a program of their own: the status bar says starting, then opened once it has run for 2 s. One that fails in its first 30 s, before or after opened, is named on the status bar, with a box giving its exit code, its last lines and its log file (in launch_logs, beside tk_stall.log); during a run the box waits until the run has ended."
    },
    {
     "label": "📊 Plot runs…",

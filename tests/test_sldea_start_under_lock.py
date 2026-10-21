@@ -24,6 +24,9 @@ at DC 0 V. What is pinned here:
   writes, queues behind them and still ends with the outputs OFF: the
   Tk thread waits on the lock and the worker, which needs nothing from
   the Tk thread under it, lets it go;
+* a start write that fails inside the hold (each of the three in turn)
+  lets the lock go, switches nothing on, and still gets the finally
+  block's zero; a close after it does not wait;
 * a DRY run takes no SG lock and writes nothing.
 
 Everything runs the REAL sldea_run, worker and _on_app_close on the
@@ -32,8 +35,12 @@ against a fake SG that takes the SG's I/O lock around each of its own
 writes as the real driver does (VisaInstrument.write), and records
 whether the caller already held it. The lock is a reentrant lock that
 lets waiting threads in strictly in arrival order, says who holds it and
-who waits, and fails a wait that lasts a minute, so a deadlock fails the
-test instead of hanging the suite.
+who waits, and fails a wait that lasts a minute, so a lock-against-lock
+cycle fails the test instead of hanging the suite. It cannot see the Tk
+side of a deadlock: a worker that hands work to the Tk thread while it
+holds a lock a Tk callback waits for. The stub app covers that instead:
+its _sldea_log, _sldea_set_status and root.after fail when the calling
+thread holds the SG's lock, and every case checks that none did.
 
 Run: .venv/bin/python tests/test_sldea_start_under_lock.py
 """
@@ -66,7 +73,9 @@ class _FifoLock:
     and it lets waiting threads in strictly in the order they came, so a
     test can say who gets it next. `holds` counts the outermost
     acquisitions; while a thread holds the lock it is that hold's number.
-    A wait over STUCK_S fails, as a deadlock would."""
+    A wait over STUCK_S fails, so a lock-against-lock cycle shows as a
+    failure rather than a hang. A wait on the Tk thread is not a wait on
+    this lock, so it cannot see one; the stub app's Tk guard does."""
     STUCK_S = 60.0
 
     def __init__(self):
@@ -139,7 +148,9 @@ class _DriverSG:
     `writes` holds what landed, in the order it landed, and `by` the thread
     that sent each; `out` and `dc` are what the SG is left doing, and
     `on_call(name, channel, value)` runs inside the lock just before a call
-    lands."""
+    lands. `fail_once = (name, value)` makes the next such call (value None:
+    any value) time out inside the lock, as a dead link's write does, and
+    land nothing."""
 
     def __init__(self, events):
         self.lock = self.__dict__['_io_rlock'] = _FifoLock()
@@ -150,6 +161,7 @@ class _DriverSG:
         self.dc = {1: False, 2: False}
         self.closed = False
         self.on_call = None
+        self.fail_once = None
 
     def _call(self, name, channel, value, apply=None):
         held = self.lock.held_here()
@@ -158,6 +170,12 @@ class _DriverSG:
                                   self.lock.holds, threading.get_ident()))
             if self.on_call is not None:
                 self.on_call(name, channel, value)
+            fail = self.fail_once
+            if fail is not None and fail[0] == name \
+                    and (fail[1] is None or fail[1] == value):
+                self.fail_once = None
+                self.failed.append((name, channel, value))
+                raise IOError('VI_ERROR_TMO (fake: the write timed out)')
             if self.closed:
                 self.failed.append((name, channel, value))
                 raise IOError('VI_ERROR_INV_OBJECT (fake: session closed)')
@@ -197,12 +215,19 @@ class _DriverSG:
 class _Root(L._Root):
     """The suite's Tk root, with what window close calls on it: update()
     plays the queued callbacks, as the real one does, and destroy() is
-    only noted."""
+    only noted. after() first calls `guard('root.after')`, which the app
+    uses to fail a hand-off made while holding the SG's lock."""
 
     def __init__(self):
         super().__init__()
         self.updates = 0
         self.destroyed = False
+        self.guard = None
+
+    def after(self, ms, fn=None, *args):
+        if self.guard is not None:
+            self.guard('root.after')
+        return super().after(ms, fn, *args)
 
     def update(self):
         self.updates += 1
@@ -217,19 +242,43 @@ class _App(L._App):
     or DMM, and the locking SG above. The stop flag and the window-close
     mark are properties, so each read of the one and each write of the
     other on the worker's thread lands in the timeline with the lock hold
-    it was made under."""
+    it was made under.
+
+    The Tk hand-offs (_sldea_log, _sldea_set_status, root.after) fail when
+    the calling thread holds the SG's lock, and note it in `tk_under_lock`.
+    In the app each one queues work for the Tk thread, and a Tk callback
+    can itself wait for the SG's lock (window close does), so a worker
+    that hands off while holding the lock can deadlock against it; the
+    stubs here never wait, so without this check nothing would show it."""
     _on_app_close = G._on_app_close
 
     def __init__(self, tmp='.', **kw):
         self.events = []
         self.worker_ident = None
+        self.tk_under_lock = []
         self._stop_value = False
         self._mark_value = None
         super().__init__(tmp, **kw)
         self.root = _Root()
+        self.root.guard = self._tk_guard
         self.sg = _DriverSG(self.events)
         self.psu = self.dmm = None
         self._sldea_sg_dc_ch = None
+
+    def _tk_guard(self, what):
+        sg = self.__dict__.get('sg')
+        lock = getattr(sg, 'lock', None)
+        if lock is not None and lock.held_here():
+            self.tk_under_lock.append(what)
+            raise AssertionError(f"{what} called while holding the SG's "
+                                 f"I/O lock")
+
+    def _sldea_log(self, msg):
+        self._tk_guard('_sldea_log')
+        super()._sldea_log(msg)
+
+    def _sldea_set_status(self, *a, **k):
+        self._tk_guard('_sldea_set_status')
 
     def _note(self, kind, what):
         if threading.get_ident() != self.worker_ident:
@@ -292,6 +341,15 @@ def _worker_marks(app):
             and e.tid == app.worker_ident and e.what is not None]
 
 
+def _finished(app):
+    """Wait for the worker: it must end, raise nothing out of the run, and
+    have made no Tk hand-off while it held the SG's lock."""
+    assert app.worker_done.wait(WAIT_S), app.lines
+    assert app.worker_error is None, repr(app.worker_error)
+    assert app.tk_under_lock == [], (
+        f"Tk hand-offs made under the SG's lock: {app.tk_under_lock}")
+
+
 def _until(cond, what):
     """Poll `cond` until it is true, or fail after WAIT_S."""
     end = time.monotonic() + WAIT_S
@@ -348,8 +406,7 @@ def test_the_start_writes_are_made_under_the_hold_their_stop_check_took():
             L._patched(L._MB(L.LIVE_OK)):
         app = _live_app(tmp)
         app.sldea_run()
-        assert app.worker_done.wait(WAIT_S), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _finished(app)
         assert app.sg.writes[:3] == START, app.sg.writes
         ev = app.events
         starts = _worker_starts(app)
@@ -397,8 +454,7 @@ def test_a_stop_set_while_the_run_waits_for_the_sg_lock_means_no_start_write():
             app.sldea_abort()
             holder.release.set()
         assert holder.error is None, repr(holder.error)
-        assert app.worker_done.wait(WAIT_S), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _finished(app)
         assert _worker_starts(app) == [], _worker_starts(app)
         assert _worker_marks(app) == [], _worker_marks(app)
         assert app._sldea_sg_dc_ch is None    # before _sldea_finished runs
@@ -432,8 +488,7 @@ def test_a_close_while_another_thread_holds_the_sg_lock_leaves_the_outputs_off()
             app._on_app_close()                 # the real ~3 s wait
         assert holder.error is None, repr(holder.error)
         assert app.root.destroyed
-        assert app.worker_done.wait(WAIT_S), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _finished(app)
         # no mark at the close's read, so the close wrote no offset
         closing = app.sg.landed_from(threading.get_ident())
         assert closing == [('set_output', 1, False), ('set_output', 2, False),
@@ -447,9 +502,10 @@ def test_a_close_during_the_start_writes_queues_behind_them_and_ends_off():
     """The close comes after the worker's check, while it is in the middle
     of its start writes (held here inside its DC write until the close
     queues on the lock). The Tk thread waits on the SG's lock while the
-    worker holds it, and the worker finishes its writes without anything
-    from the Tk thread, so there is no deadlock: its output ON lands, then
-    the close's outputs-off, and both outputs end OFF."""
+    worker holds it. The worker makes no Tk hand-off under the lock (the
+    stub app fails one), so it finishes its writes and lets go: its output
+    ON lands, then the close's outputs-off, and both outputs end OFF. A
+    lock-against-lock cycle here would fail the test lock's 60 s wait."""
     with tempfile.TemporaryDirectory() as tmp, \
             L._patched(L._MB(L.LIVE_OK)):
         app = _live_app(tmp)
@@ -467,8 +523,7 @@ def test_a_close_during_the_start_writes_queues_behind_them_and_ends_off():
         assert inside.wait(WAIT_S), app.lines
         app._on_app_close()                     # the real ~3 s wait
         assert app.root.destroyed
-        assert app.worker_done.wait(WAIT_S), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _finished(app)
         writes, by = app.sg.writes, app.sg.by
         main = threading.get_ident()
         assert app.sg.landed_from(app.worker_ident)[:3] == START, writes
@@ -480,6 +535,55 @@ def test_a_close_during_the_start_writes_queues_behind_them_and_ends_off():
         assert app.sg.out == {1: False, 2: False}, writes
 
 
+def test_a_start_write_that_fails_inside_the_hold_lets_the_lock_go():
+    """Each start write in turn times out inside the worker's hold, as a
+    dead link's write does. The exception leaves the `with` block, so the
+    lock is free again at once: no output ON lands after the failure, no
+    level is written, the run reports the error, and its finally block's
+    zero still lands. A close afterwards gets the lock without waiting.
+
+    The mark is set exactly when the DC write has landed. It means the
+    channel is in DC, where the close's 0 V offset is a known write, not
+    that the output is ON, so a failed output ON leaves it set; the
+    finally block zeroes that channel anyway, and _sldea_finished clears
+    the mark, as after any run."""
+    for i, (name, value) in enumerate((('set_load_polarity', None),
+                                       ('set_basic_wave', None),
+                                       ('set_output', True))):
+        with tempfile.TemporaryDirectory() as tmp, \
+                L._patched(L._MB(L.LIVE_OK)):
+            app = _live_app(tmp)
+            app.sg.fail_once = (name, value)
+            app.sldea_run()
+            _finished(app)
+            where = f"{name} failing: {app.sg.writes}"
+            lock = app.sg.lock
+            assert [f[0] for f in app.sg.failed] == [name], where
+            assert lock.owner is None and lock.depth == 0, \
+                f"{name} failing left the SG's lock held"
+            assert app.sg.writes == START[:i] + ZERO, where
+            assert ('set_output', 1, True) not in app.sg.writes, where
+            assert app.sg.out == {1: False, 2: False}, where
+            assert any(ln.startswith('ERROR:') for ln in app.lines), \
+                app.lines
+            dc_landed = START[1] in app.sg.writes
+            assert [e.what for e in _worker_marks(app)] == \
+                ([1] if dc_landed else []), (where, _worker_marks(app))
+            assert app._sldea_sg_dc_ch == (1 if dc_landed else None), where
+            # a close now: a lock left held would make each of its writes
+            # wait out STUCK_S and fail
+            lock.STUCK_S = 1.0
+            t0 = time.monotonic()
+            app._on_app_close()
+            took = time.monotonic() - t0
+            closing = app.sg.landed_from(threading.get_ident())
+            assert closing == [('set_output', 1, False),
+                               ('set_output', 2, False),
+                               ('go_local', None, None)], (name, closing)
+            assert took < 1.0, f"{name} failing: the close took {took:.2f} s"
+            assert app._sldea_sg_dc_ch is None and not app._sldea_running
+
+
 def test_a_dry_run_takes_no_sg_lock_and_writes_nothing():
     """A DRY run never commands the SG, and it does not queue on the SG's
     lock behind Continuous Logging either."""
@@ -487,8 +591,7 @@ def test_a_dry_run_takes_no_sg_lock_and_writes_nothing():
             L._patched(L._MB(L.LIVE_OK)):
         app = _App(tmp, dry=True, real_worker=True)
         app.sldea_run()
-        assert app.worker_done.wait(WAIT_S), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _finished(app)
         assert app.lines, "the DRY run logged nothing"
         assert app.sg.writes == [] and app.sg.failed == [], app.sg.writes
         assert app.sg.lock.holds == 0, app.sg.lock.holds

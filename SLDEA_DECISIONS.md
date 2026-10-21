@@ -1776,10 +1776,13 @@ hand placement; that is a bench check (`#454`, listed in `#369`).
   are Tol white; the ring face is Tol black; the previous outline is Tol
   muted indigo `#332288`; the resting disc is Tol black. White matches the
   manual trace's candidate D on the review card (#450). An exhaustive
-  search over Tol's eight schemes for these three, beside A, B and C's Tol
-  colors, found the best sets with all three at 3:1 on gray 147 at 19.14
-  (white vs A's cyan, protanopia), each of them white plus two dark
-  colors; three dark colors reach 16.96 at best. Beside the Material A,
+  search over Tol's eight schemes (the 2021 tech note's, as
+  `tests/test_sldea_tol_colors.py` lists them) for these three, beside A,
+  B and C's Tol colors, found the best sets with all three at 3:1 on gray
+  147 at 19.14 (white vs A's cyan, protanopia), each of them white plus
+  two dark colors; three dark colors reach 16.96 at best. Re-run in review
+  with Tol's 16 August 2026 page, which adds a dark and a pale scheme: the
+  same best set at 19.14, and three dark colors at 16.16. Beside the Material A,
   B and C still on main before #450, the worst pair is 21.33 (indigo vs
   black, tritanopia).
 - **Contrast is 3:1 at the median, not everywhere.** At gray 147: white
@@ -1788,17 +1791,25 @@ hand placement; that is a bench check (`#454`, listed in `#369`).
   to 2.25 (the lavender: 2.26) and black to 3.88. Over that whole range
   only black holds 3:1, and a halo is not allowed here.
 - **Candidate overlays in the tracer** wrap over A, B and C's colors only.
-  They used to wrap over all four, so a fourth detector candidate was drawn
-  in D's color, which is the trace's white once #450 lands.
+  They used to wrap over all four, so a fourth detector candidate would
+  have been drawn in D's color, which is the trace's white once #450 lands.
+  `se.candidates` returns at most three, so none ever was; the wrap is a
+  guard.
 - **Nothing in the tracer gets a halo**, because a halo widens the line. The
   dash pattern stays the second cue: the trace is solid with a ring at each
   vertex, candidates dash (2, 4), the previous outline (6, 3), the resting
   disc (4, 4). The rubber band now shares the trace's white. It differs
   from the closing segment by its dash, (2, 4) against (3, 4), and by
   following the pointer.
-- **No saved field changes.** Trace labels already record which overlays
-  were on, and each label's timestamp separates traces made before and
-  after this change.
+- **One saved field is new: `palette`** (review fix, 2026-10-20). Each
+  trace label in edge_labels.json and each calibration round-set (its
+  record, and the end of its scale_calibration_log.txt line) names the
+  colors it was drawn in, `tol-454`. A record without it was drawn in the
+  Material colors. Its date cannot tell the two apart, because a lab PC
+  runs whatever build it last updated to, and the `#369` comparison and
+  any later analysis of the labels need that distinction. The log line
+  adds the field last, and only when the record names it, so every older
+  field keeps its place.
 
 **Not measured, and owed.**
 

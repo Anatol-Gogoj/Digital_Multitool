@@ -1226,6 +1226,12 @@ CAL_STRETCH_MIN_SPAN = 6.0      # never stretch a narrower window than this:
 # 1.84:1.
 CAL_INK = '#FFFFFF'
 CAL_HALO = '#000000'
+# The palette the calibration dialog and the tracer draw in, written into
+# every trace label and every calibration round-set (#454 review,
+# 2026-10-20). A lab PC runs whatever build it last updated to, so a
+# record's date cannot say which colors it was made with. A record without
+# this key was made with the Material colors that came before.
+TOOL_PALETTE = 'tol-454'
 
 
 def disc_paper_lum(arr, cx, cy, r, inner=0.60, ring=(1.25, 1.55)):
@@ -6953,6 +6959,7 @@ class EdgeReviewApp:
                     'stroke': (stroke_var.get()
                                if st['mode'] == se.CAL_MODE_CIRCLE
                                else None),
+                    'palette': TOOL_PALETTE,
                     'auto_diam_px': auto_px,
                     'auto_pct': (None if vfy else
                                  (100.0 * (stats['mean'] - auto_px) / auto_px)
@@ -9402,6 +9409,7 @@ class TraceWindow(tk.Toplevel):
                              'prev': bool(self.ov_prev.get())},
                 'elapsed_s': time.time() - self._t_open,
                 'snapped': self._snap_used,
+                'palette': TOOL_PALETTE,
                 'unpaired_ack': self._unpaired_ack}
         self.grab_release()
         self.destroy()

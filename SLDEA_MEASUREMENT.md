@@ -364,7 +364,7 @@ conf 0.871, residual 2.3 px, 204 edge points):
 | **B** — two-point diameter, rotated | 5 | **2.09 %** | +0.95 % |
 
 > Measured on the dialog as it was drawn then, in the Material green `#00e676`.
-> Since 2026-10-19 (`#454`) the same strokes, widths and halos are white; that
+> Since 2026-10-19 (`#454`) the same strokes and widths are white on the same black halos; that
 > has not been re-measured, so this table describes the green dialog
 > (SLDEA_DECISIONS.md, 2026-10-19).
 

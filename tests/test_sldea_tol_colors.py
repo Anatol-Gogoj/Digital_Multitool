@@ -44,7 +44,7 @@ import test_sldea_preview as cvd
 
 
 class _Skip(Exception):
-    """The test could not run here (no display) -- reported, not passed."""
+    """The test could not run here (no display): reported, not passed."""
 
 
 # Paul Tol, "Colour Schemes", SRON/EPS/TN/09-002, issue 3.2 (2021): the
@@ -528,7 +528,7 @@ def test_tracer_draws_its_tol_colors_at_the_widths_215_measured():
         assert it['width'] == 1.0 and it['fill'] == '', it
     assert by_dash[(4, 4)] == [gui.TRACE_REST], by_dash
     assert by_dash[(6, 3)] == [gui.TRACE_PREV], by_dash
-    # four detector candidates: A, B, C, then A again -- not D's color
+    # four detector candidates: A, B, C, then A again, not D's color
     want = [c.upper() for c in gui.CAND_COLORS[:gui.TRACE_SLOT]]
     assert by_dash[(2, 4)] == want + want[:1], by_dash
     lines = [it for it in items if it['kind'] == 'line']
@@ -629,7 +629,7 @@ def test_calibration_circle_mode_keeps_its_3px_stroke_on_a_5px_halo():
 
 def test_calibration_two_point_marker_is_a_1px_white_ring_on_black():
     """TWOPOINT after one click: a 1 px white ring with a 1 px black ring
-    just outside it, and white crosshair arms -- never a filled dot."""
+    just outside it, and white crosshair arms, never a filled dot."""
     import sldea_edge_gui as gui
     got = _cal_items('twopoint', click=(80.0, 120.0))
     items = got['items']
@@ -643,10 +643,73 @@ def test_calibration_two_point_marker_is_a_1px_white_ring_on_black():
                         for it in arms), arms
 
 
+def test_labels_and_round_sets_name_the_palette_they_were_drawn_in():
+    """#454 review: a lab PC runs the build it last updated to, so neither
+    a label's timestamp nor a round-set's tells the Material colors from
+    these. The label record carries the palette it is given (None when
+    none is), and the round-set's log line ends with it only when the
+    record names one, so every older line keeps its fields in place."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    import sldea_trace as strc
+    assert gui.TOOL_PALETTE == 'tol-454', gui.TOOL_PALETTE
+    row = {'frame_file': 'SLDEA_s01_00.25kV_pre-ramp.png',
+           'nominal_kV': '0.25', 'tag': 'pre-ramp'}
+    poly = [(10, 10), (110, 12), (108, 90), (12, 88)]
+    mach = {'method': 'disc-fit', 'conf': 0.91, 'area_px': 7500.0,
+            'contour': np.array([[10, 10], [110, 10],
+                                 [110, 90], [10, 90]], float)}
+    rec = strc.label_record(3, row, poly, (540, 960), machine=mach,
+                            palette=gui.TOOL_PALETTE, user='op',
+                            now=1753795000)
+    assert rec['palette'] == 'tol-454', rec
+    old = strc.label_record(3, row, poly, (540, 960), machine=mach,
+                            user='op', now=1753795000)
+    assert old['palette'] is None, old
+    cal = {'when': 'T', 'mode': se.CAL_MODE_CIRCLE,
+           'stats': {'n': 3, 'mean': 575.0,
+                     'values': [570.0, 575.0, 580.0]},
+           'stroke': '3 px solid', 'outcome': 'accepted', 'frame': 'b.png'}
+    before = se.calibration_log_line(cal)
+    after = se.calibration_log_line(dict(cal, palette=gui.TOOL_PALETTE))
+    assert 'palette=' not in before, before
+    assert after == before + ' palette=tol-454', (before, after)
+
+
+def test_the_tracer_hands_its_palette_to_the_label():
+    """#454 review: Done passes TOOL_PALETTE with the rest of the label's
+    metadata, so the label written from it names the colors drawn."""
+    import sldea_edge_gui as gui
+    from PIL import Image
+    root = _tk_root()
+    d = tempfile.mkdtemp(prefix='tol_palette_')
+    staged = []
+    try:
+        img = os.path.join(d, 'f.png')
+        Image.new('RGB', (320, 240), (147, 147, 147)).save(img)
+        t = np.linspace(0, 2 * np.pi, 40, endpoint=False)
+        disc = np.stack([160 + 50 * np.cos(t), 120 + 50 * np.sin(t)], 1)
+        app = types.SimpleNamespace(
+            root=root, base_ref={'contour': disc}, results={}, frame_rows=[0],
+            run={'rows': [{'step': 0, 'tag': 'post-ramp',
+                           'nominal_kV': '1.0'}]},
+            trace_overlay_cands=lambda i: [],
+            _trace_staged=lambda i, pts, meta: staged.append(meta))
+        win = gui.TraceWindow(app, 0, img, mm_per_px=0.05)
+        for x, y in ((100.0, 60.0), (220.0, 60.0), (220.0, 180.0)):
+            win.model.add(x, y)
+        win._done()
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+    assert len(staged) == 1, staged
+    assert staged[0]['palette'] == gui.TOOL_PALETTE, staged[0]
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
-    # line, in name order, in one bounded block -- run_tests.py explains why.
+    # line, in name order, in one bounded block; run_tests.py explains why.
     import traceback
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     ran = skipped = 0
@@ -659,7 +722,7 @@ def _run():
             print('skip', n, f'({why})')
             continue
         except Exception:
-            # A test that blew up still RAN -- only a skip is "did not run".
+            # A test that blew up still RAN: only a skip is "did not run".
             ran += 1
             failed.append((n, traceback.format_exc()))
             print('FAIL', n)

@@ -3550,6 +3550,8 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
                    '(IS-the-anchor)'):
             assert f_ in line, (f_, line)
         assert '0.00%' not in line, line
+        # the colors it was drawn in, which its date cannot say (#454)
+        assert line.endswith(' palette=' + gui.TOOL_PALETTE), line
         # --- and Save persists all of it
         gui.se.save_scale_anchor(app.rundir, {
             'method': ref['method'], 'cal_mode': ref['cal_mode'],

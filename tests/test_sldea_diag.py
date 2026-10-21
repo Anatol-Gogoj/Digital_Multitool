@@ -485,6 +485,82 @@ def test_maps_are_drawn_in_tol_iridescent():
         assert to_hex(cmap.get_bad()).upper() == TOL_IRIDESCENT_BAD
 
 
+def test_each_map_has_a_color_bar_that_says_dark_is_more():
+    """Iridescent draws high values dark. Magma, before #461, drew them
+    bright, and the sheet had no key, so an old sldea_diag.png and a new
+    one read in opposite directions (#475). Each map now has a color bar
+    beside it, as tall as the picture, with the dark end at the top and a
+    label that says what dark means. imshow scales each map to its own
+    min..max, so the bar's numbers are the map's own values, not a
+    0..1 stand-in. A NaN pixel takes Tol's bad-data gray."""
+    import shutil
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.colors import to_hex
+    from matplotlib.figure import Figure
+    root = tempfile.mkdtemp(prefix='diag_key_')
+    maps = []
+    real = Figure.savefig
+
+    def spy(fig, *a, **kw):
+        out = real(fig, *a, **kw)     # drawn, so each bar sits where shown
+        for ax in fig.axes:
+            maps.extend((ax, im) for im in ax.get_images())
+        return out
+    Figure.savefig = spy
+    try:
+        run = sd._synth_run(_os.path.join(root, 'SLDEA_k'), 'expand')
+        sd.figure(sd.analyze(run), _os.path.join(root, 'fig.png'),
+                  rundir=run)
+    finally:
+        Figure.savefig = real
+        shutil.rmtree(root, ignore_errors=True)
+    assert len(maps) == 3, f"expected the three maps, saw {len(maps)}"
+    labels = []
+    for ax, im in maps:
+        bar = im.colorbar
+        assert bar is not None, f"{ax.get_title()!r} has no key"
+        label = bar.ax.get_ylabel()
+        assert 'dark = more' in label, label
+        labels.append(label)
+        data = np.asarray(im.get_array(), float)
+        assert bar.norm.vmin == np.nanmin(data), (bar.norm.vmin, label)
+        assert bar.norm.vmax == np.nanmax(data), (bar.norm.vmax, label)
+        lo, hi = bar.ax.get_ylim()
+        assert lo < hi, "the bar's high end must be at the top"
+        assert to_hex(bar.cmap(1.0)).upper() == TOL_IRIDESCENT[-1]
+        assert to_hex(bar.cmap(0.0)).upper() == TOL_IRIDESCENT[0]
+        pic, key = ax.get_position(), bar.ax.get_position()
+        assert key.x0 >= pic.x1, "the bar belongs beside its map"
+        assert abs(key.height - pic.height) < 0.01 * pic.height, (
+            f"bar {key.height:.4f} vs picture {pic.height:.4f}")
+        assert to_hex(im.cmap(np.nan)).upper() == TOL_IRIDESCENT_BAD
+    assert all('gray levels' in t for t in labels[:2]), labels
+    assert 'texture' in labels[2], labels
+
+
+def test_the_figure_builds_its_maps_without_a_pending_deprecation():
+    """matplotlib 3.11.2 put Colormap.set_bad up for deprecation
+    (PendingDeprecationWarning: 'Use cmap.with_extremes(bad=...)'). The
+    maps' colormap is built with with_extremes, which every matplotlib
+    requirements.txt allows (>= 3.5) has, so figure() runs clean with
+    that warning turned into an error (#475). Older matplotlib never
+    warned, so there this test cannot fail."""
+    import shutil
+    import warnings
+    root = tempfile.mkdtemp(prefix='diag_warn_')
+    try:
+        run = sd._synth_run(_os.path.join(root, 'SLDEA_w'), 'expand')
+        d = sd.analyze(run)
+        png = _os.path.join(root, 'fig.png')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', PendingDeprecationWarning)
+            sd.figure(d, png, rundir=run)
+        assert _os.path.exists(png)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_iridescent_falls_in_equal_luminance_steps_and_magma_does_not():
     """Tol gives iridescent a relative luminance that falls linearly, which
     is why it also reads in monochrome vision and print. The copy keeps

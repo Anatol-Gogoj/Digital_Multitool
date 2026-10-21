@@ -1429,7 +1429,8 @@ def _wrap(text, width):
 
 # The three maps' color scale (#461, 2026-10-19): Paul Tol's sequential
 # 'iridescent' scheme, in place of matplotlib's 'magma', which is not one
-# of his. Pale is no change and dark the most. Its relative luminance
+# of his. Pale is the least and dark the most, the reverse of magma, so
+# each map carries a color bar that says so (#475). Its relative luminance
 # falls in equal steps (0.959 to 0.042, every color within 0.004 of a
 # straight line), which is why Tol says it also works in monochrome
 # vision and in a monochrome printout; tests/test_sldea_diag.py holds
@@ -1455,8 +1456,11 @@ def figure(d, png, rundir=None):
     from matplotlib.colors import LinearSegmentedColormap
     import cv2
 
-    maps_cmap = LinearSegmentedColormap.from_list('iridescent', MAP_COLORS)
-    maps_cmap.set_bad(MAP_BAD)
+    # with_extremes, not set_bad: set_bad is pending deprecation in
+    # matplotlib 3.11, and with_extremes is in every version
+    # requirements.txt allows (>= 3.5)
+    maps_cmap = LinearSegmentedColormap.from_list(
+        'iridescent', MAP_COLORS).with_extremes(bad=MAP_BAD)
     fig, axs = plt.subplots(2, 3, figsize=(16, 9))
     per = d['frames']
     kv = [p['kv'] for p in per]
@@ -1476,13 +1480,30 @@ def figure(d, png, rundir=None):
             # compared against (audit 2026-08-05)
             prep = se.prepared_diff(base, img, d['settings'])
             tex = se._ratio_small(prep, d['settings'])
-            for ax, (m, t) in zip(axs[0], [
-                    (cv2.absdiff(img, base), 'raw absdiff'),
+            # Each map gets a color bar as its key (#475). Iridescent
+            # draws high values dark, magma drew them bright, and a sheet
+            # with no key cannot say which way it runs. imshow scales
+            # each map to its own min..max, so the bar's numbers are that
+            # map's own values: gray levels for the two differences, the
+            # detector's texture ratio (1 = as textured as the baseline)
+            # for the wrinkle map. The bar is an inset in axes
+            # coordinates, so it keeps the image's height once imshow's
+            # equal aspect has shrunk the axes to the picture; a
+            # gridspec bar takes the whole cell and stands taller.
+            for ax, (m, t, key) in zip(axs[0], [
+                    (cv2.absdiff(img, base), 'raw absdiff',
+                     '|diff|, gray levels: dark = more change'),
                     (np.abs((a * base + b) - img),
-                     'absdiff after gain+offset fit'),
+                     'absdiff after gain+offset fit',
+                     '|diff|, gray levels: dark = more change'),
                     (np.clip(tex, 0, 3),
-                     'wrinkle map (detector texture ratio)')]):
-                ax.imshow(m, cmap=maps_cmap)
+                     'wrinkle map (detector texture ratio)',
+                     'ratio, capped at 3: dark = more texture')]):
+                im = ax.imshow(m, cmap=maps_cmap)
+                bar = fig.colorbar(
+                    im, cax=ax.inset_axes([1.02, 0.0, 0.03, 1.0]))
+                bar.set_label(key, fontsize=8)
+                bar.ax.tick_params(labelsize=7)
                 ax.set_title(f"{t}\n{hot['kv']:g} kV", fontsize=9)
                 ax.set_xticks([])
                 ax.set_yticks([])

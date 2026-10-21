@@ -161,6 +161,8 @@ or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from 
 
 `python sldea_diag.py --selftest out.png` runs it against synthetic runs — one that expands, one that only wrinkles, one that drifts — without needing any data.
 
+In `sldea_diag.png` the top row's three maps run from pale (the map's lowest value) to dark (its highest), and each has a color bar in its own units: gray levels for the two differences, the texture ratio for the wrinkle map. An older sheet in a run folder may read differently: before v1.4.6 the maps were magma, where bright meant more, and v1.4.6's sheets have dark = more but no color bar.
+
 ### Plotting runs against each other
 
 `sldea_plot.py` puts one or several runs on one figure — active area vs kV (`--mode area`, the default), or current or power, which work on raw unreviewed runs too. Every export writes three files off one stem: the figure, the tidy per-snapshot CSV that is the figure's evidence, and a `.figspec.json` sidecar that re-renders it later (`--from-spec`). The figure is a PNG at `--dpi` (300 by default; 50–1200, refused outside it rather than clamped) or an SVG with `--format svg`; the CSV and the sidecar are written for both. The window greys its dpi box under SVG — a vector file has no dots per inch to set — and the figspec records format and dpi, so a re-render is the same file and not merely the same picture.

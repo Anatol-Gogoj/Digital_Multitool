@@ -46,14 +46,17 @@ LCR = Page(
             "Mode: a parallel mode (CP, LP) above about 10 kΩ, a series "
             "mode (CS, LS) below about 1 kΩ.",
             "Frequency: 1 kHz for most capacitors, 100 Hz for electrolytics.",
-            "Voltage: 1.0 V is standard. Above 2.0 V the meter clamps "
-            "without an error.",
+            "Voltage: 0.01 to 2.0 V, 1.0 V is standard. A level outside "
+            "that stops Apply with a Configuration Error; fix it and Apply "
+            "again.",
             "Quietest D on small capacitors: Speed SLOW, Avg 8 to 16.",
             "Untick Auto range to hold the range on a fixed part.",
         )),
         ("DC bias", (
             "Set DC Bias (V), tick Bias ON, Apply. It stays on until you "
-            "untick it and Apply again; closing the app switches it off.",
+            "untick it and Apply again.",
+            "Closing the window tries to switch the bias off (best effort); "
+            "Restart now leaves it on.",
         )),
         ("Fixture correction", (
             "Run Open Correction... (fixture empty) and Short Correction... "
@@ -100,8 +103,8 @@ SCOPE = Page(
             "channel).",
             "No signal means no valid value; Frequency and Period need a "
             "periodic signal.",
-            "Capture CH1 Waveform plots the full record; Save CSV... is in "
-            "that window.",
+            "Capture CH1 Waveform plots the scope's sample record (not a "
+            "screenshot); Save CSV... is in that window.",
         )),
     ),
     manual=_manual("Oscilloscope — Tektronix MSO24"),
@@ -116,28 +119,30 @@ SIGGEN = Page(
             "generator is 1 kV at the DEA.",
             "Apply with the output off, then press Output: OFF. It asks "
             "first (Enter = No) and is red while ON.",
-            "Closing the app switches both outputs off.",
-            "A LIVE SLDEA run locks the channel driving the Trek. ■ Abort "
-            "on the SLDEA tab ends the run.",
+            "Closing the window tries to switch both outputs off (best "
+            "effort); Restart now leaves them as they are.",
+            "A LIVE SLDEA run locks the channel driving the Trek. End the "
+            "run with ■ Abort on the SLDEA tab, never by closing the "
+            "window.",
         ), ALERT),
         ("Apply, then Output", (
-            "Apply CH1 Settings sends the settings only. It never switches "
+            "Apply CH1 Settings sends settings only; it never switches "
             "the output.",
             "Gray values beside the fields are what the instrument "
-            "accepted. Believe them over what you typed.",
-            "The preview draws your typed values; it is not a measurement.",
-            "Read Instrument loads the generator's settings, for example "
-            "after front-panel changes.",
+            "accepted; believe them.",
+            "The preview draws what you typed, not a measurement.",
+            "Read Instrument copies the front panel's settings into the "
+            "fields.",
         )),
         ("Amplitude and Load", (
-            "Amplitude is peak to peak (Vpp), set for the Load in Advanced "
+            "Amplitude is peak to peak (Vpp), for the Load in Advanced "
             "mode. 50 Ω into a High-Z input gives about twice the voltage.",
             "For a steady level, pick DC and set DC Offset.",
         )),
         ("Burst", (
             "Burst sends exactly Cycles periods per trigger, then idles.",
-            "Tick Burst, Apply, switch the output on, then Fire (Trigger "
-            "MAN). INT repeats every Interval; EXT uses the rear Aux In.",
+            "Tick Burst, Apply, Output ON, then Fire (Trigger MAN). INT "
+            "repeats every Interval; EXT uses the rear Aux In.",
         )),
         ("ARB and presets", (
             "USB cannot carry waveform data. Draw it in Waveform Editor... "
@@ -217,8 +222,8 @@ LOGGING = Page(
             "made up.",
             "Live Values: latest, min and max since Start. A cell reading "
             "\"--\" had no value and is not counted.",
-            "A source failing 5 reads in a row is dropped, with one note in "
-            "Log Status.",
+            "Each failed read is noted in Log Status; after 5 in a row the "
+            "source is dropped for the rest of the run.",
             "Stop Logging before disconnecting an instrument.",
         )),
         ("Files", (

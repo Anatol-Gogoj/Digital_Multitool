@@ -22,7 +22,7 @@
    },
    {
     "label": "📖 Show Usage Tips (bottom right of the instrument tabs)",
-    "what": "Opens that tab's quick reference in a window of its own, safety lines first. It can be resized and scrolled, and the tab stays usable beside it. Pressing the button again brings the open window to the front; Esc or Close shuts it. This manual has the full detail."
+    "what": "Opens that tab's quick reference in a window of its own, safety lines first. It opens at the right edge of the screen, stays above the app, can be resized and scrolled, and leaves the tab usable. Pressing the button again brings the open window to the front; Esc or Close shuts it. This manual has the full detail."
    },
    {
     "label": "Status bar (footer, left)",

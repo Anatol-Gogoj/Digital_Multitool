@@ -454,7 +454,11 @@ class ScrollableTab(ScrollableFrame):
 #     than stacking a second copy;
 #   * Esc and a Close button close it;
 #   * a starting size for the 1920x1080 bench monitor, never larger than
-#     the screen it opens on.
+#     the screen it opens on;
+#   * placed at the screen's right edge, level with the top of the app's
+#     window, so it covers as little of the app as the screen allows. It is
+#     transient (it stays above the app), so where it opens matters: left
+#     open during a LIVE run it must not sit over the middle of a tab.
 # Words are uc.TEXT on white, headings uc.TEXT_ACCENT, and a page's safety
 # heading uc.TEXT_ALERT behind a warning sign, so its words say what the
 # color repeats. All three reach 4.5:1 on white (tests/test_usage_tips.py).
@@ -462,6 +466,7 @@ class ScrollableTab(ScrollableFrame):
 TIPS_SIZE_96DPI = (640, 560)    # starting width, height in px at 96 dpi
 TIPS_MIN_SIZE = (360, 240)      # the smallest the window may be dragged to
 TIPS_SCREEN_MARGIN = 80         # px left free for a taskbar and title bar
+TIPS_FRAME_PAD = 16             # px for the window border at the right edge
 TIPS_BG = 'white'               # the page the words are written on
 ALERT_SIGN = '⚠'           # the warning sign before a safety heading
 BULLET = '•'
@@ -481,6 +486,19 @@ def tips_size(dpi, screen_w, screen_h):
         room = int(screen) - TIPS_SCREEN_MARGIN
         out.append(max(least, min(int(round(want * scale)), room)))
     return tuple(out)
+
+
+def tips_place(screen_w, screen_h, w, h, app_top):
+    """(x, y) of the top-left corner of a w x h tips window.
+
+    At the screen's right edge (less TIPS_FRAME_PAD for the border), level
+    with `app_top`, the top of the app's window. Clamped onto the screen:
+    never left of 0, never above 0, and its bottom never in the last
+    TIPS_SCREEN_MARGIN px (the taskbar), however low the app sits."""
+    x = max(0, int(screen_w) - int(w) - TIPS_FRAME_PAD)
+    y = max(0, min(int(app_top),
+                   int(screen_h) - int(h) - TIPS_SCREEN_MARGIN))
+    return x, y
 
 
 def tips_text(page):
@@ -536,7 +554,8 @@ class TipsWindow(tk.Toplevel):
 
         foot = ttk.Frame(self, padding=(8, 6))
         foot.pack(side=tk.BOTTOM, fill='x')
-        self.close_btn = ttk.Button(foot, text="Close", command=self.destroy)
+        self.close_btn = ttk.Button(foot, text="Close",
+                                    command=self.destroy)
         self.close_btn.pack(side=tk.RIGHT)
 
         body = tk.Frame(self, bg=TIPS_BG)
@@ -586,7 +605,8 @@ class TipsWindow(tk.Toplevel):
             up = event.num == 4 or getattr(event, 'delta', 0) > 0
             return scroll(-3 if up else 3, 'units')
 
-        for key, n, what in (('<Prior>', -1, 'pages'), ('<Next>', 1, 'pages'),
+        for key, n, what in (('<Prior>', -1, 'pages'),
+                             ('<Next>', 1, 'pages'),
                              ('<Up>', -1, 'units'), ('<Down>', 1, 'units')):
             for w in (self.text, self):
                 w.bind(key, lambda _e, n=n, what=what: scroll(n, what))
@@ -595,11 +615,11 @@ class TipsWindow(tk.Toplevel):
                 w.bind(seq, wheel)
         self.bind('<Escape>', lambda _e: self.destroy())
 
-        top = master.winfo_toplevel()
-        w, h = tips_size(self.winfo_fpixels('1i'), self.winfo_screenwidth(),
-                         self.winfo_screenheight())
-        self.geometry(f"{w}x{h}+{self._place_x(top, w)}+"
-                      f"{self._place_y(top, h)}")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = tips_size(self.winfo_fpixels('1i'), sw, sh)
+        app_top = master.winfo_toplevel().winfo_rooty()
+        x, y = tips_place(sw, sh, w, h, app_top)
+        self.geometry(f"{w}x{h}+{x}+{y}")
         self.focus_set()
 
     def _fill(self, page):
@@ -617,16 +637,6 @@ class TipsWindow(tk.Toplevel):
             else:
                 tag = 'head'
             self.text.insert('end', line + end, tag)
-
-    def _place_x(self, top, w):
-        """Beside the right edge of the app's window, on the screen."""
-        x = top.winfo_rootx() + top.winfo_width() - w - 24
-        return max(0, min(x, self.winfo_screenwidth() - w))
-
-    def _place_y(self, top, h):
-        y = top.winfo_rooty() + 40
-        return max(0, min(y, self.winfo_screenheight() - h
-                          - TIPS_SCREEN_MARGIN // 2))
 
 
 # The open tips windows: (app window, tab key) -> TipsWindow.

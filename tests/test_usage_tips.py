@@ -13,9 +13,17 @@ wrapped line by line down the screen. What these pin down (2026-10-20):
     than the screen;
   * it is modeless (no grab), Esc and Close shut it, and a second press of
     the button raises the open window instead of stacking another;
+  * it is transient for the app and opens at the screen's right edge,
+    whole and above the taskbar margin, wherever the app sits;
+  * the wheel scrolls the page both ways (X11's Button-4 and Button-5
+    too) and goes no further: a tab's application-wide wheel binding never
+    sees it;
   * its words reach WCAG 2.1 SC 1.4.3's 4.5:1 on the page they sit on, in
     Tol colors (with the helpers of tests/test_ui_colors.py);
-  * the pages stay short, keep their safety lines and keep them first;
+  * the pages stay short, keep their safety lines and keep them first,
+    and say what the code does: closing the window is a best-effort stop
+    that Restart now does not make, and the LCR refuses a level outside
+    0.01 to 2.0 V rather than clamping it;
     every control a page names is a real widget label; every page names a
     real manual section; and the CSV columns the logging tip no longer
     lists are in the manual, as the code writes them.
@@ -40,7 +48,7 @@ import test_ui_colors as tuc
 import ui_colors as uc
 import ui_widgets
 import usage_tips
-from ui_widgets import ALERT_SIGN, BULLET, tips_size, tips_text
+from ui_widgets import ALERT_SIGN, BULLET, tips_place, tips_size, tips_text
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUTTON_TEXT = "📖 Show Usage Tips"
@@ -48,7 +56,7 @@ INSTRUMENT_TABS = {'lcr', 'scope', 'siggen', 'psu', 'dmm', 'logging'}
 
 
 class _Skip(Exception):
-    """The test could not run here (no display) -- reported, not passed."""
+    """The test could not run here (no display): reported, not passed."""
 
 
 def _words(text):
@@ -99,9 +107,12 @@ def test_the_safety_lines_stay_and_come_first():
         assert alerts in ([], [0]), (slug, alerts)
     sg = tips_text(usage_tips.SIGGEN)
     for must in ("1 V from this generator is 1 kV at the DEA",
-                 "Enter = No", "Closing the app switches both outputs off",
+                 "Enter = No",
+                 "Closing the window tries to switch both outputs off (best "
+                 "effort); Restart now leaves them as they are.",
                  "LIVE SLDEA run locks the channel driving the Trek",
-                 "■ Abort"):
+                 "End the run with ■ Abort on the SLDEA tab, never by "
+                 "closing the window."):
         assert must in sg, must
     psu = tips_text(usage_tips.PSU)
     for must in ("Closing the app leaves the supply as it is",
@@ -113,7 +124,14 @@ def test_the_safety_lines_stay_and_come_first():
     assert "Say Yes only if the scope has stopped answering" in scope
     lcr = tips_text(usage_tips.LCR)
     assert "stays on until you untick it" in lcr
-    assert "closing the app switches it off" in lcr
+    assert ("Closing the window tries to switch the bias off (best "
+            "effort); Restart now leaves it on.") in lcr
+    # Closing is a best-effort stop, never a safe one (#480 review): no
+    # page may say closing switches anything off outright
+    for slug, page in usage_tips.PAGES.items():
+        text = tips_text(page)
+        assert not re.search(r'[Cc]losing the (app|window) switch',
+                             text), slug
     for slug in ('siggen', 'psu', 'scope'):
         first = usage_tips.PAGES[slug].sections[0]
         assert len(first) == 3 and first[2] == usage_tips.ALERT, slug
@@ -128,12 +146,42 @@ def test_the_safety_lines_say_what_the_code_does():
     assert 'self.sg.set_output(ch, False)' in close      # SG outputs off
     assert 'set_bias_enabled(False)' in close             # LCR bias off
     assert 'self.psu.set_output' not in close             # PSU left as is
+    # ... each only TRIED: every write swallows its own failure
+    for write in ('self.sg.set_output(ch, False)',
+                  'self.lcr.set_bias_enabled(False)'):
+        before = close[:close.index(write)].rstrip().splitlines()[-1]
+        assert before.strip() == 'try:', (write, before)
+    # Restart now is not that shutdown: it leaves outputs and bias as is
+    restart = src[src.index('def _restart_app'):]
+    restart = restart[:restart.index('\n    def ')]
+    for call in ('_on_app_close', 'set_output', 'set_bias_enabled'):
+        assert call not in restart, call
     sg_on = src[src.index('def sg_toggle_output'):]
     sg_on = sg_on[:sg_on.index('\n    def ')]
     assert "1 V = 1 kV at the DEA" in sg_on and "default='no'" in sg_on
     psu_on = src[src.index('def psu_toggle_output'):]
     psu_on = psu_on[:psu_on.index('\n    def ')]
     assert 'askyesno' in psu_on and "default='no'" in psu_on
+
+
+def test_the_lcr_voltage_line_says_what_apply_does():
+    """The meter's level is 0.01 to 2.0 V, and the app refuses anything
+    else before it reaches the meter: BK894.set_voltage raises, and
+    apply_lcr_config shows that as a Configuration Error. The old tip,
+    and this page's first draft, said the meter clamps it silently."""
+    lcr = tips_text(usage_tips.LCR)
+    assert 'clamp' not in lcr.lower()
+    assert '0.01 to 2.0 V' in lcr and 'Configuration Error' in lcr
+    drv = _read('instruments.py')
+    setter = drv[drv.index('    def set_voltage(self, voltage):'):]
+    setter = setter[:setter.index('\n    def ')]
+    assert 'if not 0.01 <= voltage <= 2.0:' in setter
+    assert 'raise ValueError' in setter
+    src = _read('gui.py')
+    apply = src[src.index('def apply_lcr_config'):]
+    apply = apply[:apply.index('\n    def ')]
+    assert 'self.lcr.set_voltage(volt)' in apply
+    assert 'messagebox.showerror("Configuration Error", str(error))' in apply
 
 
 def test_the_pages_are_short():
@@ -197,6 +245,20 @@ def test_the_starting_size_suits_the_bench_and_fits_any_screen():
     assert tips_size(96, 300, 200) == ui_widgets.TIPS_MIN_SIZE
     # below 96 dpi it does not shrink
     assert tips_size(72, 1920, 1080) == (640, 560)
+
+
+def test_it_opens_at_the_screens_right_edge_and_stays_on_screen():
+    """Transient, so it stays above the app: it opens where it covers the
+    least of the app, the screen's right edge, level with the app's top."""
+    pad, margin = ui_widgets.TIPS_FRAME_PAD, ui_widgets.TIPS_SCREEN_MARGIN
+    assert tips_place(1920, 1080, 640, 560, 30) == (1920 - 640 - pad, 30)
+    # the app low on the screen: the window rises to clear the taskbar
+    assert tips_place(1920, 1080, 640, 560, 900) == (
+        1920 - 640 - pad, 1080 - 560 - margin)
+    # the app partly above the screen
+    assert tips_place(1920, 1080, 640, 560, -50) == (1920 - 640 - pad, 0)
+    # a screen narrower than the window: its left edge stays on screen
+    assert tips_place(300, 200, 360, 240, 10) == (0, 0)
 
 
 def test_the_page_colors_are_tol_and_read():
@@ -328,7 +390,8 @@ def test_the_window_resizes_scrolls_and_rewraps():
             (win.winfo_width(), win.winfo_height(), w, h)
         assert win.winfo_height() <= win.winfo_screenheight()
         assert str(win.text.cget('wrap')) == 'word'
-        assert str(win.text.cget('state')) == 'disabled', "the page is editable"
+        assert str(win.text.cget('state')) == 'disabled', \
+            "the page is editable"
         # a scrollbar on screen, wired to the text
         assert win.vbar.winfo_ismapped()
         assert str(win.text.cget('yscrollcommand')), "the bar is not wired"
@@ -354,6 +417,73 @@ def test_the_window_resizes_scrolls_and_rewraps():
         _settle(root, 2)
         assert win.text.yview()[0] > 0.0, "the wheel did not scroll it"
     finally:
+        _close_all(root)
+
+
+def test_on_screen_it_opens_at_the_right_edge_above_the_app():
+    """With the app's window low on the screen, the tips window still
+    opens whole, above the taskbar margin, at the screen's right edge, and
+    transient for the app."""
+    root, app = _app()
+    old = root.geometry()
+    try:
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f'+0+{sh - 300}')
+        _settle(root, 4)
+        win = app.show_lcr_tips()
+        _settle(root, 4)
+        x, y = win.winfo_rootx(), win.winfo_rooty()
+        w, h = win.winfo_width(), win.winfo_height()
+        assert x >= 0 and y >= 0, (x, y)
+        assert x + w <= sw, (x, w, sw)
+        assert y + h <= sh - ui_widgets.TIPS_SCREEN_MARGIN // 2, (y, h, sh)
+        assert x + w >= sw - 3 * ui_widgets.TIPS_FRAME_PAD, (
+            "not at the screen's right edge", x, w, sw)
+        assert str(win.transient()) == str(root), "not transient for the app"
+    finally:
+        root.geometry(old)
+        _close_all(root)
+
+
+def test_the_wheel_scrolls_both_ways_and_reaches_nothing_behind():
+    """The bench is X11, where the wheel is Button-4 (up) and Button-5
+    (down). A wheel turn over the page scrolls the page and stops there:
+    a tab's ScrollableFrame binds the wheel application-wide while the
+    pointer is over it, and that binding must not scroll the tab too."""
+    root, app = _app()
+    seqs = ('<MouseWheel>', '<Button-4>', '<Button-5>')
+    saved = {seq: root.bind_all(seq) for seq in seqs}
+    leaked = []
+    try:
+        for seq in seqs:
+            root.bind_all(seq, lambda _e, seq=seq: leaked.append(seq))
+        win = app.show_sg_tips()
+        win.geometry('420x300')
+        _settle(root, 4)
+        t = win.text
+        t.yview_moveto(0.0)
+        _settle(root, 2)
+        t.event_generate('<Button-5>')
+        t.event_generate('<ButtonRelease-5>')
+        _settle(root, 2)
+        down = t.yview()[0]
+        assert down > 0.0, "Button-5 did not scroll the page down"
+        t.event_generate('<Button-4>')
+        t.event_generate('<ButtonRelease-4>')
+        _settle(root, 2)
+        assert t.yview()[0] < down, "Button-4 did not scroll the page up"
+        before = t.yview()[0]
+        t.event_generate('<MouseWheel>', delta=-120)
+        _settle(root, 2)
+        assert t.yview()[0] > before, "the wheel did not scroll the page"
+        win.vbar.event_generate('<MouseWheel>', delta=120)
+        _settle(root, 2)
+        assert not leaked, f"the wheel reached a binding behind: {leaked}"
+    finally:
+        for seq in seqs:
+            root.unbind_all(seq)
+            if saved[seq]:
+                root.tk.call('bind', 'all', seq, saved[seq])
         _close_all(root)
 
 

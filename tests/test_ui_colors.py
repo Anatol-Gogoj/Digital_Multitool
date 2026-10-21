@@ -279,8 +279,12 @@ def _is_color(text):
 def _parsed_colors(name, src):
     """(line, literal) of every color string kept in an UPPER_CASE
     constant, and of either branch of a color keyword's conditional.
-    Either way only a string that reads as a color counts: a branch that
-    is '' (Tk's "no color, use the default") or another word is not one
+
+    A constant may hold any string (a title, a path), so there only what
+    _is_color reads as a color counts. A branch of a color keyword is a
+    color by where it stands, so every string there counts, Tk names
+    _is_color does not know included ('firebrick', 'gray40'), except ''
+    (Tk's "no color, use the default"), which _KW never matches either
     (#476)."""
     found = []
     for node in ast.walk(ast.parse(src)):
@@ -308,7 +312,7 @@ def _parsed_colors(name, src):
                         todo.append(branch)
                     elif (isinstance(branch, ast.Constant)
                           and isinstance(branch.value, str)
-                          and _is_color(branch.value)):
+                          and branch.value != ''):
                         found.append((branch.lineno, branch.value))
     return found
 
@@ -342,7 +346,8 @@ def test_the_scan_finds_what_it_is_looking_for():
     show it catching each kind of literal it is meant to catch, and
     passing the Tol and drawn-line ones it must leave alone. A
     conditional's '' branch is Tk's default color, not a stray; the
-    other branch of the same conditional is still read (#476)."""
+    other branch of the same conditional is still read, and so is a Tk
+    color name the color pattern does not know (#476)."""
     src = ("tk.Label(f, fg='#c62828')\n"
            "x.config(highlightbackground='#999')\n"
            "c.create_text(1, 2, text='a', font=('A', 8), fill='#999')\n"
@@ -354,12 +359,13 @@ def test_the_scan_finds_what_it_is_looking_for():
            "tk.Label(f, fg=COLORS['warn' if warn else 'ok'])\n"
            "tk.Label(f, fg=X if a else '')\n"
            "tk.Label(f, bg=X if a else ('' if b else '#a01010'))\n"
+           "tk.Label(f, fg=X if a else 'firebrick')\n"
            "CAND_COLORS = ['#00c853']\n"
            "TITLE = 'Edge Review'\n")
     found = _strays('sldea_edge_gui.py', src)
     want = ['sldea_edge_gui.py:' + s for s in (
         '1 #c62828', '3 #999', '4 #555', '5 red', '6 #8a8a8a',
-        '7 dark green', '8 #a01010', '11 #a01010')]
+        '7 dark green', '8 #a01010', '11 #a01010', '12 firebrick')]
     assert found == want, found
 
 

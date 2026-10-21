@@ -110,10 +110,13 @@ TOL_GREY = '#BBBBBB'
 # 111 to 175 under the ink (5th to 95th percentile): white stands off
 # the frame by a median 2.8 to 3.3:1, cyan by 1.5 to 1.8:1; the 5th
 # percentile of the worst-case CIEDE2000 between ink and frame (normal
-# and simulated color-blind vision) is 21.6 to 26.8 for white and 16.1
-# to 19.6 for cyan, against the house floor of 18. On the halo white is
-# 21:1 and cyan 11.4:1. On a flat dark frame (gray 66) the halo is only
-# 2.1:1, so the ink carries the reticle alone: white 10:1, cyan 5.5:1.
+# and simulated color-blind vision) is 21.4 to 25.6 for white and 16.2
+# to 19.5 for cyan, against the house floor of 18. Both are taken over
+# every ink pixel: 300-pixel samples moved white's by up to 4.3 and
+# cyan's by up to 0.3, so a sampled value is not one to quote. On the
+# halo white is 21:1 and cyan 11.4:1. On a flat dark frame (gray 66) the
+# halo is only 2.1:1, so the ink carries the reticle alone: white 10:1,
+# cyan 5.5:1.
 # Cyan is also Edge Review's candidate A, so a cyan circle reads as a
 # detected outline; this one is only a framing guide.
 RETICLE_INK = '#FFFFFF'

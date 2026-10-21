@@ -558,6 +558,19 @@ def test_preflight_reticle_is_white_on_a_black_halo():
     cross = ''.join(kind(a[yy, cx]) for yy in (cy - 1, cy, cy + 1)) + \
         ''.join(kind(a[cy, xx]) for xx in (cx - 1, cx + 1))
     assert cross == 'WWWWW', cross
+    # The circle, off the cross: down each column 40 and 60 px either side
+    # of the centre, across the top and the bottom arc, the frame meets
+    # black, then at least 2 px of white, then black again. A halo all on
+    # one side of the ring (the live view's before #476) or a 1 px ring
+    # fails here.
+    import re
+    r = 292 * 0.32
+    for dx in (-60, -40, 40, 60):
+        for side in (-1, 1):
+            yc = int(round(cy + side * (r * r - dx * dx) ** 0.5))
+            col = ''.join(kind(a[yy, cx + dx])
+                          for yy in range(yc - 8, yc + 9))
+            assert re.fullmatch(r'F+K+W{2,}K+F+', col), (dx, side, col)
     colors = {tuple(px) for px in a.reshape(-1, 3)}
     assert colors <= {(147, 147, 147), (0, 0, 0), (255, 255, 255)}, \
         colors - {(147, 147, 147), (0, 0, 0), (255, 255, 255)}

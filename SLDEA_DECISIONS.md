@@ -2631,6 +2631,59 @@ the dialog and the harness never opens it. Run on Windows (OpenCV 4.13)
 only; the Linux-Tk keyboard and messagebox behaviour is not
 bench-verified yet (follow-up checks in #347).
 
+## Edge Review's candidates are Tol cyan, blue, yellow and white, each outline on a black halo 1 px wider on each side (2026-10-19)
+
+**TL;DR:** the review card's candidates A, B, C and D are now Tol cyan,
+blue, yellow and white, replacing Material colors whose B and D were nearly
+the same color under color blindness. Every outline on the card is drawn
+over a black line 1 px wider on each side, so an outline now covers 4 px
+(5 px selected) instead of 2 px (3 px). Nobody has checked yet whether the
+wider outlines change which candidate an operator picks; that is a bench
+look (`#450`, listed in `#369`).
+
+**Observation.**
+
+- With the simulator in `tests/test_sldea_preview.py` (worst-case
+  CIEDE2000 over normal and Machado-2009 deutan, protan and tritan vision;
+  house floor 18), the Material set's B `#2196f3` and D `#e040fb` were
+  3.05 apart (deuteranopia).
+- The frame in the manual's Edge Review shot (run P3_6_2.5mL_20260729)
+  sits near gray 147 (median of the frame area). Alone on gray 147, Tol
+  cyan, blue and yellow reach 1.67, 1.53 and 1.57:1, under the 3:1 WCAG
+  minimum for graphics. Black reaches 6.84:1 there, and each of the four
+  colors stands off black by 4.46:1 (blue) or more.
+- Drawn outline by outline, a later outline's halo blacks out an earlier
+  one's color wherever two candidates run within a few px, as A and C do
+  on one arc in the manual's shot. At 2 px apart the per-line version lost
+  553 px of A's line.
+
+**Decision.**
+
+- `CAND_COLORS` (sldea_edge_gui.py): A `#66CCEE`, B `#4477AA`, C
+  `#CCBB44` (Tol bright), D `#FFFFFF` (Tol high-contrast). Worst pair: A
+  vs D, 19.14 (protanopia).
+- The card draws in three passes: every halo (`CAND_HALO`, black, line
+  width + 2), then every colored line, then the letter tags. Line widths
+  are unchanged: 3 px selected, 2 px others, 1 px for a staged D beside a
+  committed one.
+- Each swatch in the Candidates list has a 1 px black border. Its letter
+  is black, except on B's blue, where black is 4.46:1 and white 4.70:1
+  against the 4.5:1 text minimum, so B's letter is white (`CAND_LETTERS`;
+  review fix, 2026-10-20).
+- The hand tracer takes the new colors but no halo. It is where points are
+  placed on the edge, the case `#215` measured: a 3 px stroke along a soft
+  edge moved hand-placed calibration points by +2.07 % in diameter. Its
+  dashed overlays stay under 3:1 on gray 147 (1.53 to 1.67:1), each above
+  the color it replaces (1.02 to 1.37:1).
+- Only drawing changes. Nothing Edge Review measures or saves does.
+
+**Not measured yet (bench look in `#369`, section 1).**
+
+- Whether the wider outlines change which candidate an operator picks.
+  `#215` measured hand placement, not the choice between candidates.
+- The swatch row on the Linux bench fonts. On Windows at 96 dpi the border
+  takes 2 px of the row's 17 px slack.
+
 ## Edge Review says what went wrong at capture before the review starts, and Save keeps the runner's notes (2026-10-02)
 
 **TL;DR:** picking a run in Edge Review now shows a "Run health" strip

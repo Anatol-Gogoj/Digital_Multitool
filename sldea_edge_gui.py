@@ -232,9 +232,21 @@ import tk_checkmarks
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
-# A green, B blue, C orange, D magenta (D = the manual trace, #172)
-CAND_COLORS = ['#00c853', '#2196f3', '#ff9100', '#e040fb']
+# A cyan, B blue, C yellow, D white (D = the manual trace, #172): Paul
+# Tol's bright cyan, blue and yellow and his high-contrast white (#450).
+# The Material set they replace had B and D at a worst-case CIEDE2000 of
+# 3.05 (deuteranopia); this set's worst pair is A and D at 19.14
+# (protanopia), over the house floor of 18, measured with the simulator
+# in tests/test_sldea_preview.py. Alone on the gray membrane (about 147
+# of 255 on the manual's bench frame) cyan, blue and yellow come to only
+# 1.5-1.7:1, so every outline on the card sits on a CAND_HALO line and
+# every swatch in the list has a CAND_HALO border.
+CAND_COLORS = ['#66CCEE', '#4477AA', '#CCBB44', '#FFFFFF']
+CAND_HALO = '#000000'   # Tol high-contrast black
 CAND_KEYS = ['A', 'B', 'C', 'D']
+# Each swatch's letter: black, but white on B's blue, where black is only
+# 4.46:1 against white's 4.70:1 (WCAG text needs 4.5:1).
+CAND_LETTERS = ['#000000', '#FFFFFF', '#000000', '#000000']
 TRACE_SLOT = 3          # radio value / paint slot of the manual trace
 VIEW_W = 780            # initial card view only -- once mapped, the card
 VIEW_H = 560            # tracks the LIVE canvas size (#178)
@@ -2793,15 +2805,22 @@ class EdgeReviewApp:
         self.cand_frame = ttk.LabelFrame(side, text="Candidates", padding=6)
         self.cand_frame.pack(fill='x')
         self.cand_radios = []
+        self.cand_swatches = []
         for k in range(4):
             row = ttk.Frame(self.cand_frame)
             row.pack(fill='x')
             # swatch carries the color; the TEXT stays readable (colored
             # label text was 1.6:1 and the mapping was color-only — audit
-            # 2026-07-25; letters are also drawn ON the image now)
-            tk.Label(row, width=2, bg=CAND_COLORS[k],
-                     text=CAND_KEYS[k], fg='black').pack(side='left',
-                                                         padx=(0, 4))
+            # 2026-07-25; letters are also drawn ON the image now).
+            # The black border is the swatch's halo: without it D's white
+            # and A's cyan all but vanish into the panel's gray (#450)
+            sw = tk.Label(row, width=2, bg=CAND_COLORS[k],
+                          text=CAND_KEYS[k], fg=CAND_LETTERS[k],
+                          highlightthickness=1,
+                          highlightbackground=CAND_HALO,
+                          highlightcolor=CAND_HALO)
+            sw.pack(side='left', padx=(0, 4))
+            self.cand_swatches.append(sw)
             rb = tk.Radiobutton(
                 row, text="—", anchor='w',
                 variable=self.cand_var, value=k,
@@ -4100,6 +4119,8 @@ class EdgeReviewApp:
                            and chosen.get('method') == 'manual-trace'
                            else None)
         font = _tag_font()
+        strokes = []                       # (slot, points, width) per line
+        tagged = []                        # (slot, points) per letter tag
         for slot, c in entries:
             pts = [(float(x) * scale, float(y) * scale)
                    for x, y in np.asarray(c['contour'])]
@@ -4109,9 +4130,26 @@ class EdgeReviewApp:
             wdt = 3 if slot == hot else 2
             if stale_d and slot == TRACE_SLOT and c is trace:
                 wdt = 1                    # staged-but-uncommitted: thin
+            strokes.append((slot, pts, wdt))
+            tagged.append((slot, pts))
+        if committed_trace is not None:
+            pts = [(float(x) * scale, float(y) * scale)
+                   for x, y in np.asarray(committed_trace['contour'])]
+            if len(pts) > 2:
+                strokes.append((TRACE_SLOT, pts, 3))
+        # Every halo goes down before any color (#450). A halo is 1 px
+        # wider than its line on each side, so the pale Tol colors read
+        # on the gray membrane. Drawn line by line instead, a later
+        # outline's halo would black out an earlier outline's color
+        # wherever two candidates run within a few px of each other.
+        for _slot, pts, wdt in strokes:
+            dr.line(pts + [pts[0]], fill=CAND_HALO, width=wdt + 2)
+        for slot, pts, wdt in strokes:
             dr.line(pts + [pts[0]], fill=CAND_COLORS[slot], width=wdt)
+        for slot, pts in tagged:
             # letter tag: candidate↔outline mapping must not rely on
-            # color alone (audit 2026-07-25); large + solid halo (#173)
+            # color alone (audit 2026-07-25); large + solid halo (#173).
+            # Drawn after every line, so no outline crosses a tag.
             tx, ty = max(pts, key=lambda p: p[0])
             tx = min(tx + 6, img.width - TAG_PX - 2)
             ty = min(max(ty - TAG_PX / 2, 0), img.height - TAG_PX - 4)
@@ -4119,15 +4157,9 @@ class EdgeReviewApp:
                 for dy in range(-2, 3):
                     if dx or dy:
                         dr.text((tx + dx, ty + dy), CAND_KEYS[slot],
-                                fill='black', font=font)
+                                fill=CAND_HALO, font=font)
             dr.text((tx, ty), CAND_KEYS[slot], fill=CAND_COLORS[slot],
                     font=font)
-        if committed_trace is not None:
-            pts = [(float(x) * scale, float(y) * scale)
-                   for x, y in np.asarray(committed_trace['contour'])]
-            if len(pts) > 2:
-                dr.line(pts + [pts[0]], fill=CAND_COLORS[TRACE_SLOT],
-                        width=3)
         return img
 
     def _draw(self, i, cands, chosen):

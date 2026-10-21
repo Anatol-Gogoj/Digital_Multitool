@@ -4873,21 +4873,35 @@ writes).**
 - Nothing sent changes: the same three calls, with the same arguments, in
   the same order. A DRY run still takes no SG lock and writes nothing.
 - No deadlock. Under the lock the worker makes only driver writes, which
-  re-take the same RLock on the same thread, and one attribute write.
-  Nothing there waits on the Tk thread, and no SG driver call does
-  either. The close holds no SG lock during its wait. So
-  the Tk thread can wait for the worker's hold, but the worker never waits
-  for the Tk thread.
-- Cost: a close that comes during the start writes waits for all three
-  before its own, up to three 5 s timeouts on a link that dies at that
-  moment. Before, its writes went in between them.
+  re-take the same RLock on the same thread, and one attribute write. It
+  hands nothing to the Tk thread there (no `_sldea_log`,
+  `_sldea_set_status` or `root.after`), and no SG driver call does either.
+  That matters because a Tk callback can wait for this lock (window close
+  does). On threaded Tcl a call into Tk from another thread waits for the
+  Tk thread to run it, so a worker that called `root.after` while holding
+  the lock a Tk callback waits on would deadlock; the adversarial review
+  reproduced that on real Tk. The close holds no SG lock during its wait.
+  So the Tk thread can wait for the worker's hold, but the worker never
+  waits for the Tk thread. A write that raises leaves the `with` block,
+  and that releases the lock.
+- Cost: a close that comes during the start writes waits for the rest of
+  them before its own. A link that dies costs one timeout, not three: the
+  write that times out raises, and leaving the `with` block releases the
+  lock. Each write is bounded by the session's timeout, 5 s
+  (`BK4055B.TIMEOUT_MS`), with one exception that predates this change:
+  `upload_arb` on the other channel raises the shared session's timeout
+  to 20 s while it runs, outside the lock, and then restores it. Before,
+  the close's writes went in between the run's.
 
-**Evidence.** `tests/test_sldea_start_under_lock.py`, 5 cases, all on the
+**Evidence.** `tests/test_sldea_start_under_lock.py`, 6 cases, all on the
 real `sldea_run`, worker and `_on_app_close`. The fake SG takes the SG's
 lock around each of its own writes, as `VisaInstrument.write` does, and
 notes whether the caller already held it. The lock lets waiting threads in
-strictly in arrival order, knows who holds it, and fails a wait over 60 s
-instead of hanging.
+strictly in arrival order and knows who holds it. It fails a wait over
+60 s, so a lock-against-lock cycle fails instead of hanging, but it cannot
+see a wait on the Tk thread. For that, the stub app's `_sldea_log`,
+`_sldea_set_status` and `root.after` fail when the calling thread holds
+the SG's lock, and every case checks that none did.
 
 - With no contention, the last stop check before the start writes, the
   three writes and the mark are made in one lock hold the worker took
@@ -4900,14 +4914,21 @@ instead of hanging.
 - A close in the middle of the start writes: the Tk thread waits on the
   lock, the worker finishes without it, and the close's CH1 OFF lands
   after the run's ON.
+- Each start write in turn times out inside the hold. The lock is free
+  afterwards, no output ON lands, no level is written, and the finally
+  block's zero lands. A close afterwards does not wait. The mark is set
+  exactly when the DC write landed: it means the channel is in DC, where
+  the close's 0 V offset is a known write, not that the output is ON. So
+  a failed output ON leaves it set until `_sldea_finished` clears it, and
+  the finally block zeroes that channel anyway.
 - A DRY run takes no SG lock and writes nothing.
 
-On main's code, 4 of the 5 cases fail. The end-to-end close case shows the
+On main's code, 4 of the 6 cases fail. The end-to-end close case shows the
 race itself: the run's load write, the close's CH1 OFF, the run's DC
 write, the close's CH2 OFF, then the run's CH1 ON.
 
-Eleven mutants of the start block were run against the new file, in a
-scratch copy with `python -B` and every `__pycache__` wiped. Ten are
+Fourteen mutants of the start block were run against the new file, in a
+scratch copy with `python -B` and every `__pycache__` wiped. Thirteen are
 caught, each by at least one case:
 
 - main's code (one check, outside the lock);
@@ -4918,9 +4939,13 @@ caught, each by at least one case:
 - the mark before the check, inside the lock or before it (two mutants);
 - no check under the lock;
 - the mark after output ON;
-- the DRY guard dropped.
+- the DRY guard dropped;
+- and three from the adversarial review: a log line and a status line
+  inside the hold; a failed DC write swallowed, then the mark and output
+  ON anyway; and the lock taken with `acquire()` and `release()` and no
+  try/finally, which a raising write leaves held by the dead worker.
 
-The eleventh survives, and it is equivalent: dropping the check before the
+The fourteenth survives, and it is equivalent: dropping the check before the
 lock leaves the check under it, which stops the same writes. #460's level
 writes have the same equivalent mutant. One case in
 `tests/test_app_close_zeroes_sg.py` counts the run's entries into the SG's

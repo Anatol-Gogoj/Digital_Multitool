@@ -6256,8 +6256,11 @@ LOGGING:
             # `sg` is the handle captured above, which the finally block
             # zeroes; on a LIVE run it is self.sg, as the SG's Reconnect is
             # refused once sldea_run has claimed the channel. Nothing under
-            # the lock waits on the Tk thread: driver writes (each re-takes
-            # this RLock) and one attribute.
+            # the lock may hand work to the Tk thread (no _sldea_log, status
+            # or root.after: a Tk callback, window close, can wait for this
+            # lock); only driver writes, each re-taking this RLock, and one
+            # attribute. A write that raises leaves the `with`, which lets
+            # the lock go.
             if not dry and sg is not None and not self._sldea_stop:
                 with _io_lock(sg):
                     if not self._sldea_stop:

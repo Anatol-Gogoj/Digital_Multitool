@@ -22,7 +22,7 @@ What these pin down (2026-09-23):
     and the markers made smaller in #401 keep the old hover reach;
   * the hover text names each snapshot in the tab's own words;
   * Edge Review's area_vs_voltage.png marks each tag with the preview's
-    shape, fill, black edge and legend text (#478, 2026-10-20). Both
+    shape, fill, black edge and legend text (#478, 2026-10-21). Both
     sides are read as drawn: the canvas items, and the matplotlib
     artists of the figure Save writes, each outline named by its
     geometry rather than by a constant;
@@ -184,11 +184,11 @@ def _canvas_shape(kind, coords):
 
 
 def _mpl_shape(marker):
-    """The shape matplotlib draws for `marker` (a Line2D's get_marker()),
-    read off the marker's own path."""
+    """The shape matplotlib draws for `marker` (a marker code or a
+    MarkerStyle), read off the marker's own path, transform included."""
     from matplotlib.markers import MarkerStyle
     from matplotlib.path import Path
-    ms = MarkerStyle(marker)
+    ms = marker if isinstance(marker, MarkerStyle) else MarkerStyle(marker)
     path = ms.get_path().transformed(ms.get_transform())
     codes = (list(path.codes) if path.codes is not None
              else [Path.LINETO] * len(path.vertices))
@@ -200,6 +200,17 @@ def _mpl_shape(marker):
     return _outline_shape(pts, curved=curved)
 
 
+def _drawn_shape(artist):
+    """The shape a Line2D, or a legend handle, draws. get_marker() gives
+    back only the marker code and drops a MarkerStyle's own transform (a
+    '^' turned over would still read apex up), so the MarkerStyle the
+    artist holds is read where matplotlib keeps one (`_marker`)."""
+    from matplotlib.markers import MarkerStyle
+    ms = getattr(artist, '_marker', None)
+    return _mpl_shape(ms if isinstance(ms, MarkerStyle)
+                      else artist.get_marker())
+
+
 def _hex(colour):
     from matplotlib import colors as mcolors
     return mcolors.to_hex(colour).upper()
@@ -208,8 +219,8 @@ def _hex(colour):
 def _area_plot_marks(rows):
     """Run Edge Review's real Save plot (`_save_plot`) on `rows` and read
     back what the figure holds: ({label: mark}, [legend entry, ...]) where
-    a mark is {'shape', 'fill', 'edge', 'alpha', 'z', 'xs'} and a legend entry
-    is (text, shape, fill, edge), in the legend's order."""
+    a mark is {'shape', 'fill', 'edge', 'alpha', 'size', 'z', 'xs'} and a
+    legend entry is (text, shape, fill, edge), in the legend's order."""
     import shutil
     import tempfile
     import types
@@ -224,17 +235,18 @@ def _area_plot_marks(rows):
     def spy(fig, *a, **k):
         ax = fig.axes[0]
         seen['lines'] = [
-            (ln.get_label(), {'shape': _mpl_shape(ln.get_marker()),
+            (ln.get_label(), {'shape': _drawn_shape(ln),
                               'fill': _hex(ln.get_markerfacecolor()),
                               'edge': _hex(ln.get_markeredgecolor()),
                               'alpha': ln.get_alpha(),
+                              'size': ln.get_markersize(),
                               'z': ln.get_zorder(),
                               'xs': [float(x) for x in ln.get_xdata()]})
             for ln in ax.lines]
         leg = ax.get_legend()
         handles = (getattr(leg, 'legend_handles', None)
                    or getattr(leg, 'legendHandles', []))
-        seen['legend'] = [(t.get_text(), _mpl_shape(h.get_marker()),
+        seen['legend'] = [(t.get_text(), _drawn_shape(h),
                            _hex(h.get_markerfacecolor()),
                            _hex(h.get_markeredgecolor()))
                           for t, h in zip(leg.get_texts(), handles)]
@@ -376,6 +388,7 @@ def test_matplotlib_marks_are_the_canvas_shapes():
         assert style['markerfacecolor'] == fill, (tag, style)
         assert style['markeredgecolor'] == pv.OUTLINE, (tag, style)
         assert style['label'] == label and style['linestyle'] == '', style
+        assert style['markersize'] == pv.MPL_SIZE, style   # one size, all
         assert 'alpha' not in style, style
 
 
@@ -410,10 +423,11 @@ def test_the_area_plot_marks_each_tag_as_the_preview_does():
     assert drawn['post-ramp']['xs'] == [1.0, 2.0]
     assert drawn['pre-ramp']['xs'] == [1.0, 2.0]
     # opaque marks hide what is under them: the triangle, which fits in
-    # the square, goes on top, so a landing whose two snapshots measure
-    # the same area still shows both
+    # the square at one size, goes on top, so a landing whose two
+    # snapshots measure the same area still shows both
     assert drawn['post-ramp']['z'] > drawn['pre-ramp']['z'], drawn
     assert drawn['post-ramp']['z'] > drawn['baseline 0 kV']['z'], drawn
+    assert {m['size'] for m in drawn.values()} == {pv.MPL_SIZE}, drawn
     want = [(pv.MARKERS[t][2], pv.MARKERS[t][0], pv.MARKERS[t][1].upper(),
              pv.OUTLINE) for t in tags]
     assert legend == want, legend

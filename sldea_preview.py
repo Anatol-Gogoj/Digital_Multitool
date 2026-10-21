@@ -31,7 +31,7 @@ gave the baseline from #456 to #478, cannot be used here: it is the
 staircase and every marker's edge.
 
 This module is also where the other figures that mark these tags get
-their marks (#478, 2026-10-20). Edge Review's area_vs_voltage.png draws
+their marks (#478, 2026-10-21). Edge Review's area_vs_voltage.png draws
 each tag through mpl_style, so a tag has one shape, one fill and one
 legend text on the canvas and in the PNG. Before, the PNG drew the
 baseline as a black triangle and post-ramp as a circle, which are the
@@ -81,6 +81,11 @@ LEGEND_ORDER = ('warmup', 'baseline', 'post-ramp', 'pre-ramp')
 # apex up.
 MPL_MARKERS = {'circle': 'o', 'square': 's', 'diamond': 'D',
                'triangle': '^'}
+# One size for all four, in points: matplotlib's own default, written out
+# so a style sheet cannot change it. At one size the triangle fits inside
+# the square, which is what keeps a post-ramp mark visible on a pre-ramp
+# mark of the same area in Edge Review's area plot.
+MPL_SIZE = 6.0
 
 
 def mpl_style(tag):
@@ -93,8 +98,8 @@ def mpl_style(tag):
     at worst under simulated color blindness, under the floor of 18
     (#478)."""
     shape, fill, label = MARKERS[tag]
-    return {'marker': MPL_MARKERS[shape], 'linestyle': '',
-            'color': fill, 'markerfacecolor': fill,
+    return {'marker': MPL_MARKERS[shape], 'markersize': MPL_SIZE,
+            'linestyle': '', 'color': fill, 'markerfacecolor': fill,
             'markeredgecolor': OUTLINE, 'label': label}
 
 

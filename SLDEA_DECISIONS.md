@@ -1722,7 +1722,7 @@ scope's screen) should stop a run; and a peak token (`#189`) if
 millisecond arcs are to be seen at all. Letting it act changes breakdown
 semantics and gets a dated entry of its own.
 
-## Edge Review's area plot marks each frame kind as the SLDEA tab's preview does (2026-10-20)
+## Edge Review's area plot marks each frame kind as the SLDEA tab's preview does (2026-10-21)
 
 **TL;DR:** `area_vs_voltage.png`, the plot Edge Review's Save writes, now
 draws the 0 kV baseline as a red diamond, post-ramp as a blue triangle and
@@ -1789,8 +1789,9 @@ vision, applied in linear RGB; house floor 18):
 - The fills as drawn now: baseline vs post-ramp 21.36, baseline vs pre-ramp
   25.60, post-ramp vs pre-ramp 43.18. Against the black edge: 31.54, 39.20
   and 65.52.
-- The old set (black, blue, yellow) cleared the floor too, at 39.20; the
-  fault was the shapes, not the colors.
+- The old set cleared the floor too: as drawn at alpha 0.8 (`#333333`,
+  `#6992BB`, `#D6C969`) its worst pair was 36.35, black vs blue, and 39.20
+  opaque. The fault was the shapes, not the colors.
 - The new fills at the old alpha 0.8 on white: red `#C97785` and blue
   `#6992BB` come to 16.45, under the floor.
 - Contrast on the white face (WCAG 2.1 SC 1.4.11 asks 3:1 of graphics): red

@@ -684,30 +684,55 @@ def test_the_loop_picks_up_a_swapped_still():
         assert view._photo is not None
 
 
+def _shown_age(text, lo, hi):
+    """The age in the label's 'taken <age> ago' when fmt_age prints it
+    for some age from `lo` to `hi` seconds, else None. Steps of 0.05 s
+    reach each of fmt_age's 0.1 s steps, and its whole seconds past 10."""
+    ages = {lv.fmt_age(lo + k * 0.05)
+            for k in range(int((hi - lo) / 0.05) + 1)}
+    ages.add(lv.fmt_age(hi))
+    for age in ages:
+        if f"taken {age} ago" in text:
+            return age
+    return None
+
+
 def test_a_still_says_it_is_a_still_and_how_old_it_is():
-    """The age is the still's at the tick that drew it: 8 s at the
-    hand-over plus however long the Tk thread took to get to that tick.
-    That wait is measured, not assumed. A fixed '8.' needed the tick
-    within about 0.95 s of the hand-over; a busy PC held the Tk thread
-    longer and the view rightly said "9.0 s ago" (#479)."""
+    """The label gives the still's age, and the age grows while the still
+    stays on screen. Both are bounded by this test's own clock reads
+    rather than assumed: the still was 8 s old when it was handed over,
+    and the view's ticks come whenever the Tk thread gets to them. A
+    fixed '8.' needed the tick within about 0.95 s of the hand-over; a
+    busy PC held the Tk thread longer and the view rightly said "9.0 s
+    ago" (#479)."""
     with _view() as (root, app, view):
         _start(app, view)
         before = _time.monotonic()
         app._sldea_live_still = _still(step=12, age=8.0)
+        handed = _time.monotonic()
         _pump(root, 0.3)
         text = view._state_lbl.cget('text')
         waited = _time.monotonic() - before
         assert text.startswith('LAST STILL, not live: step 12'), text
-        # every age fmt_age can print between 8 s and 8 s plus the wait:
-        # 0.05 s steps reach each of its 0.1 s steps
-        ages = {lv.fmt_age(8.0 + k * 0.05)
-                for k in range(int(waited / 0.05) + 1)}
-        ages.add(lv.fmt_age(8.0 + waited))
-        assert any(f"taken {a} ago" in text for a in ages), (text, waited)
+        # no younger than at the hand-over, no older than the wait allows
+        assert _shown_age(text, 8.0, 8.0 + waited), (text, waited)
         assert 'LIVE video' not in _texts(view)
         assert view.state['banner'] == "LAST STILL, NOT LIVE"
         # its exposure is the still's own, in words
         assert view._level_lbl.cget('text') == 'OK', _texts(view)
+        # It ages on screen. The second pump below runs a tick that
+        # redraws the label (_pump looks once more after its time is up),
+        # so the age shown then is at least 8 s plus the time from the
+        # hand-over to `mark`. The first pump puts that past the most the
+        # first reading could show, so an age that stopped there fails.
+        _pump(root, 0.3)
+        mark = _time.monotonic()
+        _pump(root, 0.3)
+        later = view._state_lbl.cget('text')
+        waited = _time.monotonic() - before
+        assert _shown_age(later, 8.0 + (mark - handed), 8.0 + waited), (
+            "the age did not grow as the still stayed on screen", text,
+            later, mark - handed, waited)
 
 
 def test_no_frame_from_the_recorder_shows_no_frame_stream_stalled():

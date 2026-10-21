@@ -1070,20 +1070,22 @@ def test_a_blocker_that_appears_before_the_delayed_start_still_holds():
     start inside it with no run yet, and the camera opened (#479)."""
     with _Patched() as p:
         # long enough for the reason watch to look a few times while the
-        # start waits with the run on; it must not schedule another
+        # start waits with the run on; it must not schedule another (the
+        # count of schedules is checked below)
         gui.CAM_AUTOSTART_DELAY_MS = 600
         root, app = _app()
         if root is None:
             return
         try:
-            scheduled = []
+            scheduled = []                         # every start scheduled
             schedule = app._cam_resume_if_clear
 
             def schedule_then_run():
                 got = schedule()
-                if got and not scheduled:
+                if got:
                     scheduled.append(app._cam_autostart_job)
-                    app._sldea_running = True      # e.g. Run, meanwhile
+                    if len(scheduled) == 1:
+                        app._sldea_running = True  # e.g. Run, meanwhile
                 return got
             app._cam_resume_if_clear = schedule_then_run
             _select_webcam(app)
@@ -1093,6 +1095,9 @@ def test_a_blocker_that_appears_before_the_delayed_start_still_holds():
                                            scheduled)
             assert scheduled[0] is not None, "the start was not delayed"
             _pump(root, WATCH)                     # the watch, run still on
+            assert len(scheduled) == 1, (
+                "the watch scheduled another start with the run on",
+                scheduled)
             assert not app.cam_previewing and _opens() == [], _FakeCam.log
             assert p.mb.calls == [], p.mb.calls
             assert app.cam_splash[1] == gui.CAM_OFF_SLDEA, app.cam_splash

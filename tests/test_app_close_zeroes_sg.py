@@ -172,8 +172,9 @@ def _holds_sg_lock(sg):
     return bool(owned()) if owned is not None else False
 
 
-# Every Tk hand-off a worker thread made while holding an SG I/O lock, in
-# every case of this suite (each stub app's _tk_guard adds to it)
+# Every Tk hand-off a worker thread made while holding an SG I/O lock (each
+# stub app's _tk_guard adds to it). _run clears it before each case and
+# fails the case if it is not empty after.
 TK_UNDER_LOCK = []
 
 
@@ -1400,8 +1401,15 @@ def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = []
     for fn in fns:
+        # every case, guarded helpers or not: a Tk hand-off a worker made
+        # under an SG I/O lock fails it, even where the run swallowed the
+        # guard's error (#472)
+        TK_UNDER_LOCK.clear()
         try:
             fn()
+            assert not TK_UNDER_LOCK, (
+                f"a worker thread made a Tk hand-off while holding an SG "
+                f"I/O lock: {TK_UNDER_LOCK}")
         except Exception:
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")

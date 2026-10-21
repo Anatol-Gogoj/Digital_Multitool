@@ -35,7 +35,7 @@ their marks (#478, 2026-10-21). Edge Review's area_vs_voltage.png draws
 each tag through mpl_style, so a tag has one shape, one fill and one
 legend text on the canvas and in the PNG. Before, the PNG drew the
 baseline as a black triangle and post-ramp as a circle, which are the
-preview's post-ramp and warm-up shapes.
+preview's post-ramp and warm-up shapes, and left the warm-up frame out.
 
 tests/test_sldea_preview.py holds these pairs to a floor of 18.0. That
 is TOL_BRIGHT's adjacent-pair floor as the `#313` script measured it,
@@ -83,8 +83,9 @@ MPL_MARKERS = {'circle': 'o', 'square': 's', 'diamond': 'D',
                'triangle': '^'}
 # One size for all four, in points: matplotlib's own default, written out
 # so a style sheet cannot change it. At one size the triangle fits inside
-# the square, which is what keeps a post-ramp mark visible on a pre-ramp
-# mark of the same area in Edge Review's area plot.
+# the square and the circle inside the diamond, which is what keeps a
+# post-ramp mark visible on a pre-ramp mark, and a warm-up mark on a
+# baseline mark, of the same area in Edge Review's area plot.
 MPL_SIZE = 6.0
 
 

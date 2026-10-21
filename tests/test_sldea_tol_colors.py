@@ -269,15 +269,18 @@ def _blend(hex_color, alpha, under='#FFFFFF'):
 
 
 def test_area_plot_tags_wear_the_preview_colors_on_black_edges():
-    """Save's area_vs_voltage.png, as it draws it: baseline Tol
-    high-contrast red, post-ramp Tol bright blue and pre-ramp Tol bright
-    yellow, the SLDEA tab preview's fills (#478; the baseline was black
-    before), each opaque on a black edge. Measured on the drawn artists:
-    the three fills are 21.36 apart at worst (baseline vs post-ramp,
-    under the simulator's four visions) and 31.5 or more from the black
-    edge. Red and blue reach 4.56 and 4.70:1 on the white face; yellow
-    reaches only 1.95:1, so the black edge (21:1, and 16.98:1 on the
-    grid's light gray) is what carries it, as on the canvas. At the 0.8
+    """Save's area_vs_voltage.png, as it draws it: the warm-up's Tol
+    high-contrast white face (shown since the owner's call of
+    2026-10-21), baseline Tol high-contrast red, post-ramp Tol bright
+    blue and pre-ramp Tol bright yellow, the SLDEA tab preview's fills
+    (#478; the baseline was black before), each opaque on a black edge.
+    Measured on the drawn artists: the four fills are 21.36 apart at
+    worst (baseline vs post-ramp, under the simulator's four visions;
+    white is 22.74 from yellow, its nearest) and 31.5 or more from the
+    black edge. Red and blue reach 4.56 and 4.70:1 on the white face;
+    yellow reaches only 1.95:1 and the white face 1:1, so the black edge
+    (21:1, and 16.98:1 on the grid's light gray) is what carries them,
+    as on the canvas. At the 0.8
     alpha the plot drew with before #478, red and blue would blend to
     16.45 apart and fail the floor, so opacity is held here too.
     matplotlib's default cycle the plot used before #454 put pre-ramp
@@ -311,9 +314,10 @@ def test_area_plot_tags_wear_the_preview_colors_on_black_edges():
     try:
         stub = types.SimpleNamespace(
             rundir=d,
-            results={0: {'area_px': 200.0}, 1: {'area_px': 260.0},
-                     2: {'area_px': 255.0}},
-            run={'rows': [{'nominal_kV': '0', 'tag': 'baseline'},
+            results={0: {'area_px': 201.0}, 1: {'area_px': 200.0},
+                     2: {'area_px': 260.0}, 3: {'area_px': 255.0}},
+            run={'rows': [{'nominal_kV': '0', 'tag': 'warmup'},
+                          {'nominal_kV': '0', 'tag': 'baseline'},
                           {'nominal_kV': '1', 'tag': 'post-ramp'},
                           {'nominal_kV': '1', 'tag': 'pre-ramp'}]})
         gui.EdgeReviewApp._save_plot(stub, None)
@@ -324,7 +328,9 @@ def test_area_plot_tags_wear_the_preview_colors_on_black_edges():
     face = next(f for label, f, _e, _a, _m, _w in seen if label == 'face')
     by = {label: (fill, edge, alpha, mk, width)
           for label, fill, edge, alpha, mk, width in seen if label != 'face'}
-    assert set(by) == {'baseline 0 kV', 'post-ramp', 'pre-ramp'}, seen
+    assert set(by) == {'warm-up', 'baseline 0 kV', 'post-ramp',
+                       'pre-ramp'}, seen
+    assert by['warm-up'][0] == '#FFFFFF', by
     assert by['baseline 0 kV'][0] == '#BB5566', by
     assert by['post-ramp'][0] == '#4477AA' and by['pre-ramp'][0] == '#CCBB44'
     fills = [v[0] for v in by.values()]
@@ -353,7 +359,8 @@ def test_area_plot_tags_wear_the_preview_colors_on_black_edges():
             assert _contrast(fill, under) >= 3.0 or \
                 _contrast(edge, under) >= 3.0, (label, fill, edge, under)
     assert _contrast('#CCBB44', face) < 3.0       # why the edge matters
-    assert len({v[3] for v in by.values()}) == 3, by
+    assert _contrast('#FFFFFF', face) < 3.0       # the warm-up's face too
+    assert len({v[3] for v in by.values()}) == 4, by
     old = cvd._worst_de('#ff7f0e', '#2ca02c')
     assert old < cvd.CVD_FLOOR, old
 

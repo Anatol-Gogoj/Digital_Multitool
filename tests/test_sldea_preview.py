@@ -216,11 +216,13 @@ def _hex(colour):
     return mcolors.to_hex(colour).upper()
 
 
-def _area_plot_marks(rows):
+def _area_plot_marks(rows, rejected=()):
     """Run Edge Review's real Save plot (`_save_plot`) on `rows` and read
     back what the figure holds: ({label: mark}, [legend entry, ...]) where
     a mark is {'shape', 'fill', 'edge', 'alpha', 'size', 'z', 'xs'} and a
-    legend entry is (text, shape, fill, edge), in the legend's order."""
+    legend entry is (text, shape, fill, edge), in the legend's order.
+    Every row has an accepted area except the indices in `rejected`,
+    which carry None, as Edge Review records a rejected frame."""
     import shutil
     import tempfile
     import types
@@ -255,7 +257,8 @@ def _area_plot_marks(rows):
     try:
         stub = types.SimpleNamespace(
             rundir=d, run={'rows': rows},
-            results={i: {'area_px': 100.0 + i} for i in range(len(rows))})
+            results={i: (None if i in rejected else {'area_px': 100.0 + i})
+                     for i in range(len(rows))})
         sldea_edge_gui.EdgeReviewApp._save_plot(stub, None)
     finally:
         Figure.savefig = real
@@ -395,9 +398,11 @@ def test_matplotlib_marks_are_the_canvas_shapes():
 def test_the_area_plot_marks_each_tag_as_the_preview_does():
     # Edge Review's area_vs_voltage.png, read off the figure Save writes
     # (#478). Until then it drew the baseline as a black triangle and
-    # post-ramp as a circle, the preview's post-ramp and warm-up shapes.
-    # The 07-23 era's 'post'/'pre' tags join post-ramp and pre-ramp; the
-    # warm-up frame and a watchdog breakdown row are not plotted.
+    # post-ramp as a circle, the preview's post-ramp and warm-up shapes,
+    # and left the warm-up frame out. The owner chose to show an accepted
+    # warm-up frame, as the preview's open circle (2026-10-21). The 07-23
+    # era's 'post'/'pre' tags join post-ramp and pre-ramp; a watchdog
+    # breakdown row is not plotted.
     rows = [{'nominal_kV': '0', 'tag': 'warmup'},
             {'nominal_kV': '0', 'tag': 'baseline'},
             {'nominal_kV': '1', 'tag': 'post-ramp'},
@@ -410,27 +415,37 @@ def test_the_area_plot_marks_each_tag_as_the_preview_does():
     unknown = set(drawn) - set(by_label)
     assert not unknown, f"area plot labels the preview does not use: {unknown}"
     tags = [by_label[label] for label in drawn]
-    assert tags == ['baseline', 'post-ramp', 'pre-ramp'], tags
-    assert tags == [t for t in pv.LEGEND_ORDER if t in tags], \
-        "not drawn in the preview's legend order"
+    assert tags == list(pv.LEGEND_ORDER), \
+        f"not every tag, or not in the preview's legend order: {tags}"
     for label, mark in drawn.items():
         shape, fill, _label = pv.MARKERS[by_label[label]]
         assert mark['shape'] == shape, (label, mark)
         assert mark['fill'] == fill.upper(), (label, mark)
         assert mark['edge'] == pv.OUTLINE, (label, mark)
         assert mark['alpha'] in (None, 1.0), (label, mark)
+    assert drawn['warm-up']['xs'] == [0.0]
     assert drawn['baseline 0 kV']['xs'] == [0.0]
     assert drawn['post-ramp']['xs'] == [1.0, 2.0]
     assert drawn['pre-ramp']['xs'] == [1.0, 2.0]
-    # opaque marks hide what is under them: the triangle, which fits in
-    # the square at one size, goes on top, so a landing whose two
-    # snapshots measure the same area still shows both
+    # opaque marks hide what is under them: the circle fits in the
+    # diamond and the triangle in the square at one size, so those two go
+    # on top, and equal areas at one voltage still show both marks
+    assert drawn['warm-up']['z'] > drawn['baseline 0 kV']['z'], drawn
     assert drawn['post-ramp']['z'] > drawn['pre-ramp']['z'], drawn
     assert drawn['post-ramp']['z'] > drawn['baseline 0 kV']['z'], drawn
     assert {m['size'] for m in drawn.values()} == {pv.MPL_SIZE}, drawn
     want = [(pv.MARKERS[t][2], pv.MARKERS[t][0], pv.MARKERS[t][1].upper(),
              pv.OUTLINE) for t in tags]
     assert legend == want, legend
+    # only an ACCEPTED warm-up frame is drawn: a run without one, or with
+    # its warm-up rejected in review, has no warm-up mark or legend entry
+    for case, (case_rows, rejected) in {
+            'no warm-up row': (rows[1:], ()),
+            'warm-up rejected': (rows, (0,))}.items():
+        drawn, legend = _area_plot_marks(case_rows, rejected=rejected)
+        assert 'warm-up' not in drawn, (case, list(drawn))
+        assert [text for text, _s, _f, _e in legend] == [
+            'baseline 0 kV', 'post-ramp', 'pre-ramp'], (case, legend)
 
 
 def test_marker_radius_follows_the_room():
@@ -702,10 +717,10 @@ def test_the_canvas_draws_every_scheduled_snapshot_by_shape():
 
 def test_the_preview_and_the_area_plot_mark_each_tag_alike():
     # #478: the tab's preview and Edge Review's area_vs_voltage.png of the
-    # same schedule, both read as drawn. Every tag the area plot draws
-    # has the canvas's shape, fill and edge, and the two legends use the
-    # same words in the same order. The area plot leaves the warm-up
-    # frame out, so the preview's open circle is not in it.
+    # same schedule, both read as drawn. With every frame accepted, the
+    # area plot draws every tag the canvas does, the warm-up's open circle
+    # included (owner, 2026-10-21), each in the canvas's shape, fill and
+    # edge, and the two legends use the same words in the same order.
     root, app = _app()
     try:
         c = app.sldea_canvas
@@ -725,11 +740,10 @@ def test_the_preview_and_the_area_plot_mark_each_tag_alike():
     assert set(drawn) <= set(by_label), set(drawn) - set(by_label)
     in_plot = {by_label[label]: (m['shape'], m['fill'], m['edge'])
                for label, m in drawn.items()}
-    assert set(in_plot) == {'baseline', 'post-ramp', 'pre-ramp'}, in_plot
+    assert set(in_plot) == set(on_canvas), (in_plot, on_canvas)
     for tag, mark in in_plot.items():
         assert on_canvas[tag] == {mark}, (tag, on_canvas[tag], mark)
-    assert [text for text, _s, _f, _e in legend] == [
-        t for t in canvas_legend if t != pv.MARKERS['warmup'][2]], \
+    assert [text for text, _s, _f, _e in legend] == canvas_legend, \
         (legend, canvas_legend)
 
 

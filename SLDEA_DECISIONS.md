@@ -1725,11 +1725,12 @@ semantics and gets a dated entry of its own.
 ## Edge Review's area plot marks each frame kind as the SLDEA tab's preview does (2026-10-21)
 
 **TL;DR:** `area_vs_voltage.png`, the plot Edge Review's Save writes, now
-draws the 0 kV baseline as a red diamond, post-ramp as a blue triangle and
-pre-ramp as a yellow square: the shapes, colors and legend words of the
-SLDEA tab's preview. Before, its baseline was a black triangle and its
-post-ramp a circle, so someone who learned the preview read it wrong. The
-marks are no longer see-through (`#478`).
+draws the camera warm-up frame as an open circle, the 0 kV baseline as a
+red diamond, post-ramp as a blue triangle and pre-ramp as a yellow square:
+the shapes, colors and legend words of the SLDEA tab's preview. Before, its
+baseline was a black triangle, its post-ramp a circle and the warm-up not
+drawn at all, so someone who learned the preview read it wrong. The marks
+are no longer see-through (`#478`).
 
 **Observation.**
 
@@ -1769,49 +1770,67 @@ marks are no longer see-through (`#478`).
   keywords (`MPL_MARKERS`: circle `o`, square `s`, diamond `D`, triangle
   `^`) with the black edge, and `_save_plot` draws every tag through it.
   The legend reads "baseline 0 kV", as on the tab.
+- **The accepted warm-up frame is plotted** (the owner's decision,
+  2026-10-21), as the preview's open circle: `mpl_style('warmup')`, a Tol
+  white face on the black edge, with "warm-up" first in the legend as in
+  the preview's `LEGEND_ORDER`. Edge Review reviews the warm-up frame like
+  any other, and the plot draws exactly the warm-up rows that hold an
+  accepted area, as it does for every tag; a run with no warm-up frame, or
+  with it rejected, draws none. Only the PNG changes: nothing measured or
+  written to data.csv does. A watchdog `breakdown` row stays off the plot,
+  as before, and the 07-23 era's `post`/`pre` still count as post-ramp and
+  pre-ramp.
 - **Opaque, as on the canvas**, because the red and the blue fail the floor
-  as tints (below). An opaque mark hides what is under it, so post-ramp's
-  triangle, which fits inside the square at one marker size, is drawn
-  above the other two: a landing whose two snapshots measure the same area
-  shows a triangle in a square. Drawn the other way, the square covered
-  all of the triangle but a speck of edge at its apex.
-- **What is plotted does not change**: baseline, post-ramp and pre-ramp,
-  with the 07-23 era's `post`/`pre`. The warm-up frame and a watchdog
-  `breakdown` row stay off the plot, as before.
-- matplotlib's `^` is as wide as it is tall, where the preview's triangle
-  is equilateral; both read as a triangle with its apex up. Marker sizes
-  stay at matplotlib's default.
+  as tints (below). An opaque mark hides what is under it. At one marker
+  size the triangle fits inside the square and the circle inside the
+  diamond, so post-ramp and warm-up are drawn above the rest. Equal areas
+  at a landing show a blue triangle in a square with yellow corners;
+  drawn the other way, the square covered all of the triangle but a speck
+  of edge at its apex. Equal areas at 0 kV show a white circle inside the
+  diamond's black points, and the diamond's red is covered: at 110 dpi
+  the circle is about 9 px across and the diamond 13 px point to point,
+  and the circle touches all four of its sides. Drawn the other way, the
+  diamond would hide the circle entirely. A warm-up and a baseline that
+  measure the same area are the expected case, since both are the
+  membrane at rest two seconds apart.
+- **One marker size**, 6 pt (`MPL_SIZE`, matplotlib's default written out),
+  for every frame kind, since the drawing order above relies on it.
+  matplotlib's `^` is as wide as it is tall, where the preview's triangle
+  is equilateral; both read as a triangle with its apex up.
 
 **Evidence.** Measured with the simulator in `tests/test_sldea_preview.py`
 (worst-case CIEDE2000 over normal and Machado-2009 deutan, protan and tritan
 vision, applied in linear RGB; house floor 18):
 
-- The fills as drawn now: baseline vs post-ramp 21.36, baseline vs pre-ramp
-  25.60, post-ramp vs pre-ramp 43.18. Against the black edge: 31.54, 39.20
-  and 65.52.
+- The fills as drawn now: baseline vs post-ramp 21.36 (the worst pair),
+  baseline vs pre-ramp 25.60, post-ramp vs pre-ramp 43.18. The warm-up's
+  white: 36.05 from the red, 39.99 from the blue, 22.74 from the yellow.
+  Against the black edge: red 31.54, blue 39.20, yellow 65.52, white
+  100.00.
 - The old set cleared the floor too: as drawn at alpha 0.8 (`#333333`,
   `#6992BB`, `#D6C969`) its worst pair was 36.35, black vs blue, and 39.20
   opaque. The fault was the shapes, not the colors.
 - The new fills at the old alpha 0.8 on white: red `#C97785` and blue
   `#6992BB` come to 16.45, under the floor.
 - Contrast on the white face (WCAG 2.1 SC 1.4.11 asks 3:1 of graphics): red
-  4.56, blue 4.70, yellow 1.95:1. Yellow is carried by its black edge, as on
-  the canvas: 21:1 on white and 16.98:1 on the grid's light gray (`#B0B0B0`
-  at alpha 0.3, `#E7E7E7` on white).
+  4.56, blue 4.70, yellow 1.95:1, and the warm-up's white face 1:1. Yellow
+  and white are carried by their black edge, as on the canvas: 21:1 on
+  white and 16.98:1 on the grid's light gray (`#B0B0B0` at alpha 0.3,
+  `#E7E7E7` on white).
 - `tests/test_sldea_preview.py` reads both plots as drawn: the canvas items
   and the artists of the figure `_save_plot` writes, each outline named by
   its geometry, and requires the same shape, fill, edge and legend words
   per tag. `tests/test_sldea_tol_colors.py` measures the figure's own
   colors, opacity and edges.
 
-**Open for the owner.**
+**Open.** Should the baseline's red stay visible under an equal-area
+warm-up? Drawing the warm-up circle with no face in this plot would show
+the red diamond with a black ring inside it, but the circle would then
+differ from the preview's white face where it overlaps another mark.
 
-- Should the area plot also draw the accepted warm-up frame, as the
-  preview's open circle? Edge Review reviews it like any frame, but Save's
-  plot has always left it out.
-- In the plot window a triangle means a sweep leg and an open diamond an
-  advisory. That figure keys both in its own legend, and nothing there marks
-  a frame kind, so this entry leaves it alone.
+**Left as it is.** In the plot window a triangle means a sweep leg and an
+open diamond an advisory. That figure keys both in its own legend, and
+nothing there marks a frame kind, so this entry leaves it alone.
 
 ## The calibration dialog and the hand tracer draw in Tol white, and the tracer's context outlines in Tol black and indigo (2026-10-19)
 

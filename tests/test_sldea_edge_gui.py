@@ -447,7 +447,7 @@ def test_every_card_outline_sits_on_a_dark_halo():
     1.5-1.7:1 alone on the gray membrane, so every outline on the review
     card is drawn over a black line 1 px wider on each side. Across the
     left edge of each slot's outline, on the synthetic run's flat gray,
-    the pixels read frame, halo, color, halo, frame -- nothing else."""
+    the pixels read frame, halo, color, halo, frame, and nothing else."""
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('card halo')
     if root is None:
@@ -533,7 +533,7 @@ def test_one_candidates_halo_never_covers_another_candidates_line():
 def test_candidate_swatches_carry_a_dark_border():
     """#450: D's swatch is white and A's pale cyan, both close to the
     panel's own gray, so every swatch in the Candidates list has a 1 px
-    black border, and its letter stays black."""
+    black border, and its letter reads 4.5:1 or more on its swatch."""
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('candidate swatches')
     if root is None:
@@ -546,7 +546,9 @@ def test_candidate_swatches_carry_a_dark_border():
         for k, sw in enumerate(app.cand_swatches):
             assert str(sw.cget('bg')).upper() == gui.CAND_COLORS[k].upper()
             assert str(sw.cget('text')) == gui.CAND_KEYS[k]
-            assert str(sw.cget('fg')).lower() in ('black', '#000000')
+            fg = str(sw.cget('fg'))
+            ratio = _contrast(fg, gui.CAND_COLORS[k])
+            assert ratio >= 4.5, (gui.CAND_KEYS[k], fg, ratio)
             assert int(str(sw.cget('highlightthickness'))) == 1
             assert str(sw.cget('highlightbackground')).upper() == \
                 gui.CAND_HALO

@@ -244,6 +244,9 @@ DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
 CAND_COLORS = ['#66CCEE', '#4477AA', '#CCBB44', '#FFFFFF']
 CAND_HALO = '#000000'   # Tol high-contrast black
 CAND_KEYS = ['A', 'B', 'C', 'D']
+# Each swatch's letter: black, but white on B's blue, where black is only
+# 4.46:1 against white's 4.70:1 (WCAG text needs 4.5:1).
+CAND_LETTERS = ['#000000', '#FFFFFF', '#000000', '#000000']
 TRACE_SLOT = 3          # radio value / paint slot of the manual trace
 VIEW_W = 780            # initial card view only -- once mapped, the card
 VIEW_H = 560            # tracks the LIVE canvas size (#178)
@@ -2812,7 +2815,7 @@ class EdgeReviewApp:
             # The black border is the swatch's halo: without it D's white
             # and A's cyan all but vanish into the panel's gray (#450)
             sw = tk.Label(row, width=2, bg=CAND_COLORS[k],
-                          text=CAND_KEYS[k], fg='black',
+                          text=CAND_KEYS[k], fg=CAND_LETTERS[k],
                           highlightthickness=1,
                           highlightbackground=CAND_HALO,
                           highlightcolor=CAND_HALO)

@@ -1040,6 +1040,132 @@ def test_a_stuck_check_of_another_folder_never_claims_the_line():
                 line.cget('text')
 
 
+# A key's pause six times the poll's slowest look (5 x POLL_MS, once a
+# check is slow), so the poll checks the folder named now itself while
+# that key's pause still waits, with over 2 s to spare for a stall on a
+# loaded machine (about 1 s misses are seen there under load).
+LONG_PAUSE_MS = 6 * 5 * gui.InstrumentControlGUI.SLDEA_FOLDER_POLL_MS
+
+
+def _past_the_pause(root, key):
+    """Pump Tk until the pause armed by the key typed at `key` would have
+    fired, and half a second more."""
+    _settle(root, lambda: False,
+            timeout=key + LONG_PAUSE_MS / 1000 + 0.5 - time.monotonic())
+
+
+def _line_timers(root):
+    """The run folder line's timers still pending in Tk: the scripts of
+    the `after` events whose callback is one of its _sldea_folder_*
+    methods (tkinter names each script after its callback)."""
+    out = []
+    for aid in root.tk.splitlist(root.tk.call('after', 'info')):
+        try:
+            script = root.tk.splitlist(root.tk.call('after', 'info', aid))[0]
+        except Exception:                # fired or cancelled since
+            continue
+        script = str(script)             # may come back a Tcl_Obj
+        if '_sldea_folder_' in script:
+            out.append(script)
+    return out
+
+
+def test_a_check_the_poll_sends_ends_the_pause_of_the_last_key():
+    """#459: the poll checks the folder the boxes name now itself when it
+    abandons a check stuck on another folder, and when a check of another
+    folder comes back. That check cleared the pause the last key had
+    armed without cancelling it, so the pause still fired: a second check
+    of the same folder, once the first was back. Each case here types a
+    key with a pause the poll is sure to beat, and the folder it names is
+    checked once."""
+    for stuck in (True, False):
+        with tempfile.TemporaryDirectory() as tmp, \
+                _real_app() as (root, app):
+            line = app.sldea_folder_line
+            gate, calls = threading.Event(), []
+            real = sprof.holds_run
+
+            def held(folder):
+                calls.append((os.path.basename(folder), time.monotonic()))
+                gate.wait(30)
+                return []
+            sprof.holds_run = held
+            try:
+                # stuck: the poll abandons A's check; else A's check is back
+                app.SLDEA_FOLDER_SLOW_S = 0.3 if stuck else 30.0
+                app.sldea_outdir.set(tmp)
+                root.update()                # drawn before the first key
+                app.sldea_runname_var.set('A')
+                assert _settle(root, lambda: len(calls) == 1), calls
+                if stuck:
+                    assert _settle(root, lambda: app._sldea_folder_stuck(
+                        app._sldea_folder_job)), (stuck, calls)
+                app.SLDEA_FOLDER_PAUSE_MS = LONG_PAUSE_MS
+                key = time.monotonic()
+                app.sldea_runname_var.set('AB')
+                root.update()
+                if not stuck:
+                    gate.set()               # A's check comes back
+                assert _settle(root, lambda: len(calls) == 2), (stuck, calls)
+                names = [name for name, _t in calls]
+                assert names == ['A', 'AB'], (stuck, names)
+                # the premise: the poll sent AB's check, not the key's pause
+                early = calls[1][1] - key
+                assert early < LONG_PAUSE_MS / 1000 - 0.1, (stuck, early)
+                gate.set()
+                # AB's answer shows, and the key's pause passes
+                assert _settle(root, lambda: line.cget('text') == _saves_to(
+                    app, os.path.join(tmp, 'AB'))), (stuck, line.cget('text'))
+                _past_the_pause(root, key)
+                names = [name for name, _t in calls]
+                assert names == ['A', 'AB'], (stuck, names)
+                assert app._sldea_folder_job is None, (stuck,
+                                                       app._sldea_folder_job)
+            finally:
+                gate.set()
+                sprof.holds_run = real
+
+
+def test_the_lines_timers_all_end_with_it():
+    """#459: <Destroy> of the line cancels its timers (_sldea_folder_stop),
+    so none fires into a closed window. The pause a key had armed before
+    the poll checked the folder named now was no longer held by the line,
+    so it was not cancelled, and "invalid command name
+    ..._sldea_folder_check" was printed after a test's window closed. Once
+    the poll has checked that folder with the key's pause still waiting,
+    stopping the line leaves none of its timers pending, and nothing
+    asks the check out for another look. A key's pause still waiting when
+    the line goes is cancelled with it."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app), \
+            _hanging_share():
+        app.SLDEA_FOLDER_SLOW_S = 0.3
+        app.sldea_outdir.set(tmp)
+        root.update()                        # drawn before the first key
+        app.sldea_runname_var.set('A')
+        assert _settle(root, lambda: app._sldea_folder_stuck(
+            app._sldea_folder_job)), app._sldea_folder_job
+        app.SLDEA_FOLDER_PAUSE_MS = LONG_PAUSE_MS
+        key = time.monotonic()
+        app.sldea_runname_var.set('AB')
+        root.update()
+        assert _settle(root, lambda: (app._sldea_folder_job or {}).get(
+            'name') == 'AB'), app._sldea_folder_job
+        job = app._sldea_folder_job
+        # the premise: the poll sent AB's check, not the key's pause
+        assert job['t0'] - key < LONG_PAUSE_MS / 1000 - 0.1, job['t0'] - key
+        app._sldea_folder_stop()
+        assert _line_timers(root) == [], _line_timers(root)
+        _past_the_pause(root, key)
+        assert app._sldea_folder_job is job
+        assert not job['again'], job
+        # a key's pause that still waits is one of the timers stop ends
+        app.sldea_runname_var.set('ABC')
+        assert any('_sldea_folder_paused' in s for s in _line_timers(root)), \
+            _line_timers(root)
+        app._sldea_folder_stop()
+        assert _line_timers(root) == [], _line_timers(root)
+
+
 def test_the_line_names_the_running_runs_folder():
     """#402 review, finding 5: while a run was on, the line judged the
     boxes, and after a tab change it warned that the run's own folder

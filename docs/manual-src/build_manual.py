@@ -542,7 +542,7 @@ body.append(f"""
   {fig('40_edge_review', 'SLDEA Edge Review on a real bench run — annotated')}
   <p class="cap">A real review frame (run P3_6_2.5mL_20260729, frame 23 of 81, 2.75 kV
   pre-ramp; the run health strip above it flags missing and sign-flipped voltage
-  readings): A = disc-fit (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
+  readings): A = disc-fit (cyan), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
   and moves on.</p>
   {legend_grid('40_edge_review')}
   <div class="use"><h4>Reviewing a run</h4><ol>
@@ -567,8 +567,10 @@ body.append(f"""
     </div>
   </div>
   {fig('30_tuner_selftest', 'Detection panels: baseline, mid-run, late frame with outlines', 'wide')}
-  <p class="cap">What the detector shows per frame: cyan = detected outline, orange = resting-disc
-  reference. Confidence and area (mm²) are printed above each panel.</p>
+  <p class="cap">What the detector shows per frame: its best outline solid, thick and lightly
+  filled (cyan), the second dashed (blue), the third dotted (yellow), each on a thin black edge:
+  the colors Edge Review gives its candidates A, B and C. Confidence and area (mm²) are printed
+  above each panel.</p>
   {fig('31_diag_selftest', 'Diagnostic self-test sheet', 'wide')}
   <p class="cap">The diagnostic's verdict panels — run <code>--selftest</code> any time to check the
   stack without data.</p>

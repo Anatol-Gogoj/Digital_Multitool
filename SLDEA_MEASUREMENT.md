@@ -363,6 +363,11 @@ conf 0.871, residual 2.3 px, 204 edge points):
 | **A′** — circle, 1 px dashed | 3 | **1.11 %** | **+0.77 %** |
 | **B** — two-point diameter, rotated | 5 | **2.09 %** | +0.95 % |
 
+> Measured on the dialog as it was drawn then, in the Material green `#00e676`.
+> Since 2026-10-19 (`#454`) the same strokes and widths are white on the same black halos; that
+> has not been re-measured, so this table describes the green dialog
+> (SLDEA_DECISIONS.md, 2026-10-19).
+
 Three readings of that table, all load-bearing:
 
 - **σ ≈ 1.0–1.1 % per fit, and the stroke does not move it.** A → A′ shifts

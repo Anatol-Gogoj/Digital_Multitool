@@ -95,6 +95,40 @@ import sldea_edge as se
 # Frame-level work is cheap, but the threshold sweep repeats the detector's
 # morphology ~20x per frame, so it runs at the detector's own scale.
 SWEEP_T = list(range(3, 46, 2))
+
+# The contact sheet's candidate outlines (#454, 2026-10-19): the tuner's
+# PANEL_COLORS, PANEL_STYLES and PANEL_HALO, copied rather than imported
+# for the reason given at _fkv below (tests/test_sldea_tol_colors.py
+# holds the copies equal). Best, 2nd and 3rd wear the colors of Edge
+# Review's A, B and C, Paul Tol's bright cyan, blue and yellow; worst-case
+# CIEDE2000 24.35 (cyan vs blue, protanopia). Each runs on a black halo,
+# because alone on a gray frame they reach only 1.5-1.7:1.
+SHEET_COLORS = ['#66CCEE', '#4477AA', '#CCBB44']   # best, 2nd, 3rd
+SHEET_STYLES = ['-', '--', ':']
+SHEET_HALO = '#000000'
+# The baseline panel's two anchors: the resting disc in Tol white, solid
+# and thick, and the foil footprint in Tol black, thin and dashed. On a
+# gray frame (about 147 of 255) white reaches 3.07:1 and black 6.84:1, so
+# neither needs a halo; the Material green and orange they replace reached
+# 1.84 and 1.36:1, and were 11.71 apart under deuteranopia.
+SHEET_DISC = '#FFFFFF'
+SHEET_FOIL = '#000000'
+# The diagnostic figure's line plots: Paul Tol's medium-contrast dark
+# blue, light blue, dark yellow and black. Worst-case CIEDE2000 over the
+# four is 27.81 (#004488 vs #000000, tritanopia), and each reaches 3:1 on
+# the white plot face (#6699CC only just, 3.003:1). Lines that share an
+# axes also differ by marker, so color is never the only cue. These
+# replace matplotlib's default cycle and the Material pink floor line.
+DIAG_LINES = ['#004488', '#6699CC', '#997700', '#000000']
+DIAG_MARKERS = ['o', 's', 'd', '^']
+# The difference-energy plot's two reference levels, 1 sigma (dotted) and
+# the identical-frame floor (dashed), are both the black that no data
+# line on that axes wears, and are told apart by dash and label. No color
+# in Tol's schemes stays 18 from the three data lines, the black and the
+# twin axis's gray while reaching 3:1 on white: the nearest, his dark
+# gray #555555, is 17.79 from the dark blue.
+DIAG_REF = '#000000'
+
 # kV parsed locally rather than imported from sldea_tuner: that module
 # applies the Tk font workaround on import, and this one never opens a
 # window.
@@ -1393,14 +1427,36 @@ def _wrap(text, width):
     return out
 
 
+# The three maps' color scale (#461, 2026-10-19): Paul Tol's sequential
+# 'iridescent' scheme, in place of matplotlib's 'magma', which is not one
+# of his. Pale is no change and dark the most. Its relative luminance
+# falls in equal steps (0.959 to 0.042, every color within 0.004 of a
+# straight line), which is why Tol says it also works in monochrome
+# vision and in a monochrome printout; tests/test_sldea_diag.py holds
+# that property, and magma fails it. The 23 colors and the bad-data
+# gray are copied from Paul Tol, "Colour Schemes", SRON/EPS/TN/09-002,
+# issue 3.2, 18 August 2021, Fig. 18, and checked against his
+# tol_colors.py v2022.10 (TOLcmaps.__iridescent,
+# sronpersonalpages.nl/~pault). As there, they are linearly interpolated.
+MAP_COLORS = ['#FEFBE9', '#FCF7D5', '#F5F3C1', '#EAF0B5', '#DDECBF',
+              '#D0E7CA', '#C2E3D2', '#B5DDD8', '#A8D8DC', '#9BD2E1',
+              '#8DCBE4', '#81C4E7', '#7BBCE7', '#7EB2E4', '#88A5DD',
+              '#9398D2', '#9B8AC4', '#9D7DB2', '#9A709E', '#906388',
+              '#805770', '#684957', '#46353A']
+MAP_BAD = '#999999'
+
+
 def figure(d, png, rundir=None):
     """Six panels: the three maps of the hottest frame, then drift,
     thresholds and the area sweep."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
     import cv2
 
+    maps_cmap = LinearSegmentedColormap.from_list('iridescent', MAP_COLORS)
+    maps_cmap.set_bad(MAP_BAD)
     fig, axs = plt.subplots(2, 3, figsize=(16, 9))
     per = d['frames']
     kv = [p['kv'] for p in per]
@@ -1426,7 +1482,7 @@ def figure(d, png, rundir=None):
                      'absdiff after gain+offset fit'),
                     (np.clip(tex, 0, 3),
                      'wrinkle map (detector texture ratio)')]):
-                ax.imshow(m, cmap='magma')
+                ax.imshow(m, cmap=maps_cmap)
                 ax.set_title(f"{t}\n{hot['kv']:g} kV", fontsize=9)
                 ax.set_xticks([])
                 ax.set_yticks([])
@@ -1436,33 +1492,40 @@ def figure(d, png, rundir=None):
             ax.axis('off')
 
     ax = axs[1][0]
-    ax.plot(kv, [p['diff_mean'] for p in per], 'o-', label='raw')
-    ax.plot(kv, [p['diff_mean_normbg'] for p in per], 's-', label='norm_bg')
+    ax.plot(kv, [p['diff_mean'] for p in per], 'o-', color=DIAG_LINES[0],
+            label='raw')
+    ax.plot(kv, [p['diff_mean_normbg'] for p in per], 's-',
+            color=DIAG_LINES[1], label='norm_bg')
     ax.plot(kv, [p['diff_mean_photofit'] for p in per], '^-',
-            label='gain+offset')
-    ax.axhline(d['sigma'], ls=':', color='#444', lw=1)
+            color=DIAG_LINES[2], label='gain+offset')
+    ax.axhline(d['sigma'], ls=':', color=DIAG_REF, lw=1)
     ax.annotate('1 sigma', (kv[0], d['sigma']), fontsize=7, va='bottom')
     reps = (d.get('repeats') or {}).get('pairs') or []
     if reps:
         fl = float(np.median([r['diff_mean'] for r in reps]))
-        ax.axhline(fl, ls='--', color='#d81b60', lw=1.2)
+        ax.axhline(fl, ls='--', color=DIAG_REF, lw=1.2)
         ax.annotate('identical-frame floor', (kv[0], fl), fontsize=7,
-                    va='bottom', color='#d81b60')
+                    va='bottom', color=DIAG_REF)
     ax.set_title('difference energy -- what is left after correction',
                  fontsize=9)
     ax.set_xlabel('nominal kV')
     ax.set_ylabel('mean |diff| (gray levels)')
     ax.legend(fontsize=7, loc='upper left')
     tw = ax.twinx()
-    tw.plot(kv, [p['shift_px'] for p in per], color='#bbb', lw=1, zorder=0)
+    tw.plot(kv, [p['shift_px'] for p in per], color='#BBBBBB', lw=1,
+            zorder=0)
     tw.set_ylabel('shift (px)', color='#999', fontsize=8)
     tw.tick_params(axis='y', colors='#999', labelsize=7)
 
     ax = axs[1][1]
-    ax.plot(kv, [p['sep_intensity'] for p in per], 'o-', label='absdiff')
-    ax.plot(kv, [p['sep_registered'] for p in per], 's-', label='registered')
-    ax.plot(kv, [p['sep_photofit'] for p in per], 'd-', label='gain+offset')
-    ax.plot(kv, [p['sep_texture'] for p in per], '^-', label='wrinkle')
+    ax.plot(kv, [p['sep_intensity'] for p in per], 'o-', color=DIAG_LINES[0],
+            label='absdiff')
+    ax.plot(kv, [p['sep_registered'] for p in per], 's-',
+            color=DIAG_LINES[1], label='registered')
+    ax.plot(kv, [p['sep_photofit'] for p in per], 'd-', color=DIAG_LINES[2],
+            label='gain+offset')
+    ax.plot(kv, [p['sep_texture'] for p in per], '^-', color=DIAG_LINES[3],
+            label='wrinkle')
     ax.set_title('Otsu separability -- which map can be thresholded',
                  fontsize=9)
     ax.set_xlabel('nominal kV')
@@ -1470,8 +1533,10 @@ def figure(d, png, rundir=None):
     ax.legend(fontsize=7)
 
     ax = axs[1][2]
-    for s in d['sweeps']:
-        ax.plot(d['sweep_thresholds'], s['area'], 'o-',
+    for k, s in enumerate(d['sweeps']):
+        ax.plot(d['sweep_thresholds'], s['area'], '-',
+                marker=DIAG_MARKERS[k % len(DIAG_MARKERS)],
+                color=DIAG_LINES[k % len(DIAG_LINES)],
                 label=f"{s['kv']:g} kV" if not np.isnan(s['kv']) else '?')
     ax.set_yscale('symlog')
     ax.set_title('detected area vs threshold (steps = merge close)',
@@ -1645,13 +1710,13 @@ def contact_sheet(rundir, png, count=8, max_frames=24):
             pts = c.reshape(-1, 2)
             ax0.plot(np.append(pts[:, 0], pts[0, 0]),
                      np.append(pts[:, 1], pts[0, 1]),
-                     lw=0.9, color='#ff9100')
+                     lw=0.9, ls='--', color=SHEET_FOIL)
     ref = se.baseline_disc(base, settings)
     head0 = "baseline"
     if ref is not None:
         pts = np.asarray(ref['contour'], float)
         ax0.plot(np.append(pts[:, 0], pts[0, 0]),
-                 np.append(pts[:, 1], pts[0, 1]), lw=2.0, color='#00e676')
+                 np.append(pts[:, 1], pts[0, 1]), lw=2.0, color=SHEET_DISC)
         head0 += (f"  disc {ref['diam_px']:.0f} px  circ "
                   f"{ref.get('circ', 0):.2f}  conf {ref.get('conf', 0):.2f}")
     else:
@@ -1671,14 +1736,20 @@ def contact_sheet(rundir, png, count=8, max_frames=24):
             prev_m = cands[0]['method']
         ax.imshow(gray, cmap='gray', vmin=0, vmax=255)
         ax.axis('off')
+        outlines = []
         for j, c in enumerate(cands[:3]):
             pts = np.asarray(c['contour'], float)
             if len(pts) < 3:
                 continue
-            xs = np.append(pts[:, 0], pts[0, 0])
-            ys = np.append(pts[:, 1], pts[0, 1])
-            ax.plot(xs, ys, lw=2.0 if j == 0 else 0.9,
-                    color=['#00e676', '#40c4ff', '#ff9100'][j])
+            outlines.append((j, np.append(pts[:, 0], pts[0, 0]),
+                             np.append(pts[:, 1], pts[0, 1]),
+                             2.0 if j == 0 else 0.9))
+        # halos first, then colors with the best on top: the tuner's order
+        for _j, xs, ys, lw in outlines:
+            ax.plot(xs, ys, lw=lw + 2, color=SHEET_HALO, zorder=2)
+        for j, xs, ys, lw in reversed(outlines):
+            ax.plot(xs, ys, lw=lw, ls=SHEET_STYLES[j],
+                    color=SHEET_COLORS[j], zorder=3)
         kv = _fkv(rows[i])
         best = cands[0] if cands else None
         head = f"{kv:g} kV" if not np.isnan(kv) else "? kV"

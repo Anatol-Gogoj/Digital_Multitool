@@ -1722,6 +1722,110 @@ scope's screen) should stop a run; and a peak token (`#189`) if
 millisecond arcs are to be seen at all. Letting it act changes breakdown
 semantics and gets a dated entry of its own.
 
+## The calibration dialog and the hand tracer draw in Tol white, and the tracer's context outlines in Tol black and indigo (2026-10-19)
+
+**TL;DR:** the calibration dialog's circle, cross, handles and markers are
+white instead of bright green. In the hand tracer your own trace is white,
+the previous frame's outline is indigo and the resting disc is black. Every
+line keeps its width, dash and halo, because a wider line moves where people
+place points (`#215`). Nobody has checked yet whether the new colors move
+hand placement; that is a bench check (`#454`, listed in `#369`).
+
+**Observation.**
+
+- Both windows drew in Material colors, against the house rule that UIs and
+  plots use Paul Tol's colorblind-safe schemes. The calibration dialog used
+  `#00e676` for everything bright in all three modes. The tracer used
+  `#00e676` for the trace and its vertex rings (face `#003322`), `#80cbc4`
+  for the rubber band to the pointer, `#b39ddb` for the previous frame's
+  outline and `#888888` for the resting disc.
+- Measured with the simulator in `tests/test_sldea_preview.py`
+  (worst-case CIEDE2000 over normal and Machado-2009 deutan, protan and
+  tritan vision; house floor 18): the tracer's own colors were 8.04 apart at
+  worst (trace green vs rubber-band teal, tritanopia).
+- The frame in the manual's Edge Review shot (run P3_6_2.5mL_20260729)
+  sits at gray 147 (median of the frame area; 5th to 95th percentile 106 to
+  167, foil and dish rim included). At gray 147 the tracer's colors
+  reached 1.84 (trace), 1.65 (rubber band), 1.28 (previous outline) and
+  1.15:1 (resting disc), under the 3:1 WCAG minimum for graphics. The
+  resting disc, which the tracer shows by default, was all but invisible.
+- The calibration display is contrast-stretched (`cal_stretch_window`). On
+  a P3 baseline (disc 166, paper 186, the docstring's example) the disc
+  shows at gray 60 and the paper at gray 195. The green stood off the disc
+  at 6.61:1 and off the paper at 1.06:1. On the paper side the black
+  halo or companion ring carries the line (11.91:1).
+- In Tol's schemes only white and the darkest colors reach 3:1 on gray 147:
+  white 3.07, `#004488` 3.13, `#663333` 3.28, `#332288` 3.96, `#222255`
+  4.79, black 6.84. Cyan, blue and yellow, the colors #450 gives the
+  candidates A, B and C, reach 1.5 to 1.7:1.
+- `#215` (SLDEA_MEASUREMENT.md §2.1a): the circle mode's 3 px solid stroke
+  on a 5 px halo put the hand-fit diameter +2.07 % from the automatic fit,
+  the 1 px dashed stroke +0.77 %. Those numbers measure stroke width. Every
+  arm was drawn in the green.
+
+**Decision.**
+
+- **Calibration** (`CAL_INK`, `CAL_HALO`): Tol high-contrast white where the
+  green was, Tol black where black already was. No width, dash, halo or
+  companion ring changes. White stands off the stretched disc at 11.03:1
+  and off raw gray 147 at 3.07:1. The dialog shows one color plus black, so
+  there is no pair to keep apart under color blindness, and white looks the
+  same under all of them.
+- **Tracer** (`TRACE_INK`, `TRACE_FACE`, `TRACE_PREV`, `TRACE_REST`): the
+  trace, its dashed closing segment, the rubber band and the vertex rings
+  are Tol white; the ring face is Tol black; the previous outline is Tol
+  muted indigo `#332288`; the resting disc is Tol black. White matches the
+  manual trace's candidate D on the review card (#450). An exhaustive
+  search over Tol's eight schemes (the 2021 tech note's, as
+  `tests/test_sldea_tol_colors.py` lists them) for these three, beside A,
+  B and C's Tol colors, found the best sets with all three at 3:1 on gray
+  147 at 19.14 (white vs A's cyan, protanopia), each of them white plus
+  two dark colors; three dark colors reach 16.96 at best. Re-run in review
+  with Tol's 16 August 2026 page, which adds a dark and a pale scheme: the
+  same best set at 19.14, and three dark colors at 16.16. Beside the Material A,
+  B and C still on main before #450, the worst pair is 21.33 (indigo vs
+  black, tritanopia).
+- **Contrast is 3:1 at the median, not everywhere.** At gray 147: white
+  3.07, indigo 3.96, black 6.84. At the frame's 95th percentile (gray 167)
+  white falls to 2.41 (the green: 1.44); at its 5th (gray 106) indigo falls
+  to 2.25 (the lavender: 2.26) and black to 3.88. Over that whole range
+  only black holds 3:1, and a halo is not allowed here.
+- **Candidate overlays in the tracer** wrap over A, B and C's colors only.
+  They used to wrap over all four, so a fourth detector candidate would
+  have been drawn in D's color, which is the trace's white once #450 lands.
+  `se.candidates` returns at most three, so none ever was; the wrap is a
+  guard.
+- **Nothing in the tracer gets a halo**, because a halo widens the line. The
+  dash pattern stays the second cue: the trace is solid with a ring at each
+  vertex, candidates dash (2, 4), the previous outline (6, 3), the resting
+  disc (4, 4). The rubber band now shares the trace's white. It differs
+  from the closing segment by its dash, (2, 4) against (3, 4), and by
+  following the pointer.
+- **One saved field is new: `palette`** (review fix, 2026-10-20). Each
+  trace label in edge_labels.json and each calibration round-set (its
+  record, and the end of its scale_calibration_log.txt line) names the
+  colors it was drawn in, `tol-454`. A record without it was drawn in the
+  Material colors. Its date cannot tell the two apart, because a lab PC
+  runs whatever build it last updated to, and the `#369` comparison and
+  any later analysis of the labels need that distinction. The log line
+  adds the field last, and only when the record names it, so every older
+  field keeps its place.
+
+**Not measured, and owed.**
+
+- Whether white instead of green moves hand placement in the circle and
+  two-point modes, or the verify-mode judgement. The A/B/A′ figures stay
+  the numbers to quote, as measured on the green dialog; a hand calibration
+  made from now on is made on the white one.
+- Whether the brighter context outlines in the tracer pull traced points
+  toward them. The resting disc goes from 1.15:1 to 6.84:1 on the membrane
+  and is on by default. The previous outline goes from 1.28:1 to 3.96:1 and
+  is off by default.
+- Bench check: on a real run, trace one frame twice with the resting disc
+  on and off, and run one hand calibration in the circle mode at 1 px
+  dashed; compare the circle's diameter with the automatic fit as §2.1a
+  did. On the bench checklist, `#369`.
+
 ## Calibration questions name their buttons and open over the calibration window (2026-10-05)
 
 **TL;DR:** the questions that follow a hand calibration (mostly met when
@@ -2630,6 +2734,59 @@ frames) matches main's baseline exactly, as it should: the cap lives in
 the dialog and the harness never opens it. Run on Windows (OpenCV 4.13)
 only; the Linux-Tk keyboard and messagebox behaviour is not
 bench-verified yet (follow-up checks in #347).
+
+## Edge Review's candidates are Tol cyan, blue, yellow and white, each outline on a black halo 1 px wider on each side (2026-10-19)
+
+**TL;DR:** the review card's candidates A, B, C and D are now Tol cyan,
+blue, yellow and white, replacing Material colors whose B and D were nearly
+the same color under color blindness. Every outline on the card is drawn
+over a black line 1 px wider on each side, so an outline now covers 4 px
+(5 px selected) instead of 2 px (3 px). Nobody has checked yet whether the
+wider outlines change which candidate an operator picks; that is a bench
+look (`#450`, listed in `#369`).
+
+**Observation.**
+
+- With the simulator in `tests/test_sldea_preview.py` (worst-case
+  CIEDE2000 over normal and Machado-2009 deutan, protan and tritan vision;
+  house floor 18), the Material set's B `#2196f3` and D `#e040fb` were
+  3.05 apart (deuteranopia).
+- The frame in the manual's Edge Review shot (run P3_6_2.5mL_20260729)
+  sits near gray 147 (median of the frame area). Alone on gray 147, Tol
+  cyan, blue and yellow reach 1.67, 1.53 and 1.57:1, under the 3:1 WCAG
+  minimum for graphics. Black reaches 6.84:1 there, and each of the four
+  colors stands off black by 4.46:1 (blue) or more.
+- Drawn outline by outline, a later outline's halo blacks out an earlier
+  one's color wherever two candidates run within a few px, as A and C do
+  on one arc in the manual's shot. At 2 px apart the per-line version lost
+  553 px of A's line.
+
+**Decision.**
+
+- `CAND_COLORS` (sldea_edge_gui.py): A `#66CCEE`, B `#4477AA`, C
+  `#CCBB44` (Tol bright), D `#FFFFFF` (Tol high-contrast). Worst pair: A
+  vs D, 19.14 (protanopia).
+- The card draws in three passes: every halo (`CAND_HALO`, black, line
+  width + 2), then every colored line, then the letter tags. Line widths
+  are unchanged: 3 px selected, 2 px others, 1 px for a staged D beside a
+  committed one.
+- Each swatch in the Candidates list has a 1 px black border. Its letter
+  is black, except on B's blue, where black is 4.46:1 and white 4.70:1
+  against the 4.5:1 text minimum, so B's letter is white (`CAND_LETTERS`;
+  review fix, 2026-10-20).
+- The hand tracer takes the new colors but no halo. It is where points are
+  placed on the edge, the case `#215` measured: a 3 px stroke along a soft
+  edge moved hand-placed calibration points by +2.07 % in diameter. Its
+  dashed overlays stay under 3:1 on gray 147 (1.53 to 1.67:1), each above
+  the color it replaces (1.02 to 1.37:1).
+- Only drawing changes. Nothing Edge Review measures or saves does.
+
+**Not measured yet (bench look in `#369`, section 1).**
+
+- Whether the wider outlines change which candidate an operator picks.
+  `#215` measured hand placement, not the choice between candidates.
+- The swatch row on the Linux bench fonts. On Windows at 96 dpi the border
+  takes 2 px of the row's 17 px slack.
 
 ## Edge Review says what went wrong at capture before the review starts, and Save keeps the runner's notes (2026-10-02)
 

@@ -529,10 +529,12 @@ def label_where(rec):
 
 def label_record(row_index, row, polygon, frame_shape, *, machine=None,
                  unpaired=None, zoom=1.0, overlays=None, elapsed_s=None,
-                 snapped=False, user=None, now=None):
+                 snapped=False, user=None, now=None, palette=None):
     """One edge_labels.json entry. `row` is the run CSV row dict; the
     polygon is full-res [(x, y), ...]. Self-contained for offline IoU:
     carries the frame shape and the machine candidate it competes with.
+    `palette` names the colors the tracer drew in (#454), since a label's
+    timestamp cannot say which build made it; None on older labels.
 
     REFUSES (ValueError) to build a label with no usable machine pairing
     unless the caller names the reason in `unpaired` (a key of
@@ -574,6 +576,7 @@ def label_record(row_index, row, polygon, frame_shape, *, machine=None,
         'frame_shape': [int(frame_shape[0]), int(frame_shape[1])],
         'zoom': round(float(zoom), 3),
         'overlays': dict(overlays or {}),
+        'palette': palette,
         'elapsed_s': None if elapsed_s is None else round(float(elapsed_s),
                                                           1),
         'snapped': bool(snapped),

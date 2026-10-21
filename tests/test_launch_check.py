@@ -32,6 +32,15 @@ of the programs, through the launchers' own Popen keywords, and stop
 every one through the Popen handle they hold. They need a Tk display and
 skip cleanly without one.
 
+A stand-in that exits at once is waited for (_exited) before Tk is
+pumped, so the check's first look finds it gone. "At once" is not "within
+CHECK_MS" on a busy Windows PC: there 36 of 1080 starts of the venv's
+`python -c "sys.exit(3)"` lived 5.08 to 5.21 s by the OS's own process
+times (the rest a median 0.14 s, none between 1 and 2 s), with under
+0.1 s of CPU, and the 5 s came before Python's first import (Gogojster,
+2026-10-19, #458). The check then saw such a stand-in running at CHECK_MS
+and rightly said "opened", and these cases failed.
+
 Run: .venv/bin/python tests/test_launch_check.py
 """
 import os as _os
@@ -87,6 +96,11 @@ PROGRAMS = {
 # one proc.poll() and a clock read; the bound is loose for a PC busy with
 # other suites, and still far under the POLL_MS a blocking wait would cost.
 LOOK_MAX_S = 0.10
+
+# How long a stand-in that exits at once may take to exit, or to print
+# its first line: over ten times the 5.2 s measured on a busy Gogojster
+# (#458). Longer than that is a failure, never a skip.
+EXIT_WAIT_S = 60
 
 
 class _Skip(Exception):
@@ -304,6 +318,29 @@ def _check_ms():
     return launch_check.CHECK_MS if launch_check else 2000
 
 
+def _cmds(b):
+    """The commands the stand-ins were started with, for a failure's
+    message. Not b.swap.calls itself: each call's keywords carry the
+    whole environment, which a pasted failure would publish."""
+    return [cmd for cmd, _kw in b.swap.calls]
+
+
+def _exited(b):
+    """Wait, without pumping Tk, until every stand-in `b` has started has
+    exited (proc.wait: the OS's word, not the check's), so the launch
+    check's first look finds each one gone (#458). When that wait passes
+    CHECK_MS, the look comes late, as it does in the app when its Tk
+    thread is held up, and the check still reports the exit it missed
+    (launch_check.watch looks for the exit before the time)."""
+    for p in b.swap.procs:
+        try:
+            p.wait(EXIT_WAIT_S)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"a stand-in that exits at once still ran after "
+                f"{EXIT_WAIT_S} s: {_cmds(b)}") from None
+
+
 # ---------------------------------------------------------------------------
 # the launchers
 # ---------------------------------------------------------------------------
@@ -319,7 +356,8 @@ def test_a_program_that_dies_at_once_is_said_with_its_last_lines():
         for program in PROGRAMS:
             apps[program] = app = _app(b.root, b.run)
             _press(app, program, b.run)
-        assert len(b.swap.procs) == len(PROGRAMS), b.swap.calls
+        assert len(b.swap.procs) == len(PROGRAMS), _cmds(b)
+        _exited(b)
         _until(b.root, lambda: len(b.boxes.errors) >= len(PROGRAMS),
                timeout=_check_ms() / 1000.0 + 5.0)
         said = {app.status() for app in apps.values()}
@@ -425,8 +463,17 @@ def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
             assert _until(b.root, lambda: 'opened' in app.status(),
                           timeout=_check_ms() / 1000.0 + 5.0), app.status()
             [log] = [os.path.join(b.logs, n) for n in os.listdir(b.logs)]
-            with open(log, encoding='utf-8') as f:
-                lines = f.read().splitlines()
+
+            def logged():
+                with open(log, encoding='utf-8') as f:
+                    return f.read().splitlines()
+            # it prints once its Python runs, which on a busy Windows PC
+            # can be seconds after "opened" (#458)
+            end = time.monotonic() + EXIT_WAIT_S
+            while len(logged()) < 3 and time.monotonic() < end:
+                time.sleep(0.05)
+            lines = logged()
+            assert len(lines) >= 3, lines
             assert lines[0].startswith('# Edge Review, started '), lines
             assert 'sldea_edge_gui.py' in lines[1], lines
             told = json.loads(lines[2])
@@ -468,6 +515,7 @@ def test_the_traceback_is_in_the_tail_after_many_printed_lines():
     with _Bench(CHATTY) as b:
         app = _app(b.root, b.run)
         app._sldea_open_tuner(b.run)
+        _exited(b)
         assert _until(b.root, lambda: b.boxes.errors,
                       timeout=_check_ms() / 1000.0 + 5.0), app.status()
         [(title, text)] = b.boxes.errors
@@ -489,6 +537,7 @@ def test_a_program_closed_at_once_reads_closed_with_no_box():
         for program in PROGRAMS:
             apps[program] = app = _app(b.root, b.run)
             _press(app, program, b.run)
+        _exited(b)
 
         def all_closed():
             return all(a.status() == f"{p} closed on {name}"
@@ -522,6 +571,7 @@ def test_during_a_run_the_box_waits_for_the_run_to_end():
         abort = tk.Button(b.root, text='■ Abort', command=app.sldea_abort)
         app._sldea_running = True
         app._sldea_open_edge_review(b.run)
+        _exited(b)
         assert _until(b.root, lambda: 'stopped' in app.status(),
                       timeout=_check_ms() / 1000.0 + 5.0), app.status()
         _until(b.root, lambda: False, timeout=3 * hold_s)
@@ -581,6 +631,7 @@ def test_a_held_box_waits_for_an_open_hv_alarm():
         app = _app(b.root, b.run)
         app._sldea_running = True
         app._sldea_open_edge_review(b.run)
+        _exited(b)
         assert _until(b.root, lambda: 'stopped' in app.status(),
                       timeout=_check_ms() / 1000.0 + 5.0), app.status()
         seen = {}
@@ -640,6 +691,7 @@ def test_a_signal_is_said_as_a_signal():
     with _Bench(killed) as b:
         app = _app(b.root, b.run)
         app._sldea_open_plot(b.run)
+        _exited(b)
         assert _until(b.root, lambda: b.boxes.errors,
                       timeout=_check_ms() / 1000.0 + 5.0)
         assert app.status().endswith('(ended by signal 15)'), app.status()

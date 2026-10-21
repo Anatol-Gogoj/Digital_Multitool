@@ -283,6 +283,28 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
             "on the Webcam tab to make them agree.")
 
 
+def draw_preflight_reticle(img):
+    """Draw the camera pre-flight's centering reticle on the PIL image
+    `img`, in place: a cross through the middle and a circle 0.32 of the
+    height in radius.
+
+    A framing guide, not an edge to place points on, so it may be widened:
+    Tol white on a Tol black halo 1 px wider on each side (#454; it was
+    the Material green #00e676 alone, 1.84:1 on the gray membrane), which
+    reads on the dark rim, the membrane and the bright foil it crosses.
+    Both halos go down before either white line. PIL draws an ellipse's
+    width inward, so the halo's box is 1 px larger to center it."""
+    from PIL import ImageDraw
+    dr = ImageDraw.Draw(img)
+    cx, cy = img.width / 2, img.height / 2
+    r = img.height * 0.32
+    for col, pad in (('#000000', 1), ('#FFFFFF', 0)):
+        dr.line([(cx, 0), (cx, img.height)], fill=col, width=1 + 2 * pad)
+        dr.line([(0, cy), (img.width, cy)], fill=col, width=1 + 2 * pad)
+        dr.ellipse([cx - r - pad, cy - r - pad, cx + r + pad, cy + r + pad],
+                   outline=col, width=2 + 2 * pad)
+
+
 # How often a launch error box held back by an SLDEA run looks for the
 # run's end (#429 review).
 SLDEA_LAUNCH_HOLD_MS = 500
@@ -4215,14 +4237,26 @@ LOGGING:
         label."""
         try:
             outdir, name = self._sldea_folder_redraw()
-            if self._sldea_folder_pause is not None:
-                self.root.after_cancel(self._sldea_folder_pause)
-                self._sldea_folder_pause = None
+            self._sldea_folder_unpause()
             if self._sldea_folder_wanted(outdir, name):
                 self._sldea_folder_pause = self.root.after(
-                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_check)
+                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_paused)
         except Exception:
             pass
+
+    def _sldea_folder_unpause(self):
+        """Cancel the pause the last key armed, if it still waits."""
+        pause, self._sldea_folder_pause = self._sldea_folder_pause, None
+        if pause is not None:
+            try:
+                self.root.after_cancel(pause)
+            except Exception:
+                pass
+
+    def _sldea_folder_paused(self):
+        """The pause after the last key is up: check the folder."""
+        self._sldea_folder_pause = None
+        self._sldea_folder_check()
 
     def _sldea_folder_show(self, outdir, name, found, slow=False):
         text, warn, full = sldea_profile.run_folder_line(
@@ -4272,8 +4306,14 @@ LOGGING:
         """Send the check of the run folder the boxes name out on its
         thread, or, while one is still out, ask for another when it is
         back. A check stuck on a folder the boxes no longer name is
-        abandoned instead of waited for."""
-        self._sldea_folder_pause = None
+        abandoned instead of waited for.
+
+        When the poll calls this itself, a key's pause may still wait: it
+        is cancelled, as this check reads the boxes now and a later key
+        arms another. Left to run, it asked for the same folder again once
+        this check was back, and the line's <Destroy> could not cancel it
+        (#459)."""
+        self._sldea_folder_unpause()
         try:
             outdir, name = self._sldea_folder_boxes()
             if not self._sldea_folder_wanted(outdir, name):
@@ -5445,7 +5485,7 @@ LOGGING:
         # override: that word is kept for the flat gate below.
         self._sldea_preflight_seen['frame'] = True
 
-        from PIL import Image, ImageDraw, ImageTk
+        from PIL import Image, ImageTk
         try:
             focus = webcam.focus_score(frame)
         except Exception:
@@ -5492,13 +5532,7 @@ LOGGING:
         h, w = frame.shape[:2]
         scale = 520 / w
         img = Image.fromarray(frame).resize((520, int(h * scale)))
-        dr = ImageDraw.Draw(img)
-        cx, cy = img.width / 2, img.height / 2
-        dr.line([(cx, 0), (cx, img.height)], fill='#00e676', width=1)
-        dr.line([(0, cy), (img.width, cy)], fill='#00e676', width=1)
-        r = img.height * 0.32
-        dr.ellipse([cx - r, cy - r, cx + r, cy + r], outline='#00e676',
-                   width=2)
+        draw_preflight_reticle(img)
         photo = ImageTk.PhotoImage(img)
         lbl = tk.Label(win, image=photo)
         lbl.image = photo               # keep a reference

@@ -49,6 +49,62 @@ def test_hot_slot_follows_selection_before_any_result():
     assert gui.hot_slot([], None, 0) is None
 
 
+def _contrast(hex1, hex2):
+    """WCAG contrast ratio between two sRGB colors."""
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import test_sldea_preview as cvd
+
+    def lum(hex_color):
+        h = hex_color.lstrip('#')
+        r, g, b = (cvd._lin(int(h[i:i + 2], 16) / 255) for i in (0, 2, 4))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    hi, lo = sorted((lum(hex1), lum(hex2)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_candidate_colors_are_tol_and_survive_color_blindness():
+    """#450: the four candidate colors are Paul Tol colors, and every
+    pair stays apart under simulated color blindness: worst-case
+    CIEDE2000 over normal and Machado-2009 deutan/protan/tritan vision
+    clears the house floor of 18, with the repo's own simulator
+    (tests/test_sldea_preview.py). The Material set this replaced is
+    held to the same bar and must FAIL it, so the check can fail.
+
+    And the halo the card draws them on: each color stands off it by
+    3:1 or more (the WCAG non-text minimum), and it stands off the
+    membrane, where Tol's yellow alone does not."""
+    import sldea_edge_gui as gui
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import test_sldea_preview as cvd
+    cols = list(gui.CAND_COLORS)
+    assert len(cols) == len(gui.CAND_KEYS) == 4
+    assert len({c.upper() for c in cols}) == 4, cols
+    stray = {c.upper() for c in cols + [gui.CAND_HALO]} - cvd.TOL
+    assert not stray, f"colors outside Paul Tol's schemes: {stray}"
+
+    def worst(palette):
+        return min((cvd._worst_de(a, b), a, b)
+                   for i, a in enumerate(palette) for b in palette[i + 1:])
+    de, a, b = worst(cols)
+    assert de >= cvd.CVD_FLOOR, (
+        f"{a} vs {b}: worst-case CIEDE2000 {de:.2f} < {cvd.CVD_FLOOR}")
+    # the number in the CAND_COLORS comment, rounded down, so an edit
+    # that makes the worst pair worse fails here
+    assert de >= 19.14, (round(de, 3), a, b)
+    # the set this replaced; proves the bar can fail at all
+    old, oa, ob = worst(['#00c853', '#2196f3', '#ff9100', '#e040fb'])
+    assert old < cvd.CVD_FLOOR, old
+    assert {oa, ob} == {'#2196f3', '#e040fb'} and 2.5 < old < 3.5, \
+        (round(old, 3), oa, ob)
+    for c in cols:
+        assert _contrast(c, gui.CAND_HALO) >= 3.0, \
+            (c, _contrast(c, gui.CAND_HALO))
+    # the membrane on the manual's bench frame sits near gray 147: the
+    # halo stands off it, Tol's yellow alone does not (why the halo)
+    assert _contrast(gui.CAND_HALO, '#939393') >= 3.0
+    assert _contrast('#CCBB44', '#939393') < 3.0
+
+
 def test_card_geometry_contain_fit_center_and_cap():
     """#178: the card contain-fits the view (aspect kept), is centered,
     and upscale is capped so a huge monitor does not interpolate mush."""
@@ -360,6 +416,142 @@ def test_card_tracks_the_view_and_draws_centered():
         # a same-size event must not schedule anything
         app._canvas_resized(Ev(1200, 800))
         assert app._resize_job is None
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _card_pixels(app, i, cands, trace=None):
+    """The review card of frame `i` at scale 1 (contour px = card px) as
+    an HxWx3 array, drawn with `cands` in slots A.. and `trace` as D."""
+    if trace is None:
+        app.traces.pop(i, None)
+    else:
+        app.traces[i] = trace
+    img = app._render_card(i, cands, None, view=(320, 240))
+    assert img.size == (320, 240), img.size
+    return np.asarray(img.convert('RGB'))
+
+
+def _rgb(hex_color):
+    h = hex_color.lstrip('#')
+    return tuple(int(h[k:k + 2], 16) for k in (0, 2, 4))
+
+
+def _square(lo, hi):
+    return np.array([[lo, lo], [hi, lo], [hi, hi], [lo, hi]], np.int32)
+
+
+def test_every_card_outline_sits_on_a_dark_halo():
+    """#450: three of the four Tol candidate colors read at only
+    1.5-1.7:1 alone on the gray membrane, so every outline on the review
+    card is drawn over a black line 1 px wider on each side. Across the
+    left edge of each slot's outline, on the synthetic run's flat gray,
+    the pixels read frame, halo, color, halo, frame, and nothing else."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('card halo')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_halo_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app.cand_var.set(0)                    # A draws at the hot weight
+        # concentric squares, left edges at x = 20, 40, 60 (A, B, C) and
+        # 80 (D, a staged trace); row 120 crosses only their left sides
+        cands = [{'method': m, 'contour': _square(lo, 240 - lo)}
+                 for m, lo in (('disc-fit', 20), ('diff-hi', 40),
+                               ('diff-lo', 60))]
+        trace = {'method': 'manual-trace', 'contour': _square(80, 160),
+                 'trace_points': [(80.0, 80.0), (160.0, 80.0),
+                                  (160.0, 160.0)]}
+        arr = _card_pixels(app, i, cands, trace)
+        halo = _rgb(gui.CAND_HALO)
+        for slot, x in enumerate((20, 40, 60, 80)):
+            color = _rgb(gui.CAND_COLORS[slot])
+            kinds = []
+            for px in arr[120, x - 10:x + 11]:
+                k = ('c' if tuple(px) == color else
+                     'k' if tuple(px) == halo else 'f')
+                if not kinds or kinds[-1] != k:
+                    kinds.append(k)
+            assert kinds == ['f', 'k', 'c', 'k', 'f'], (
+                gui.CAND_KEYS[slot], kinds,
+                [tuple(p) for p in arr[120, x - 4:x + 5]])
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_one_candidates_halo_never_covers_another_candidates_line():
+    """#450: every halo goes down before any color. Drawn line by line
+    instead, B's halo would black out part of A's line wherever the two
+    run within a few px, which real frames do (A and C share an arc in
+    the manual's bench shot). Pinned at 2-6 px apart: every pixel of A's
+    color drawn alone survives with B beside it, except the pixels B's
+    own line covers."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('halo order')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_halo_order_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app.cand_var.set(0)
+        a_col, b_col = _rgb(gui.CAND_COLORS[0]), _rgb(gui.CAND_COLORS[1])
+        a = {'method': 'disc-fit', 'contour': _square(20, 220)}
+        # a contour of 2 points is skipped, so B keeps slot B on its own
+        skip = {'method': 'disc-fit',
+                'contour': np.array([[0, 0], [1, 1]], np.int32)}
+        a_alone = np.all(_card_pixels(app, i, [a]) == a_col, axis=2)
+        assert a_alone.sum() > 400, a_alone.sum()
+        for gap in range(2, 7):
+            b = {'method': 'diff-hi',
+                 'contour': _square(20 + gap, 220 - gap)}
+            both = _card_pixels(app, i, [a, b])
+            b_alone = np.all(_card_pixels(app, i, [skip, b]) == b_col,
+                             axis=2)
+            a_both = np.all(both == a_col, axis=2)
+            # the letter tags sit right of x = 220 and overlap each other
+            lost = (a_alone & ~b_alone & ~a_both)[:, :200]
+            assert not lost.any(), (
+                f"{gap} px apart: {int(lost.sum())} px of A's line went "
+                f"black under B, first at (y, x) "
+                f"{tuple(np.argwhere(lost)[0])}")
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_candidate_swatches_carry_a_dark_border():
+    """#450: D's swatch is white and A's pale cyan, both close to the
+    panel's own gray, so every swatch in the Candidates list has a 1 px
+    black border, and its letter reads 4.5:1 or more on its swatch."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('candidate swatches')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_swatch_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert len(app.cand_swatches) == 4
+        for k, sw in enumerate(app.cand_swatches):
+            assert str(sw.cget('bg')).upper() == gui.CAND_COLORS[k].upper()
+            assert str(sw.cget('text')) == gui.CAND_KEYS[k]
+            fg = str(sw.cget('fg'))
+            ratio = _contrast(fg, gui.CAND_COLORS[k])
+            assert ratio >= 4.5, (gui.CAND_KEYS[k], fg, ratio)
+            assert int(str(sw.cget('highlightthickness'))) == 1
+            assert str(sw.cget('highlightbackground')).upper() == \
+                gui.CAND_HALO
     finally:
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
@@ -3550,6 +3742,8 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
                    '(IS-the-anchor)'):
             assert f_ in line, (f_, line)
         assert '0.00%' not in line, line
+        # the colors it was drawn in, which its date cannot say (#454)
+        assert line.endswith(' palette=' + gui.TOOL_PALETTE), line
         # --- and Save persists all of it
         gui.se.save_scale_anchor(app.rundir, {
             'method': ref['method'], 'cal_mode': ref['cal_mode'],

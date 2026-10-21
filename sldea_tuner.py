@@ -62,7 +62,22 @@ SLIDER_HINTS = {
                      'electrode.',
     'wrinkle_ratio': 'texture-vs-baseline index that counts as wrinkled',
 }
-PANEL_COLORS = ['#00e676', '#40c4ff', '#ff9100']   # best, 2nd, 3rd
+# Best, 2nd and 3rd candidate (#454, 2026-10-19): the colors Edge Review
+# gives its first three slots A, B and C (#450), Paul Tol's bright cyan,
+# blue and yellow, so the 1st, 2nd and 3rd candidate wear the same colors
+# in every tool (which candidate ranks where can differ: Edge Review adds
+# a hysteresis bonus, se.candidates' prev_method, the tuner does not). Their
+# worst-case CIEDE2000 over normal, deutan, protan and tritan vision is
+# 24.35 (cyan vs blue, protanopia), measured with the simulator in
+# tests/test_sldea_preview.py; the Material set they replace was 9.15
+# (#00e676 vs #40c4ff, tritanopia), under the house floor of 18. Alone on
+# a gray frame (about 147 of 255 on bench frames) they reach only
+# 1.5-1.7:1, so every outline runs on a PANEL_HALO line 1 pt wider on each
+# side. The line style is the cue that needs no color: the best outline
+# is solid, thick and filled, the 2nd dashed, the 3rd dotted.
+PANEL_COLORS = ['#66CCEE', '#4477AA', '#CCBB44']   # best, 2nd, 3rd
+PANEL_STYLES = ['-', '--', ':']
+PANEL_HALO = '#000000'                             # Tol high-contrast black
 
 
 def _fkv(row):
@@ -207,14 +222,23 @@ def render(ax, panel, cands, scale, fill=True, settings=None):
     # clear previous overlay artists
     for art in list(ax.lines) + list(ax.collections) + list(ax.patches):
         art.remove()
+    outlines = []
     for k, c in enumerate(cands):
         pts = np.asarray(c['contour'], float)
         if len(pts) < 3:
             continue
         xs = np.append(pts[:, 0], pts[0, 0])
         ys = np.append(pts[:, 1], pts[0, 1])
-        col = PANEL_COLORS[min(k, len(PANEL_COLORS) - 1)]
-        ax.plot(xs, ys, color=col, lw=2.0 if k == 0 else 1.0)
+        j = min(k, len(PANEL_COLORS) - 1)
+        outlines.append((k, xs, ys, PANEL_COLORS[j], PANEL_STYLES[j],
+                         2.0 if k == 0 else 1.0))
+    # Every halo goes down before any color, so no halo covers another
+    # candidate's line where two outlines run close (the order #450 found
+    # for Edge Review's card); the best outline is drawn last, on top.
+    for _k, xs, ys, _col, _ls, lw in outlines:
+        ax.plot(xs, ys, color=PANEL_HALO, lw=lw + 2, zorder=2)
+    for k, xs, ys, col, ls, lw in reversed(outlines):
+        ax.plot(xs, ys, color=col, lw=lw, ls=ls, zorder=3)
         if k == 0 and fill:
             ax.fill(xs, ys, color=col, alpha=0.18)
     ax.set_title(_panel_title(panel, cands, scale, settings), fontsize=8.5,

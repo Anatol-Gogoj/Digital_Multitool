@@ -152,7 +152,7 @@
    },
    {
     "label": "Voltage (V)",
-    "what": "AC test level, 0.01 to 2.0 V; 1.0 V is standard and the meter clamps anything higher to 2.0 V."
+    "what": "AC test level, 0.01 to 2.0 V; 1.0 V is standard, and a level outside that stops Apply with a Configuration Error."
    },
    {
     "label": "DC Bias (V) + Bias ON",
@@ -209,7 +209,7 @@
    "7. For curves: set the sweep axes and click Start Sweep — results go to CSV."
   ],
   "cautions": [
-   "The meter silently clamps the AC level at 2.0 V and frequency at 500 kHz — no error appears; readings simply use the clamped value.",
+   "Apply stops with a Configuration Error at an AC level outside 0.01 to 2.0 V or a frequency outside 100 Hz to 500 kHz. What it sent before the bad value (the mode, and for a bad level the frequency) has already reached the meter, so fix the value and Apply again.",
    "Nothing reaches the meter until Apply Configuration; the Primary/Secondary readouts are labeled by the last APPLIED mode, not whatever the dropdown currently shows.",
    "A sweep switches the meter to the dropdown's mode and leaves frequency/voltage at the last sweep point — re-Apply your configuration before trusting spot readings afterwards.",
    "DC bias stays on until you untick Bias ON and click Apply — do not leave bias across a bias-sensitive part.",

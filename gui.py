@@ -1510,8 +1510,9 @@ class InstrumentControlGUI:
         self.lcr_volt.grid(row=2, column=1, padx=10, pady=5)
         self.lcr_volt.insert(0, "1.0")
         add_tooltip(self.lcr_volt,
-                    "AC test level, 0.01 to 2.0 V. 1.0 V is standard; the "
-                    "meter clamps anything higher to 2.0 V.")
+                    "AC test level, 0.01 to 2.0 V. 1.0 V is standard; a "
+                    "level outside that stops Apply with a Configuration "
+                    "Error.")
 
         # Bias / aperture / range / correction (issue #44) -- laid out to
         # the RIGHT of mode/freq/volt so the tab gets no taller (issue #26).

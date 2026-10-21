@@ -182,6 +182,12 @@ def test_the_lcr_voltage_line_says_what_apply_does():
     apply = apply[:apply.index('\n    def ')]
     assert 'self.lcr.set_voltage(volt)' in apply
     assert 'messagebox.showerror("Configuration Error", str(error))' in apply
+    # nor do the Voltage tooltip or the manual's LCR entry say it clamps
+    tab = src[src.index('def create_lcr_tab'):]
+    tab = tab[:tab.index('\n    def ')]
+    assert 'clamp' not in tab, "the LCR tab still says the meter clamps"
+    content = json.loads(_read('docs', 'manual-src', 'content.json'))
+    assert 'clamp' not in json.dumps(content['lcr']).lower()
 
 
 def test_the_pages_are_short():

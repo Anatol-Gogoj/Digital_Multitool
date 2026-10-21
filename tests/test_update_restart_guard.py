@@ -954,8 +954,9 @@ PROCESS_ENDERS = {
         {'root.destroy': 1, 'os.execv': 1}),
     'gui.InstrumentControlGUI._on_app_close': (
         'shutdown', 'window close: asks a running run to stop and waits '
-                    'up to ~3 s for it, switches both SG outputs off, then '
-                    'destroys the window',
+                    'up to ~3 s for it, zeroes the run\'s SG channel if the '
+                    'run has not finished (#460), switches both SG outputs '
+                    'off, then destroys the window',
         {'root.destroy': 1}),
     'gui:__main__': (
         'startup', 'the app failed to build, so no run can exist yet',

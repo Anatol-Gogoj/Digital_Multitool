@@ -67,7 +67,7 @@
    "7. Close the window when done — outputs are switched off automatically."
   ],
   "cautions": [
-   "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped (best-effort: the run gets about 3 s to set its signal-generator channel to 0 V and switch it off; then both signal-generator outputs are switched off without zeroing the offset), and instruments return to front-panel control.",
+   "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped (best-effort: the run gets about 3 s to set its signal-generator channel to 0 V and switch it off; a run still going after that has its channel set to 0 V by the close, then both signal-generator outputs are switched off), and instruments return to front-panel control.",
    "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",

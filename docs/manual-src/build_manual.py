@@ -36,8 +36,9 @@ _sh["workflow"][6] = ("7. Close the window when done — sig-gen outputs and "
 _sh["cautions"][0] = (
     "Closing the window switches off sig-gen outputs and LCR bias and stops "
     "a running SLDEA test (best-effort: it gives the run about 3 s to set "
-    "its SG channel to 0 V and switch it off, then switches both SG outputs "
-    "off without zeroing the offset) — but the DC "
+    "its SG channel to 0 V and switch it off; a run still going after that "
+    "has its channel set to 0 V by the close, then both SG outputs go "
+    "off) — but the DC "
     "supply output is never touched. End a live HV run with ■ Abort, not the "
     "close button.")
 _sh["cautions"][1] = (

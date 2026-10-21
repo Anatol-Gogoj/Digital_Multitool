@@ -10,7 +10,8 @@ tools. Pinned here:
 * the program opens on a run whose recording is in its folder even before
   video_edges.csv exists, so the window itself says what is missing; a
   folder with no video, and a window that cannot open, are said in a box
-  as well as on the console;
+  as well as on the console, then exit 0 (not a failure, so the SLDEA tab
+  adds no box of its own, #473) and 1;
 * the plot window's right-click menu offers Video review... for the run
   that was clicked, live only when that run's folder holds a recording,
   and the window starts one review per run;
@@ -276,7 +277,7 @@ def test_the_program_opens_on_a_recording_whose_edges_are_not_made_yet():
             # a folder with no video at all: refused before any review
             # window, and in words on screen as well as on the console
             plain = _run(p, 'SLDEA_20261006_100500')
-            assert vr.main([plain]) == 2
+            assert vr.main([plain]) == 0
             assert len(built) == 1, "a review window for a run with no video"
             assert not any(r.looped for r in made[1:]), made
             assert len(boxes.infos) == 1 and not boxes.errors, boxes.infos
@@ -293,6 +294,33 @@ def test_the_program_opens_on_a_recording_whose_edges_are_not_made_yet():
     finally:
         vr.VideoReviewWindow = real_win
         shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_folder_with_no_video_exits_0_so_the_tab_says_it_once():
+    """#473 review. The SLDEA tab now watches the program for
+    launch_check.WATCH_MS after it reads as opened, and says any exit
+    code but 0 in that time in an error box of its own. A folder with no
+    video is not a failure, and the program has said so in its own info
+    box, so it exits 0: an operator who clicks OK in time gets no second,
+    error-styled box. Exit code 2 used to put one there. The process's
+    exit code is main()'s: the __main__ block hands it to sys.exit. A
+    window that cannot open still exits 1 (the case below)."""
+    import inspect
+    import sldea_video_review as vr
+    p = _tmp()
+    try:
+        plain = _run(p, 'SLDEA_20261006_100500')
+        with _program_roots() as made, _review_boxes() as boxes:
+            assert vr.main([plain]) == 0
+            assert not any(r.looped for r in made), made
+            assert len(boxes.infos) == 1 and not boxes.errors, boxes.errors
+            assert 'There is no video of SLDEA_20261006_100500' in \
+                boxes.infos[0][1], boxes.infos
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+    src = inspect.getsource(vr)
+    assert "if __name__ == '__main__':\n    sys.exit(main(sys.argv[1:]))" \
+        in src.replace('\r\n', '\n'), "main()'s code is not the exit code"
 
 
 def test_a_review_that_cannot_open_says_why_on_screen():

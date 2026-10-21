@@ -768,7 +768,12 @@ def main(argv):
               f"detection on every frame when that was ticked. Its "
               f"progress, or the reason it stopped, is in run.log in that "
               f"folder.", error=False)
-        return 2
+        # 0, not 2 (#473): the box above has said it, and it is not a
+        # failure. The SLDEA tab says any other exit code in the first
+        # launch_check.WATCH_MS (30 s) as one, in an error box of its own,
+        # so a 2 here put a second box behind this one whenever OK came
+        # in that time. "Could not open" below stays 1: that is a failure.
+        return 0
     root = tk.Tk()
     if open_standalone(root, rundir) is None:
         return 1

@@ -605,9 +605,10 @@ def test_a_program_closed_after_it_opened_is_not_said():
 
 def test_a_death_after_opened_during_a_run_waits_for_the_run_too():
     """#473 with the #429 review's hold, HV-relevant: a box from a death
-    after "opened" must not stand between the operator and Abort either. The worker opens Edge Review itself at a run's end, so its
-    late death can come while the run is going: the status line says it
-    at once, and the box waits for the run's end."""
+    after "opened" must not stand between the operator and Abort either.
+    The worker opens Edge Review itself at a run's end, so its late death
+    can come while the run is going: the status line says it at once,
+    and the box waits for the run's end."""
     gui = _gui()
     hold_s = gui.SLDEA_LAUNCH_HOLD_MS / 1000.0
     gd = _tmp()
@@ -646,25 +647,77 @@ def test_the_look_ends_when_the_window_closes():
     closed in that time takes its timer with it: none is left to fire
     into a window that is gone (Tk would say "invalid command name"), and
     the look lets go of the program's handle, as _sldea_folder_stop does
-    for the run folder line. The program itself is not touched."""
+    for the run folder line. Every look the app holds, not only the
+    newest: two programs are started from one window. The programs
+    themselves are not touched."""
     with _Bench(STAYS) as b:
         name = os.path.basename(b.run)
         app = _app(b.root, b.run)
+        _press(app, 'Edge tuner', b.run)
         _press(app, 'Plot window', b.run)
+        # the bar shows the newer start; the older one's check came first
         _opened(b, {'Plot window': app}, name)
-        [w] = _watches(app)
-        job = w.job
-        assert not w.done and job is not None, (w.done, job)
+        looks = _watches(app)
+        assert len(looks) == 2, looks
+        jobs = [w.job for w in looks]
+        assert not any(w.done for w in looks) and None not in jobs, jobs
 
         def pending():
             return set(b.root.tk.splitlist(b.root.tk.call('after', 'info')))
-        assert job in pending(), (job, pending())
+        assert set(jobs) <= pending(), (jobs, pending())
         b.root.destroy()
-        assert w.done and w.job is None and w.proc is None, \
-            (w.done, w.job, w.proc)
-        assert job not in pending(), (job, pending())
+        for w in looks:
+            assert w.done and w.job is None and w.proc is None, \
+                (w.done, w.job, w.proc)
+        assert not set(jobs) & pending(), (jobs, pending())
         assert _watches(app) == []
-        assert b.swap.procs[0].poll() is None, "the program was stopped"
+        assert [p.poll() for p in b.swap.procs] == [None, None], \
+            "a program was stopped"
+
+
+class _HeldProc:
+    """A Popen with no process behind it: running (poll() None) until
+    the test sets `code`. No start of its own to be held, so a case built
+    on it runs the same on every PC."""
+
+    def __init__(self):
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+
+def test_a_signal_after_opened_is_said_as_a_signal():
+    """#473 review. On Linux a program a signal ends after "opened" (a
+    segfault, a kill) has a negative return code: it is said like any
+    other death then, as the signal, never taken for a normal close (a
+    test of code > 0 would have dropped it). A stand-in Popen gives the
+    code, so this runs on Windows too, where no signal gives one."""
+    gui = _gui()
+    with _Bench(STAYS) as b:
+        name = os.path.basename(b.run)
+        held = []
+
+        class _Fake:
+            def Popen(self, cmd, **kw):
+                held.append(_HeldProc())
+                return held[-1]
+        gui.subprocess = _Fake()
+        app = _app(b.root, b.run)
+        _press(app, 'Plot window', b.run)
+        _opened(b, {'Plot window': app}, name)
+        [proc] = held
+        proc.code = -15
+        assert _until(b.root, lambda: b.boxes.errors,
+                      timeout=launch_check.LATE_POLL_MS / 1000.0 + 5.0), \
+            app.status()
+        st = app.status()
+        assert st.startswith(f"Plot window stopped on {name} within "), st
+        assert st.endswith(" s of starting (ended by signal 15)"), st
+        [(title, text)] = b.boxes.errors
+        assert title == 'SLDEA plot', title
+        assert '(ended by signal 15).' in text.split('\n', 1)[0], text
+        assert 'It printed nothing.' in text, text
 
 
 def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():

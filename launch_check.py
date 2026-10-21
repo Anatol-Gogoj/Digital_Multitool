@@ -25,9 +25,10 @@ up, and then die on an import or a run it cannot take. watch() therefore
 keeps looking, every LATE_POLL_MS, until WATCH_MS after the start, and
 calls `late(code, secs)` if the program exits in that time. WATCH_MS is a
 bound, not a measurement: about six times that hold, plus the 0.2 to
-0.33 s these programs take to import on ClaudeBox (#429). A program that
-dies later than that is still not said. At its end the watch lets go of
-the process, and the caller's window can end it at once (Watch.cancel).
+0.33 s these programs take to import on ClaudeBox (PR #445's body). A
+program that dies later than that is still not said. At its end the
+watch lets go of the process, and the caller's window can end it at once
+(Watch.cancel).
 
 Why a file and not a pipe. The program outlives the app, so nothing would
 drain a pipe once the app has gone, and a full pipe stops the program at

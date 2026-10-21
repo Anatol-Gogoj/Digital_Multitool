@@ -6,6 +6,95 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.7 (2026-10-21, pre-release)
+
+**TL;DR:** A window close during a LIVE run can no longer let the run's own
+start-up writes switch its signal generator channel back on, and when the
+close has already zeroed the channel, run.log says so instead of a false
+FAILED TO ZERO alarm. Usage Tips open in a window you can resize and scroll,
+at about half their old length. The manual was not rebuilt for this release,
+and none of this is bench-checked yet: the checks are in #369.
+
+### SLDEA test tab
+
+- **A LIVE run's first SG writes are made under the SG's I/O lock** (#492).
+  Load and polarity, DC at 0 V and output ON now go out holding the lock,
+  with the stop checked again under it. Before, a window close that came
+  while those writes waited behind a long Continuous Logging query could
+  switch the outputs off first, and the queued writes then switched the
+  run's channel back on at 0 V. Nothing new is sent; only the order and the
+  locking changed.
+- **run.log tells the truth after a window close zeroed the run** (#493).
+  When the close has set the run's channel to 0 V and switched it off (or
+  switched off the channel of a run that never switched it on) and closed
+  the SG session first, the run's own zero finds the session closed. The
+  log now says what the close did, instead of "FAILED TO ZERO THE SG
+  OUTPUT" and the HV NOT ZEROED alarm. Every other failed zero keeps the
+  full alarm, and the SCPI sent is unchanged. ■ Abort is still the way to
+  end a run.
+- **A program the tab started is watched for 30 s** (#488). The tab stopped
+  watching Edge Review, the tuner, the plot window and the video review once
+  they said "opened" at 2 s, and on some Windows PCs a start is held about 5 s, so a
+  later death went unreported. Such a death is now reported like an early
+  one, in a box that waits for a running SLDEA run to end. The video review
+  exits cleanly after its own "no video yet" box, so no second box follows.
+- **The live view draws the pre-flight's reticle** (#489): one white
+  reticle on a black halo for both camera views, instead of cyan.
+
+### Edge Review and the SLDEA tools
+
+- **The area plot marks each frame as the preview does** (#487). In
+  `area_vs_voltage.png` the camera warm-up is an open circle, the 0 kV
+  baseline a red diamond, post-ramp a blue triangle and pre-ramp a yellow
+  square, with the preview's legend words. The warm-up's circle is drawn
+  larger and underneath, so a warm-up and a baseline of one area show as
+  the red diamond inside a ring. Before, the baseline was a black triangle,
+  post-ramp a circle and the warm-up frame was missing. Both plots now take
+  their marks from one table in `sldea_preview.py`. The plot window keeps
+  its own shapes for the legs and advisories.
+- **Each diagnostic map has a color bar** (#486) that says what dark means,
+  numbered in the map's own values. Since v1.4.6 the maps draw high values
+  dark, the reverse of magma, so without a key an old `sldea_diag.png` and
+  a new one read in opposite directions. The bad-data gray is set with
+  `with_extremes`, which drops matplotlib's pending-deprecation warning
+  without changing a pixel.
+- **Edge Review moves a letter tag off an earlier one** (#491), so the B and
+  C tags no longer overlap, and the tuner's self-test discs get soft edges.
+
+### Instrument tabs
+
+- **Usage Tips open in their own window** (#490). Each tab's Show Usage Tips
+  button opens a window that resizes, scrolls and stays above the app,
+  instead of the narrow message box that wrapped the text down the screen.
+  The six tips are cut from 2082 words to 1135, with the safety lines first
+  and worded to match what the code does: closing the app only tries to
+  switch the SG outputs off, Restart leaves them as they are, and a LIVE run
+  ends with ■ Abort. The facts that no longer fit moved into the manual's
+  sources, so they reach the manual at its next rebuild.
+
+### Tests
+
+- **A new suite catches the #468 bug class** (#484) without building a
+  window: it fails when a function rebinds an imported name such as `uc`,
+  or reads it above its own local `import`.
+- **Two flaky load tests check their own timing** (#485), the webcam
+  auto-start and live view tests; the app was not at fault.
+- **Pixel tests** for the contact sheet's foil outline, the two-point
+  calibration's chord and the pre-flight's reticle (#489).
+
+### Manual
+
+Not rebuilt for this release; the committed manuals and the latest PDF are
+still v1.4.6's. Its Usage Tips text, area plot and diagnostic figures, and
+the page-flow fixes of #491 come with the next rebuild.
+
+### Not bench-checked
+
+The lines are in #369: the start-up writes under the lock (#492, section 3),
+the 30 s launch watch with a program killed after it opened, including the
+Linux signal case, and the video review's single box (#488, section 1), and
+the Usage Tips window on the Linux bench (#490, section 1).
+
 ## v1.4.6 (2026-10-21, pre-release)
 
 **TL;DR:** The SLDEA tab loads on the Linux bench again; in v1.4.5 it did not

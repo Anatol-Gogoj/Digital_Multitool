@@ -6,6 +6,78 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.6 (2026-10-21, pre-release)
+
+**TL;DR:** The SLDEA tab loads on the Linux bench again; in v1.4.5 it did not
+(#449). Every color the app draws or writes in is now a Paul Tol
+colorblind-safe one, so OK reads blue, warnings and errors brown, and a red
+button means HV can be on. Closing the window during a LIVE run now sets the
+run's signal generator channel to 0 V before it switches the outputs off.
+None of this is bench-checked yet: the checks are in #369.
+
+### SLDEA test tab
+
+- **The tab loads on the Linux bench** (#449, a v1.4.5 hotfix on main since
+  2026-10-09). The DRY RUN box's check mark read its border and padding with
+  `int()`, and the bench's Tk gives those in units, so the tab said "This tab
+  failed to load". The sizes are now read as pixels, and a surprise there
+  leaves the theme's plain box instead of a dead tab. Edge Review's radio
+  dots had the same flaw and the same fix.
+- **Window close zeroes a LIVE run's channel** (#460). If a LIVE run has not
+  stopped within the close's wait of about 3 s, the close sets the run's SG
+  channel to 0 V, then switches both SG outputs off. Before, the run's last
+  level stayed set, and the next Output ON put it back on the Trek. Once a
+  stop is asked, the run writes no new level; the stop is checked again
+  under the SG's I/O lock. ■ Abort is still the way to end a run.
+- **■ Abort is described as what it does** (#452): the run's SG channel to
+  0 V in one write, then its output off. The run log, a tooltip, the manual,
+  BENCH_TEST §O and CLAUDE.md said "ramp"; the code never ramped. Words only.
+- **The run folder line keeps track of its typing pause** (#459). When the
+  poll checked the folder itself, the pause the last key had armed still
+  fired, checked the same folder a second time, and could not be cancelled
+  when the window closed.
+
+### Colors (Paul Tol, colorblind-safe)
+
+- **Words and banners** (#462). Status lines, readouts, hints, tooltips and
+  banners in every window take their colors from one new module,
+  `ui_colors.py`, and every word reaches 4.5:1 on the Linux bench's gray. No
+  Tol green does both jobs, so connected, done and OK are blue; warnings and
+  errors share one brown, and the words or the ⚠ say which. On a button, red
+  means energized: the LIVE ▶ Run button and Output: ON on the Signal Gen and
+  PSU tabs. The DRY ▶ Run button is blue, the DRY RUN row pale blue and the
+  LIVE row orange.
+- **Edge Review's candidates** (#450): A cyan, B blue, C yellow and D white,
+  each outline on a black edge so it shows on the gray membrane. Outlines
+  are 2 px wider than before (4 px, 5 px selected). Under color blindness the
+  old B and D were nearly one color.
+- **The SLDEA tools** (#454): the tuner, the diagnostic sheet and figure, the
+  calibration dialog, the hand tracer, the area plot, the overlay export and
+  the camera pre-flight reticle. In the calibration dialog and the tracer
+  only the colors changed, not one width, dash or halo, because a wider line
+  moves where people place points (#215). Trace labels and calibration
+  round-sets now record `palette: tol-454`, so a record made in the old
+  colors can be told from a new one.
+- **The SLDEA preview's 0 kV baseline diamond is Tol red** (#461), not gray,
+  which missed the color-blind floor beside the pre-ramp and warm-up marks.
+- **The diagnostic's maps use Tol's iridescent scheme** (#461) instead of
+  magma. High values are now dark and low values pale, the reverse of magma,
+  so an old diagnostic sheet and a new one read in opposite directions.
+
+### Diagnostics and tests
+
+- **Three tests that failed on loaded Windows PCs with the app correct**
+  now check their own premise: the hanging-share test (#453), the run folder
+  line's timer tests (#459), and the launch check (#458; on one PC about 1 in
+  30 Python starts is held for about 5 s before Python runs).
+
+### Not bench-checked
+
+The lines are in #369: the SLDEA tab and Edge Review loading after Update
+Software (#448), the window close during a LIVE run (#460, section 3), and
+the new candidate outlines and the calibration and tracer colors on a real
+run (#451, #456, section 1).
+
 ## v1.4.5 (2026-10-08, pre-release)
 
 **TL;DR:** The SLDEA tab has a new layout with the presets on top and Run in

@@ -519,12 +519,116 @@ def test_one_candidates_halo_never_covers_another_candidates_line():
             b_alone = np.all(_card_pixels(app, i, [skip, b]) == b_col,
                              axis=2)
             a_both = np.all(both == a_col, axis=2)
-            # the letter tags sit right of x = 220 and overlap each other
+            # the letter tags sit right of x = 220, and B's steps down
+            # past A's where the two would overlap (#477)
             lost = (a_alone & ~b_alone & ~a_both)[:, :200]
             assert not lost.any(), (
                 f"{gap} px apart: {int(lost.sum())} px of A's line went "
                 f"black under B, first at (y, x) "
                 f"{tuple(np.argwhere(lost)[0])}")
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_tag_never_lands_on_an_earlier_tag():
+    """#477: each letter tag goes at its outline's rightmost point, and
+    two outlines can share that point (B and C on the manual's bench
+    frame). C's tag, drawn later, sat on B's and hid it. Now every pixel
+    of B's tag drawn alone survives with C beside it, and C's tag shows
+    beside its own outline's right edge, within C's height."""
+    import sldea_edge_gui as gui
+    # the pure step: a free spot stays, a taken one steps down a tag
+    # height (halo included), or up when the card has no room below
+    assert gui.tag_shift((10, 10, 30, 34), [], 240) == 0
+    assert gui.tag_shift((10, 10, 30, 34), [(50, 10, 70, 34)], 240) == 0
+    assert gui.tag_shift((10, 10, 30, 34), [(10, 10, 30, 34)], 240) == 25
+    assert gui.tag_shift((10, 210, 30, 234), [(10, 210, 30, 234)],
+                         240) == -25
+    root = _tk_root_or_skip('tag overlap')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_tag_overlap_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app.cand_var.set(0)
+        # slot A is skipped (a contour of 2 points), so the outlines are
+        # B and C, and both start at the rightmost point (200, 40)
+        skip = {'method': 'disc-fit',
+                'contour': np.array([[0, 0], [1, 1]], np.int32)}
+        b = {'method': 'diff-hi', 'contour': _square(40, 200)}
+        c = {'method': 'diff-lo', 'contour': np.array(
+            [[60, 40], [200, 40], [200, 180], [60, 180]], np.int32)}
+        b_col, c_col = _rgb(gui.CAND_COLORS[1]), _rgb(gui.CAND_COLORS[2])
+        right = slice(204, None)         # right of both lines and halos
+        b_alone = np.all(_card_pixels(app, i, [skip, b])[:, right] == b_col,
+                         axis=2)
+        assert b_alone.sum() > 40, b_alone.sum()
+        both = _card_pixels(app, i, [skip, b, c])[:, right]
+        b_both = np.all(both == b_col, axis=2)
+        lost = b_alone & ~b_both
+        assert not lost.any(), (
+            f"{int(lost.sum())} of B's {int(b_alone.sum())} tag pixels "
+            f"went under C's tag")
+        c_tag = np.argwhere(np.all(both == c_col, axis=2))
+        assert len(c_tag) > 40, len(c_tag)
+        ys, xs = c_tag[:, 0], c_tag[:, 1] + 204
+        assert 40 <= ys.min() and ys.max() <= 180, (ys.min(), ys.max())
+        assert 206 <= xs.min() and xs.max() <= 206 + gui.TAG_PX, \
+            (xs.min(), xs.max())
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_committed_trace_is_drawn_beside_a_newer_staged_one():
+    """With a newer D trace staged over a committed one, the card draws
+    the committed outline at the heavy weight and thins the staged one
+    (audit 2026-08-05): Save writes the committed polygon, so the card
+    must show it. Across the left edge of each, the pixels read frame,
+    halo, D's color, halo, frame, with the color 3 px wide on the
+    committed outline and 1 px on the staged one. Deleting the committed
+    outline's stroke used to pass every test (#476)."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('committed trace')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_committed_trace_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        committed = {'method': 'manual-trace', 'contour': _square(30, 210),
+                     'trace_points': [(30.0, 30.0), (210.0, 30.0),
+                                      (210.0, 210.0)]}
+        staged = {'method': 'manual-trace', 'contour': _square(80, 160),
+                  'trace_points': [(80.0, 80.0), (160.0, 80.0),
+                                   (160.0, 160.0)]}
+        app.traces[i] = staged
+        img = app._render_card(i, [], committed, view=(320, 240))
+        assert img.size == (320, 240), img.size
+        arr = np.asarray(img.convert('RGB'))
+        halo = _rgb(gui.CAND_HALO)
+        color = _rgb(gui.CAND_COLORS[gui.TRACE_SLOT])
+        for x, width in ((30, 3), (80, 1)):
+            runs = []
+            for px in arr[120, x - 10:x + 11]:
+                k = ('c' if tuple(px) == color else
+                     'k' if tuple(px) == halo else 'f')
+                if runs and runs[-1][0] == k:
+                    runs[-1][1] += 1
+                else:
+                    runs.append([k, 1])
+            kinds = [k for k, _n in runs]
+            assert kinds == ['f', 'k', 'c', 'k', 'f'], (
+                x, kinds, [tuple(p) for p in arr[120, x - 4:x + 5]])
+            assert runs[2][1] == width, (x, runs)
     finally:
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)

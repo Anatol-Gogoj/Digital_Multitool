@@ -229,8 +229,12 @@ S["tab_dmm"] = {
 S["tab_logging"] = {
     "callouts": [
         # badge left: the default top badge sat on the tab strip's
-        # "Oscilloscope (MSO24)" label (v1.4.4 build)
-        {"match": "Log Directory:", "extend_right": 260, "badge_side": "left",
+        # "Oscilloscope (MSO24)" label (v1.4.4 build). extend_right 272,
+        # not 260: at 260 the capsule's red line ran at x 376-378, inside
+        # the entry's border at 382-383 (#477 review). 272 ends it at 390,
+        # clear of Browse at 399. That entry is not in widgets.json, so
+        # with_field cannot reach it.
+        {"match": "Log Directory:", "extend_right": 272, "badge_side": "left",
          "label": "All CSV files land here (default ./logs)"},
         # extend_right reaches past the "= 1 Hz" hint, which the capsule's
         # edge used to cut through.

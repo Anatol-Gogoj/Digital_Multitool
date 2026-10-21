@@ -905,7 +905,8 @@ def test_a_share_that_hangs_never_freezes_the_window():
             _hanging_share() as gate:
         line = app.sldea_folder_line
         app.SLDEA_FOLDER_SLOW_S = 0.3
-        asked = []                  # (when, run name) of every check sent
+        asked = []                  # (when its thread reached the share,
+                                    # run name) of every check sent
         hang = sprof.holds_run
 
         def noted(folder):
@@ -951,10 +952,14 @@ def test_a_share_that_hangs_never_freezes_the_window():
             # A check reads the boxes when it goes, so one sent before the
             # typing paused checks the newest name too, and only its time
             # gives it away. A Tk timer never fires early; 20 ms covers
-            # Tcl's clock against Python's.
+            # Tcl's clock against Python's. Only the first burst is timed:
+            # in the second, the stuck check's slow poll may look before
+            # the pause ends and send the newest name itself, by design
+            # (#402), so its time there says nothing of the pause.
             sent = [(round(t - keys[-1], 3), n) for t, n in asked[before:]]
             assert [n for _, n in sent] == [burst[-1]], sent
-            assert sent[0][0] > pause - 0.02, (sent, pause)
+            if not out:
+                assert sent[0][0] > pause - 0.02, (sent, pause)
             out.append(len(_line_threads()))
         assert worst < 0.5, worst
         assert out == [1, 2], out

@@ -781,6 +781,17 @@ class InstrumentControlGUI:
         # run has finished; what window close zeroes if the run has not
         # (#460). Never a channel the run has not written.
         self._sldea_sg_dc_ch = None
+        # (SG handle, channel, zeroed) once window close has set a LIVE
+        # run's marked channel to 0 V AND switched it off (zeroed True), or
+        # switched off the channel of a run that had not marked one (zeroed
+        # False), each write having gone through. A run whose own zero then
+        # fails logs that instead of FAILED TO ZERO (#472). Written and read
+        # only under that SG's I/O lock.
+        self._sldea_close_zeroed = None
+        # Set as window close begins. Only then does a run's own zero take
+        # the SG's I/O lock and read that record (#472); a run that ends
+        # any other way zeroes exactly as before.
+        self._app_closing = False
         # (V_Out, I_Out) scope channels a LIVE run reads, while it runs --
         # their settings and the shared ones are locked (2026-09-24)
         self._sldea_scope_chs = None
@@ -973,6 +984,9 @@ class InstrumentControlGUI:
         # to 0 V and switches it off (a step, not a ramp) before we cut
         # outputs (audit 2026-07-25: close never set _sldea_stop, racing
         # the worker's 10 Hz drive).
+        # From here a run's own zero takes the SG's I/O lock and reads this
+        # close's record under it (#472, see the zero below).
+        self._app_closing = True
         if getattr(self, '_sldea_running', False):
             self._sldea_stop = True
             for _ in range(30):                     # up to ~3 s
@@ -989,8 +1003,8 @@ class InstrumentControlGUI:
         # in DC. Only the channel the run set to DC -- OFST in another mode
         # (NOISE) is not bench-verified, and on the other channel it would
         # rewrite the operator's set-up.
-        zero_ch = (getattr(self, '_sldea_sg_dc_ch', None)
-                   if getattr(self, '_sldea_running', False) else None)
+        running = getattr(self, '_sldea_running', False)
+        run_ch = getattr(self, '_sldea_live_ch', None) if running else None
         try:
             self.cam_seq_running = False
             self.cam_stop_preview()
@@ -998,35 +1012,91 @@ class InstrumentControlGUI:
                 self.cam.close()
         except Exception:
             pass
-        if self.sg:
-            if zero_ch is not None:
-                try:
-                    self.sg.set_offset(zero_ch, 0.0)
-                except Exception:
-                    pass
-            for ch in (1, 2):
-                try:
-                    self.sg.set_output(ch, False)
-                except Exception:
-                    pass
-        if self.lcr:
-            try:
-                self.lcr.set_bias_enabled(False)
-            except Exception:
-                pass
-        # Hand each instrument back to LOCAL and close its link so the front
-        # panels work again without a power cycle (pyvisa-py asserts remote on
-        # connect). Best-effort -- a dead/wedged link must never block exit.
-        for inst in (self.lcr, self.scope, self.sg, self.psu, self.dmm):
-            if inst is None:
-                continue
-            for action in ('go_local', 'close'):
-                fn = getattr(inst, action, None)
-                if fn is not None:
+        # For a LIVE run still flagged, the SG writes below are made holding
+        # the SG's I/O lock (instruments._io_lock, which every SG write
+        # takes), and the run's mark is read under it. The close records
+        # what it did in _sldea_close_zeroed as (SG handle, channel,
+        # zeroed) and keeps the lock until the SG session is closed below
+        # (#472), when either:
+        # - the run had marked its channel, and the offset AND the
+        #   output-off writes on it both went through (zeroed: 0 V, off);
+        # - the run had not marked one, so it never switched its channel
+        #   on, and the output-off write on that channel went through
+        #   (not zeroed: off, offset untouched).
+        # Nothing else can then write to this session between those writes
+        # and the session close: not the run's start-up writes, not a
+        # level, not another thread. A run's zeroing attempt that begins
+        # once _app_closing is set reads the record under the same lock,
+        # so one that sees it began after the session was closed. An
+        # attempt that began before this close reads no record at all and
+        # keeps its alarm. When the writes fail, nothing is recorded and
+        # the lock is let go right after the outputs-off writes, so the
+        # run's own zero still gets the open session. The SCPI sent is
+        # unchanged. It cannot deadlock: no thread waits for the Tk thread
+        # while it holds an SG I/O lock, and none waits for this lock while
+        # it holds another instrument's (this close takes the LCR's and the
+        # scope's while it holds it).
+        sg_hold = None
+        try:
+            if self.sg:
+                if run_ch is not None:
                     try:
-                        fn()
+                        lock = _io_lock(self.sg)
+                        lock.acquire()
+                        sg_hold = lock
+                    except Exception:
+                        pass                # write anyway, record nothing
+                zero_ch = (getattr(self, '_sldea_sg_dc_ch', None)
+                           if running else None)
+                offset_ok = False
+                off = set()
+                if zero_ch is not None:
+                    try:
+                        self.sg.set_offset(zero_ch, 0.0)
+                        offset_ok = True
                     except Exception:
                         pass
+                for ch in (1, 2):
+                    try:
+                        self.sg.set_output(ch, False)
+                        off.add(ch)
+                    except Exception:
+                        pass
+                if zero_ch is not None:
+                    done = ((zero_ch, True) if offset_ok and zero_ch in off
+                            else None)
+                else:
+                    done = (run_ch, False) if run_ch in off else None
+                if sg_hold is not None and done is not None:
+                    self._sldea_close_zeroed = (self.sg,) + done
+                elif sg_hold is not None:
+                    sg_hold.release()
+                    sg_hold = None
+            if self.lcr:
+                try:
+                    self.lcr.set_bias_enabled(False)
+                except Exception:
+                    pass
+            # Hand each instrument back to LOCAL and close its link so the
+            # front panels work again without a power cycle (pyvisa-py
+            # asserts remote on connect). Best-effort: a dead or wedged
+            # link must never block exit.
+            for inst in (self.lcr, self.scope, self.sg, self.psu, self.dmm):
+                if inst is None:
+                    continue
+                for action in ('go_local', 'close'):
+                    fn = getattr(inst, action, None)
+                    if fn is not None:
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                if inst is self.sg and sg_hold is not None:
+                    sg_hold.release()       # the session is closed now
+                    sg_hold = None
+        finally:
+            if sg_hold is not None:
+                sg_hold.release()
         self.root.destroy()
 
     # ---- Background instrument I/O (issue #40) ---------------------------
@@ -6675,17 +6745,72 @@ class InstrumentControlGUI:
                 # (audit 2026-07-25, criticals C1-C3).
                 if sg is not None:
                     zeroed = False
+                    # Once window close has begun (#472), each attempt takes
+                    # the SG's I/O lock for both writes, and the attempt on
+                    # `sg` reads the close's record as its hold begins. A
+                    # close that records holds that lock from its writes
+                    # until it has closed the session, so a record seen here
+                    # means the channel was left as it says (0 V and off, or
+                    # off), and the session closed, before this attempt
+                    # began. A close that comes during or after this attempt
+                    # is not seen, and the alarm below stands. With no close
+                    # begun, the attempt is made as before, unlocked, and
+                    # reads nothing.
+                    close_zero = None
+                    closing = getattr(self, '_app_closing', False)
                     for target in ([sg, self.sg] if self.sg is not sg
                                    else [sg]):
                         if target is None or zeroed:
                             continue
+                        err = lock = None
+                        if closing:
+                            try:
+                                held = _io_lock(target)
+                                held.acquire()
+                                lock = held
+                            except Exception:
+                                pass        # zero anyway, but read no record
                         try:
+                            if lock is not None and target is sg:
+                                close_zero = getattr(
+                                    self, '_sldea_close_zeroed', None)
                             target.set_offset(sgch, 0.0)
                             target.set_output(sgch, False)
                             zeroed = True
                         except Exception as e:
-                            self._sldea_log(f"SG zeroing attempt failed: {e}")
-                    if not zeroed:
+                            err = e
+                        finally:
+                            # let go before the log, a Tk call: the close
+                            # waits for this lock on the Tk thread
+                            if lock is not None:
+                                lock.release()
+                        if err is not None:
+                            self._sldea_log(
+                                f"SG zeroing attempt failed: {err}")
+                    # Only for the run's own handle and channel, and only
+                    # when this run's zeroing failed. "Off" alone is enough
+                    # only for a run that never marked its channel: the mark
+                    # comes before output ON, so such a run never switched
+                    # it on and never wrote a level. Every other failure
+                    # keeps the alarm.
+                    close_did = (close_zero[2]
+                                 if (not zeroed and close_zero is not None
+                                     and close_zero[0] is sg
+                                     and close_zero[1] == sgch) else None)
+                    never_on = getattr(self, '_sldea_sg_dc_ch', None) is None
+                    if close_did is True:
+                        self._sldea_log(
+                            f"SG CH{sgch} is at 0 V and off: window close "
+                            f"set it to 0 V and switched it off, then closed "
+                            f"the SG session, so this run's own zeroing found "
+                            f"the session already closed")
+                    elif close_did is False and never_on:
+                        self._sldea_log(
+                            f"SG CH{sgch} is off: this run never switched it "
+                            f"on, and window close switched it off and closed "
+                            f"the SG session, so this run's own zeroing found "
+                            f"the session already closed")
+                    elif not zeroed:
                         self._sldea_log(
                             "⚡⚡ FAILED TO ZERO THE SG OUTPUT — the Trek may "
                             "still be energized. TURN OFF THE SG/TREK AT THE "

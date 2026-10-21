@@ -5179,6 +5179,197 @@ the HV NOT ZEROED alarm, and a worker still going when the process exits
 may not write the end of its records. ■ Abort stays the way to end a run.
 Bench check owed in #369.
 
+## A window close that zeroed or switched off the run's channel is logged as that, not as FAILED TO ZERO (2026-10-20)
+
+**TL;DR:** Since #460 a window close can set a LIVE run's SG channel to
+0 V, switch it off and close the SG session before the run gets there.
+It can also switch off the channel of a run that never switched it on.
+The run's own zero then failed on the closed session, and run.log said
+FAILED TO ZERO with an HV NOT ZEROED alarm, which was untrue. Now the
+close records what it did when its writes went through, and the run logs
+that instead. Every other failed zero keeps the alarm (#472). The SCPI
+sent is unchanged.
+
+**Observation (on `38e4cbd`, from #467's review and #471's).**
+
+- After its ~3 s wait, `_on_app_close` wrote `set_offset(ch, 0.0)` to the
+  run's marked channel and `set_output(1, False)`, `set_output(2, False)`,
+  then handed each instrument back and closed it. A worker that reached
+  its finally block after that sent its zero to the closed session. pyvisa
+  1.16.1 raises `InvalidSession` ("Invalid session handle. The resource
+  might be closed.") on any call once `Resource.close()` has cleared the
+  session (`pyvisa/resources/resource.py`, the `session` property). Every
+  attempt failed, so the run logged "⚡⚡ FAILED TO ZERO THE SG OUTPUT",
+  set the NOT ZEROED status and queued the HV NOT ZEROED box.
+- The same happened to a run closed before it marked its channel: during
+  its camera start-up, or, with #471, when its start writes find the stop
+  under the SG's lock. Such a run never switched its channel on, and the
+  close wrote no offset to it, but its failed zero said "the Trek may
+  still be energized" (#471's adversarial review).
+- A record set by the close is not enough by itself. Each close write took
+  the SG's I/O lock and let it go again, so a write queued behind the
+  close's writes could land before the session closed. The run's start-up
+  output ON is one such write while its stop check is outside that lock
+  (#471), and a thread's write would be another. A record would then speak
+  for a channel that had been switched back on.
+
+**Decision.**
+
+- For a LIVE run still flagged after the wait, the close takes the SG's
+  I/O lock (`instruments._io_lock`) before any of its SG writes and reads
+  the run's mark under it. It records `_sldea_close_zeroed = (SG handle,
+  channel, zeroed)` and keeps the lock until it has closed the SG session,
+  in the existing order (LCR bias off, LCR and scope handed back, then the
+  SG), when either:
+  - the run had marked its channel, and `set_offset(ch, 0.0)` and
+    `set_output(ch, False)` on it both went through: zeroed, so 0 V and
+    off;
+  - the run had not marked a channel, and `set_output(ch, False)` on its
+    claimed channel went through: not zeroed, so off, offset untouched.
+  When those writes fail it records nothing and lets the lock go right
+  after the outputs-off writes, so the run's own zero still gets an open
+  session. The other channel failing to switch off does not void the
+  record.
+- The close sets `_app_closing` as its first step. From then on, the
+  run's finally block makes each zeroing attempt (offset, then output off)
+  in one hold of that handle's lock, and on its own handle reads the
+  record as the hold begins. When every attempt fails and that record
+  names the run's own handle and channel, run.log gets, after the
+  attempt's own error line, one of:
+  - zeroed: "SG CH1 is at 0 V and off: window close set it to 0 V and
+    switched it off, then closed the SG session, so this run's own zeroing
+    found the session already closed";
+  - not zeroed, and the run never marked the channel itself: "SG CH1 is
+    off: this run never switched it on, and window close switched it off
+    and closed the SG session, so this run's own zeroing found the session
+    already closed".
+  No NOT ZEROED status and no box. Otherwise the alarm, as before. A run
+  that marked its channel and got only "off" from the close keeps the
+  alarm: its last level may still be set.
+- The "off" case rests on the mark coming before output ON, on main and
+  with #471 (`test_the_run_marks_its_channel_after_the_dc_write_and_before_output_on`
+  pins it). A run that never marked never switched its channel on and
+  never wrote a level. Once the close's output-off went through under a
+  lock held until the session closed, nothing could switch it on again.
+- With no close begun, the run's zero is made exactly as before, unlocked
+  and reading no record. So ■ Abort, a watchdog trip and a completed run
+  shut down as they did, and the lock-entry count that
+  `test_a_stop_that_comes_while_the_run_waits_for_the_sg_lock_still_holds`
+  pins is unchanged here (#471 changes it for its own lock).
+- Race-free because the record is written and read only under the SG's
+  I/O lock, which the close holds from its writes to its session close.
+  An attempt that sees the record began after the session was closed,
+  with the channel as the record says and no write able to reach it
+  since. An attempt that began before the close's writes sees no record,
+  whatever the close does after. The flag only decides whether an attempt
+  reads the record at all: one that found it unset reads none and keeps
+  its alarm. The run's own mark is set only by the run's thread. The Tk
+  thread clears it, at a run's start (`sldea_run`) and in
+  `_sldea_finished`, but neither can run during that run's finally
+  block, so its "never marked" check cannot race.
+- No deadlock. A Tk call made from the worker waits for the Tk thread, and
+  the close waits for this lock on the Tk thread, so the run logs only
+  after it lets the lock go. No thread holds an SG I/O lock while it waits
+  for the Tk thread. The close does take the LCR's and the scope's locks
+  while it holds the SG's, but nothing waits for the SG's lock while
+  holding another instrument's: the drivers lock only themselves, and the
+  app's other explicit holds of the SG's lock (the level write, the run's
+  zero, and #471's start writes) touch only the SG inside.
+
+**Interleavings.**
+
+| Order | CH at the end | run.log |
+|---|---|---|
+| close zeroes (both writes OK) and closes the session; the run's attempt comes after | 0 V, off | the zeroed line |
+| close during the run's camera start-up, or (#471) its start writes find the stop under the lock: no mark; close's off OK | off, never on | the off line |
+| without #471, the run's start writes queue behind the close's lock: the first lands, the rest fail on the closed session; no mark | off, never on | the off line |
+| the run marks its channel while the close waits for the lock (#471's start hold) | 0 V, off | the zeroed line: the mark is read under the lock |
+| the wait ends while the run is zeroing: the close waits for the lock, the run's attempt succeeds | 0 V, off | no new line; the close zeroes again |
+| the close's writes failed; the run's attempt then succeeds on the open session | 0 V, off | no new line |
+| the close's offset or output-off failed (dead link) | unknown | alarm |
+| the close zeroed another channel | unknown | alarm |
+| the close zeroed through another SG handle | unknown: the levels went through the run's handle and lock | alarm |
+| the close saw no mark and only switched the channel off, but the run had marked it | off, may hold a level | alarm |
+| the run's attempt failed first, then the close zeroed (before or after the run decided) | unknown when it failed | alarm |
+| no close | unknown | alarm |
+| the run's attempt began just before the close began, and its writes then waited for the lock behind the close's writes and session close | 0 V, off | alarm: a false one, kept, since that attempt read no record |
+| a write queued behind the close's writes | that write fails on the closed session | the line, true |
+
+**Evidence.** `tests/test_app_close_zeroes_sg.py`, 33 cases (18 new, one
+extended; the lock-count case is untouched).
+
+- On the stub close:
+  - the zeroed record only when both writes went through (six cases, the
+    SG writes unchanged in each);
+  - the off record for a run that never marked, only when its channel's
+    output-off went through (four cases);
+  - no record and no lock with no LIVE run;
+  - the lock held from the first write to the session close, and released
+    after the outputs-off writes when they failed (five cases);
+  - a write queued behind the zero lands after `close` and fails.
+- On the real sldea_run and worker, with a recording SG whose session
+  refuses writes once closed:
+  - the zeroed line, with no status or box;
+  - the off line after a close during camera start-up, and after a close
+    while the run's start writes wait for the SG's lock behind another
+    thread (a lock that serves waiters in arrival order);
+  - the zeroed line when the run marks its channel while the close waits
+    for the lock;
+  - the alarm after a close on a dead link, a close that zeroed another
+    channel, a close through another handle, a close that only switched
+    off a channel the run had marked, a failed zero with no close (a
+    record set by hand is not read), and a close that zeroed after the
+    run's attempt had failed;
+  - the wait running out mid-zero, both with the run's zero going through
+    (offset and off together, then the close's) and with it timing out
+    (alarm);
+  - with no close, the run's zero made unlocked as before, under a lock
+    that records every `acquire()`, so a zero that took it would be seen.
+- The stub app's Tk hand-offs (`_sldea_log`, `_sldea_set_status`,
+  `root.after`) fail when a worker thread makes one while it holds an SG
+  I/O lock: in the app that would deadlock against the close. Across all
+  33 cases there were none.
+- The same 33 cases, `tests/test_sldea_start_under_lock.py` and
+  `tests/test_sg_live_lock.py` pass on a trial merge with #471's branch.
+  There the close-during-start case shows the run writing nothing at all,
+  and on this branch alone its first start write landing and the second
+  failing on the closed session.
+- Mutants, each in a scratch copy run with `python -B` and no
+  `__pycache__`: all 12 run on `1be81ec` fail at least one case.
+  They are: suppress whenever the close ran (no write, handle, channel or
+  mark check), never suppress, the zeroed record without checking its
+  writes, or without the output-off, the off record without checking
+  its write, no channel check, no handle check, the off line without the
+  run's own mark check, the off record taken as zeroed, the record read
+  when the run decides, the mark read before the lock, and the lock let
+  go after the outputs-off writes. Main's own `gui.py` fails 14 of the
+  33 cases.
+- The adversarial review's mutants, re-run on `74c9328`, each fail
+  at least one case:
+  - no lock in the close: 14 cases fail, or 6 when it still records;
+  - no lock in the run's zero: 6, or 2 when it still reads the record;
+  - the flag ignored: 2;
+  - the flag never set: 6;
+  - the handle check made against `self.sg`: 1;
+  - the close taking the lock only after its writes: 6;
+  - the run logging its failed attempt while it still holds the lock: 9.
+
+**Not changed.** The SCPI sent by the close and by the run. ■ Abort stays
+the way to end a run, the close still cannot show an alarm once the window
+is gone, and a worker still going when the process exits may not write
+its line at all. One residual, on this branch without #471:
+`Resource.close()` leaves the session open when `before_close()` or
+`visalib.close` raises, and a write queued behind the close could then land
+after it. That write can be the run's output ON, at DC 0 V. If the run's
+own zero then also failed, the zeroed line would say "0 V and off" while
+the output is on at 0 V. The off line cannot be wrong that way: the run
+marks its channel before it sends ON, so a run whose ON could land has
+marked, and it keeps the alarm. With #471 the run's start-up writes check
+the stop under the same lock and cannot land after the close. No bench
+line of its own: the path needs a run held past
+the close's wait, which #460's line in #369 records as desk-tested only,
+with no bench way to hold one.
+
 ## Update Software and its Restart now refuse while an SLDEA run is going (2026-09-24)
 
 **TL;DR:** Tools → Update Software → **Restart now** used to restart the

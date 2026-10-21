@@ -419,6 +419,89 @@ def test_analyze_reports_localization_and_scale_context():
     assert _os.path.exists(png)
 
 
+# Paul Tol's iridescent scheme as printed in his technote (SRON/EPS/TN/
+# 09-002, issue 3.2, 18 August 2021, Fig. 18). Transcribed here apart from
+# the copy in sldea_diag, so a slip in either one shows up as a mismatch.
+TOL_IRIDESCENT = ['#FEFBE9', '#FCF7D5', '#F5F3C1', '#EAF0B5', '#DDECBF',
+                  '#D0E7CA', '#C2E3D2', '#B5DDD8', '#A8D8DC', '#9BD2E1',
+                  '#8DCBE4', '#81C4E7', '#7BBCE7', '#7EB2E4', '#88A5DD',
+                  '#9398D2', '#9B8AC4', '#9D7DB2', '#9A709E', '#906388',
+                  '#805770', '#684957', '#46353A']
+TOL_IRIDESCENT_BAD = '#999999'
+
+
+def _luminance(hex_color):
+    """Relative luminance Y (sRGB, D65) of a '#RRGGBB' color."""
+    h = hex_color.lstrip('#')
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+           for c in (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))]
+    return 0.2126729 * lin[0] + 0.7151522 * lin[1] + 0.0721750 * lin[2]
+
+
+def _off_line(ys):
+    """Largest distance of `ys` from their least-squares straight line, as
+    a fraction of their span."""
+    ys = np.asarray(ys, float)
+    i = np.arange(len(ys))
+    fit = np.polyval(np.polyfit(i, ys, 1), i)
+    return float(np.abs(ys - fit).max() / (ys.max() - ys.min()))
+
+
+def test_maps_are_drawn_in_tol_iridescent():
+    """figure() drew its three maps in matplotlib's 'magma', which is not
+    a Paul Tol scheme (#461). Each map now gets his iridescent: his
+    colors in his order, linearly interpolated, with his bad-data gray.
+    Photographs drawn with cmap 'gray' are not maps and are left out."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.axes import Axes
+    from matplotlib.colors import Colormap, LinearSegmentedColormap, to_hex
+    assert sd.MAP_COLORS == TOL_IRIDESCENT
+    assert sd.MAP_BAD == TOL_IRIDESCENT_BAD
+    root = tempfile.mkdtemp(prefix='diag_cmap_')
+    run = sd._synth_run(_os.path.join(root, 'SLDEA_c'), 'expand')
+    d = sd.analyze(run)
+    seen = []
+    real = Axes.imshow
+
+    def spy(self, x, *a, **kw):
+        seen.append(kw.get('cmap'))
+        return real(self, x, *a, **kw)
+    Axes.imshow = spy
+    try:
+        sd.figure(d, _os.path.join(root, 'fig.png'), rundir=run)
+    finally:
+        Axes.imshow = real
+    maps = [c for c in seen if c != 'gray']
+    assert len(maps) == 3, f"expected the three maps, saw {seen}"
+    ref = LinearSegmentedColormap.from_list('ref', TOL_IRIDESCENT)
+    x = np.linspace(0, 1, 256)
+    for cmap in maps:
+        assert isinstance(cmap, Colormap), (
+            f"a map was drawn with {cmap!r}, not Tol's iridescent")
+        assert to_hex(cmap(0.0)).upper() == TOL_IRIDESCENT[0]
+        assert to_hex(cmap(1.0)).upper() == TOL_IRIDESCENT[-1]
+        assert np.allclose(cmap(x), ref(x)), "not his interpolation"
+        assert to_hex(cmap.get_bad()).upper() == TOL_IRIDESCENT_BAD
+
+
+def test_iridescent_falls_in_equal_luminance_steps_and_magma_does_not():
+    """Tol gives iridescent a relative luminance that falls linearly, which
+    is why it also reads in monochrome vision and print. The copy keeps
+    that: no color sits more than 1 % of the span off a straight line
+    (measured 0.37 %). Magma, sampled at the same 23 points from pale to
+    dark, sits 28.7 % off, so the check is one that can fail."""
+    import matplotlib
+    from matplotlib.colors import to_hex
+    ys = [_luminance(c) for c in sd.MAP_COLORS]
+    assert all(b < a for a, b in zip(ys, ys[1:])), (
+        "the luminance must fall from the first color to the last")
+    assert _off_line(ys) < 0.01, _off_line(ys)
+    magma = matplotlib.colormaps['magma']
+    old = [_luminance(to_hex(magma(t))) for t in np.linspace(1, 0, 23)]
+    assert _off_line(old) > 0.2, _off_line(old)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

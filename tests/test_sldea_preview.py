@@ -13,7 +13,10 @@ What these pin down (2026-09-23):
     them in LINEAR RGB, the standard since 2026-10-06 (sourced in
     SLDEA_DECISIONS.md), where that same floor is 15.35, so 18 is the
     stricter of the two bars.) The old green/red pair is held to the same
-    bar and must FAIL it, so the check is one that can fail;
+    bar and must FAIL it, so the check is one that can fail. Since #461
+    (2026-10-19) the baseline is held to it too, beside post-ramp,
+    pre-ramp, the staircase and the warm-up ring, and the grey it
+    replaced must fail it;
   * marker size follows the room between landings, within its limits,
     and the markers made smaller in #401 keep the old hover reach;
   * the hover text names each snapshot in the tab's own words;
@@ -170,6 +173,39 @@ def test_the_old_green_red_pair_fails_that_bar():
     worst = _worst_de('#2e7d32', '#c62828')
     assert worst < CVD_FLOOR, worst
     assert 5.0 < worst < 8.0, f"expected the measured ~6.6, got {worst:.2f}"
+
+
+def _baseline_pairs(baseline):
+    # The baseline diamond sits on the staircase at 0 kV, overlaps the
+    # warm-up ring by design (drawn on top of it), and shares the legend
+    # with both landing fills. The ring is hollow: its face is HOLLOW.
+    return (('baseline vs post-ramp', baseline, pv.MARKERS['post-ramp'][1]),
+            ('baseline vs pre-ramp', baseline, pv.MARKERS['pre-ramp'][1]),
+            ('baseline vs staircase', baseline, pv.LINE),
+            ('baseline vs warm-up ring', baseline, pv.MARKERS['warmup'][1]))
+
+
+def test_the_baseline_survives_colour_blindness_beside_its_neighbours():
+    # #461: no pair involving the baseline was checked before, and the
+    # grey it had missed the floor twice (next test)
+    assert pv.MARKERS['warmup'][1] == pv.HOLLOW
+    for name, a, b in _baseline_pairs(pv.MARKERS['baseline'][1]):
+        worst = _worst_de(a, b)
+        assert worst >= CVD_FLOOR, (
+            f"{name}: worst-case CIEDE2000 {worst:.1f} < {CVD_FLOOR}")
+
+
+def test_the_old_grey_baseline_fails_that_bar():
+    # Tol bright grey #BBBBBB, the baseline until #461: shapes kept it
+    # readable, but beside pre-ramp yellow and the warm-up ring's white
+    # face it measured 16.02 and 15.41, so the check above can fail.
+    worst = {name: _worst_de(a, b)
+             for name, a, b in _baseline_pairs('#BBBBBB')}
+    failing = sorted(n for n, w in worst.items() if w < CVD_FLOOR)
+    assert failing == ['baseline vs pre-ramp',
+                       'baseline vs warm-up ring'], worst
+    assert 15.9 < worst['baseline vs pre-ramp'] < 16.1, worst
+    assert 15.3 < worst['baseline vs warm-up ring'] < 15.5, worst
 
 
 def test_marker_radius_follows_the_room():

@@ -15,6 +15,21 @@ simulation, with the matrices applied in LINEAR RGB (2026-09-23):
     staircase line (Tol high-contrast black) vs either fill    >= 39.2
     the green/red pair this replaced, under deuteranopia          6.6
 
+The baseline diamond is Tol's high-contrast (HC) red #BB5566 (#461,
+2026-10-19):
+
+    baseline vs post-ramp / pre-ramp                     21.4 / 25.6
+    baseline vs staircase black / warm-up ring's white   31.5 / 36.1
+    the bright grey it replaced vs pre-ramp / warm-up    16.0 / 15.4
+
+The baseline sits on the staircase at 0 kV and overlaps the warm-up
+ring by design, so those two pairs count as much as the fills. Of the
+two Tol schemes this module draws from (bright and high-contrast), only
+this red and bright cyan clear 18 against all four, and cyan by less
+(19.1, against the white ring). Black, which Edge Review's area plot
+gives the baseline in #456, cannot be used here: it is the staircase
+and every marker's edge.
+
 tests/test_sldea_preview.py holds these pairs to a floor of 18.0. That
 is TOL_BRIGHT's adjacent-pair floor as the `#313` script measured it,
 with the matrices applied to gamma-encoded sRGB (the 18.00 that
@@ -24,7 +39,8 @@ since 2026-10-06: Machado, Oliveira & Fernandes, IEEE TVCG
 primaries' spectral power distributions, and colorspacious and
 DaltonLens-Python both decode sRGB before applying it. Measured that way
 the same floor is 15.35, so 18.0 is the stricter of the two bars.
-Light fills (yellow, grey) carry a black edge, as Tol advises on white.
+Light fills (yellow, the white ring) carry a black edge, as Tol advises
+on white.
 
 Headless self-test: .venv/bin/python tests/test_sldea_preview.py
 """
@@ -43,7 +59,7 @@ HOLLOW = '#FFFFFF'           # the open warm-up ring's face
 # tags stay apart in greyscale, in print and for any colour vision.
 MARKERS = {
     'warmup': ('circle', HOLLOW, 'warm-up'),
-    'baseline': ('diamond', '#BBBBBB', 'baseline 0 kV'),   # Tol bright grey
+    'baseline': ('diamond', '#BB5566', 'baseline 0 kV'),   # Tol HC red
     'post-ramp': ('triangle', '#4477AA', 'post-ramp'),     # Tol bright blue
     'pre-ramp': ('square', '#CCBB44', 'pre-ramp'),         # Tol bright yellow
 }

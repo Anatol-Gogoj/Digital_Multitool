@@ -27,8 +27,15 @@ ring by design, so those two pairs count as much as the fills. Of the
 two Tol schemes this module draws from (bright and high-contrast), only
 this red and bright cyan clear 18 against all four, and cyan by less
 (19.1, against the white ring). Black, which Edge Review's area plot
-gives the baseline in #456, cannot be used here: it is the staircase
-and every marker's edge.
+gave the baseline from #456 to #478, cannot be used here: it is the
+staircase and every marker's edge.
+
+This module is also where the other figures that mark these tags get
+their marks (#478, 2026-10-21). Edge Review's area_vs_voltage.png draws
+each tag through mpl_style, so a tag has one shape, one fill and one
+legend text on the canvas and in the PNG. Before, the PNG drew the
+baseline as a black triangle and post-ramp as a circle, which are the
+preview's post-ramp and warm-up shapes, and left the warm-up frame out.
 
 tests/test_sldea_preview.py holds these pairs to a floor of 18.0. That
 is TOL_BRIGHT's adjacent-pair floor as the `#313` script measured it,
@@ -64,6 +71,51 @@ MARKERS = {
     'pre-ramp': ('square', '#CCBB44', 'pre-ramp'),         # Tol bright yellow
 }
 LEGEND_ORDER = ('warmup', 'baseline', 'post-ramp', 'pre-ramp')
+
+# The same four shapes as matplotlib marker codes, for the figures that
+# mark these tags off the canvas (mpl_style). At one markersize matplotlib
+# draws them close to marker_coords' proportions: in units of the square's
+# side, the circle is 1.0 across (0.94 here), the diamond 1.41 point to
+# point (1.39) and the triangle 1.0 tall (1.08), on a base as wide as it
+# is tall where this module's is equilateral. Either way it is a triangle,
+# apex up.
+MPL_MARKERS = {'circle': 'o', 'square': 's', 'diamond': 'D',
+               'triangle': '^'}
+# One size for the baseline, post-ramp and pre-ramp marks, in points:
+# matplotlib's own default, written out so a style sheet cannot change it.
+# At one size the triangle fits inside the square, which is what keeps a
+# post-ramp mark visible on a pre-ramp mark of the same area in Edge
+# Review's area plot.
+MPL_SIZE = 6.0
+# The warm-up's circle has its own, larger size (#478, 2026-10-21). In the
+# area plot the warm-up and the baseline are the membrane at rest two
+# seconds apart, so they usually land on one point. At MPL_SIZE the white
+# circle fits exactly inside the baseline diamond and, drawn over it,
+# covered its red. At this size, drawn under it, the circle rings the
+# diamond: the diamond's half-diagonal is 4.24 pt and its mitred black
+# tips reach 4.95 pt, while the circle's black edge starts at
+# 13 / 2 - 0.5 = 6.0 pt, so 1.05 pt (1.6 px at Save's 110 dpi) of the white
+# face shows between them and the whole ring stays visible.
+MPL_WARMUP_SIZE = 13.0
+
+
+def mpl_style(tag):
+    """Keyword arguments for matplotlib's Axes.plot that mark `tag` the
+    way the canvas does: its shape, its fill on the black edge, and its
+    legend text. No line joins the marks. Every mark is MPL_SIZE across
+    but the warm-up's, which is MPL_WARMUP_SIZE so it can ring a mark on
+    the same point.
+
+    Opaque, as on the canvas: at alpha 0.8 on a white face the baseline
+    red and the post-ramp blue blend to #C97785 and #6992BB, 16.45 apart
+    at worst under simulated color blindness, under the floor of 18
+    (#478)."""
+    shape, fill, label = MARKERS[tag]
+    size = MPL_WARMUP_SIZE if tag == 'warmup' else MPL_SIZE
+    return {'marker': MPL_MARKERS[shape], 'markersize': size,
+            'linestyle': '', 'color': fill, 'markerfacecolor': fill,
+            'markeredgecolor': OUTLINE, 'label': label}
+
 
 # Marker "radius" in canvas px. The floor is still larger than the old
 # 3 px dots; the ceiling keeps a sparse profile from drawing blobs. On the

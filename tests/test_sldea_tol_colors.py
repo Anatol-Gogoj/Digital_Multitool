@@ -259,31 +259,65 @@ def test_tracer_colors_are_tol_and_clear_the_floor_beside_either_abc():
     assert _contrast(gui.TRACE_INK, gui.TRACE_FACE) >= 3.0
 
 
-def test_area_plot_tags_wear_tol_colors_on_black_edges():
-    """Save's area_vs_voltage.png: post-ramp blue, pre-ramp yellow (the
-    SLDEA tab preview's colors) and baseline black, each with a black
-    marker edge and its own marker. matplotlib's default cycle it used
-    put pre-ramp orange and baseline green 1.25 apart (protan)."""
+def _blend(hex_color, alpha, under='#FFFFFF'):
+    """`hex_color` drawn at `alpha` over `under`, as the eye gets it."""
+    a, b = hex_color.lstrip('#'), under.lstrip('#')
+    return '#' + ''.join(
+        '%02X' % round(alpha * int(a[i:i + 2], 16)
+                       + (1 - alpha) * int(b[i:i + 2], 16))
+        for i in (0, 2, 4))
+
+
+def test_area_plot_tags_wear_the_preview_colors_on_black_edges():
+    """Save's area_vs_voltage.png, as it draws it: the warm-up's Tol
+    high-contrast white face (shown since the owner's call of
+    2026-10-21), baseline Tol high-contrast red, post-ramp Tol bright
+    blue and pre-ramp Tol bright yellow, the SLDEA tab preview's fills
+    (#478; the baseline was black before), each opaque on a black edge.
+    Measured on the drawn artists: the four fills are 21.36 apart at
+    worst (baseline vs post-ramp, under the simulator's four visions;
+    white is 22.74 from yellow, its nearest) and 31.5 or more from the
+    black edge. Red and blue reach 4.56 and 4.70:1 on the white face;
+    yellow reaches only 1.95:1 and the white face 1:1, so the black edge
+    (21:1, and 16.98:1 on the grid's light gray) is what carries them,
+    as on the canvas. At the 0.8
+    alpha the plot drew with before #478, red and blue would blend to
+    16.45 apart and fail the floor, so opacity is held here too.
+    matplotlib's default cycle the plot used before #454 put pre-ramp
+    orange and baseline green 1.25 apart (protan)."""
     import matplotlib
     matplotlib.use('Agg')
+    from matplotlib import colors as mcolors
     from matplotlib.figure import Figure
     import sldea_edge_gui as gui
     d = tempfile.mkdtemp(prefix='tol_area_plot_')
     seen = []
+    grids = []
     real = Figure.savefig
 
     def spy(fig, *a, **k):
-        seen.extend((ln.get_label(), str(ln.get_color()).upper(),
-                     str(ln.get_markeredgecolor()).upper(), ln.get_marker())
-                    for ax in fig.axes for ln in ax.lines)
+        for ax in fig.axes:
+            seen.extend((ln.get_label(),
+                         mcolors.to_hex(ln.get_markerfacecolor()).upper(),
+                         mcolors.to_hex(ln.get_markeredgecolor()).upper(),
+                         ln.get_alpha(), ln.get_marker(),
+                         ln.get_markeredgewidth())
+                        for ln in ax.lines)
+            grids.extend(
+                (mcolors.to_hex(g.get_color()).upper(), g.get_alpha())
+                for g in ax.get_xgridlines() + ax.get_ygridlines()
+                if g.get_visible())
+            seen.append(('face', mcolors.to_hex(ax.get_facecolor()).upper(),
+                         None, None, None, None))
         return real(fig, *a, **k)
     Figure.savefig = spy
     try:
         stub = types.SimpleNamespace(
             rundir=d,
-            results={0: {'area_px': 200.0}, 1: {'area_px': 260.0},
-                     2: {'area_px': 255.0}},
-            run={'rows': [{'nominal_kV': '0', 'tag': 'baseline'},
+            results={0: {'area_px': 201.0}, 1: {'area_px': 200.0},
+                     2: {'area_px': 260.0}, 3: {'area_px': 255.0}},
+            run={'rows': [{'nominal_kV': '0', 'tag': 'warmup'},
+                          {'nominal_kV': '0', 'tag': 'baseline'},
                           {'nominal_kV': '1', 'tag': 'post-ramp'},
                           {'nominal_kV': '1', 'tag': 'pre-ramp'}]})
         gui.EdgeReviewApp._save_plot(stub, None)
@@ -291,15 +325,42 @@ def test_area_plot_tags_wear_tol_colors_on_black_edges():
     finally:
         Figure.savefig = real
         shutil.rmtree(d, ignore_errors=True)
-    by = {label: (col, edge, mk) for label, col, edge, mk in seen}
-    assert set(by) == {'post-ramp', 'pre-ramp', 'baseline'}, seen
+    face = next(f for label, f, _e, _a, _m, _w in seen if label == 'face')
+    by = {label: (fill, edge, alpha, mk, width)
+          for label, fill, edge, alpha, mk, width in seen if label != 'face'}
+    assert set(by) == {'warm-up', 'baseline 0 kV', 'post-ramp',
+                       'pre-ramp'}, seen
+    assert by['warm-up'][0] == '#FFFFFF', by
+    assert by['baseline 0 kV'][0] == '#BB5566', by
     assert by['post-ramp'][0] == '#4477AA' and by['pre-ramp'][0] == '#CCBB44'
-    assert by['baseline'][0] == '#000000', by
-    cols = [v[0] for v in by.values()]
-    assert not _up(cols) - TOL, cols
-    assert _worst(cols)[0] >= cvd.CVD_FLOOR, _worst(cols)
+    fills = [v[0] for v in by.values()]
+    assert not _up(fills + [face]) - TOL, (fills, face)
+    de, a, b = _worst(fills)
+    assert de >= cvd.CVD_FLOOR, (round(de, 3), a, b)
+    assert 21.3 < de < 21.4 and {a, b} == {'#BB5566', '#4477AA'}, \
+        (round(de, 3), a, b)
     assert {v[1] for v in by.values()} == {'#000000'}, by
-    assert len({v[2] for v in by.values()}) == 3, by
+    edge_de, _a, _b = _worst_against(['#000000'], fills)
+    assert edge_de >= 31.5, round(edge_de, 3)
+    # opaque: an alpha would draw tints that are not Tol's colors, and at
+    # the old 0.8 the red and the blue fall under the floor
+    assert {v[2] for v in by.values()} <= {None, 1.0}, by
+    tinted = cvd._worst_de(_blend('#BB5566', 0.8), _blend('#4477AA', 0.8))
+    assert tinted < cvd.CVD_FLOOR and 16.4 < tinted < 16.5, tinted
+    # every mark stands off the face by 3:1, or its edge does, and the
+    # edge also stands off the grid lines the marks sit on
+    assert face == WHITE_FACE, face
+    assert grids, "the plot drew no grid"
+    unders = [face] + [_blend(g, 1.0 if alpha is None else alpha, face)
+                       for g, alpha in grids]
+    for label, (fill, edge, _alpha, _mk, width) in by.items():
+        assert width > 0, (label, width)
+        for under in unders:
+            assert _contrast(fill, under) >= 3.0 or \
+                _contrast(edge, under) >= 3.0, (label, fill, edge, under)
+    assert _contrast('#CCBB44', face) < 3.0       # why the edge matters
+    assert _contrast('#FFFFFF', face) < 3.0       # the warm-up's face too
+    assert len({v[3] for v in by.values()}) == 4, by
     old = cvd._worst_de('#ff7f0e', '#2ca02c')
     assert old < cvd.CVD_FLOOR, old
 

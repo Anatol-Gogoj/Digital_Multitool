@@ -5252,23 +5252,38 @@ class EdgeReviewApp:
             return
         import sldea_preview as pv
         fig, ax = plt.subplots(figsize=(8, 5))
-        # prefix match keeps old runs (tags 'post'/'pre') plottable alongside
-        # new ones ('post-ramp'/'pre-ramp'). Post- and pre-ramp wear the
-        # colors the SLDEA tab's preview gives them (Tol bright blue and
-        # yellow; matplotlib's default cycle before #454), on the preview's
-        # black edge because yellow is light on the white face. Baseline is
-        # Tol black, not the preview's grey, which is only 16.02 from the
-        # yellow under simulated color blindness; black is 39.2 from both.
-        # The marker shape stays the cue that needs no color.
-        for pref, mk, label, col in (
-                ('post', 'o', 'post-ramp', pv.MARKERS['post-ramp'][1]),
-                ('pre', 's', 'pre-ramp', pv.MARKERS['pre-ramp'][1]),
-                ('baseline', '^', 'baseline', '#000000')):
+        # Each tag is marked as the SLDEA tab's preview marks it, through
+        # sldea_preview.mpl_style (#478): the camera warm-up an open circle
+        # (Tol white face), baseline a Tol high-contrast red diamond,
+        # post-ramp a Tol bright blue triangle and pre-ramp a Tol bright
+        # yellow square, each on the preview's black edge and under the
+        # preview's legend text. Until #478 the baseline was a black
+        # triangle and post-ramp a circle, the preview's post-ramp and
+        # warm-up shapes, and the warm-up frame was left out; the owner
+        # chose to show it (2026-10-21). The four fills are 21.36 apart at
+        # worst under simulated color blindness (baseline vs post-ramp)
+        # and 31.5 or more from the black edge, which is what shows the
+        # white face on the white plot. They are opaque because at the old
+        # 0.8 alpha the red and the blue blend to 16.45 apart, under the
+        # floor of 18. The prefix match keeps old runs (tags 'post'/'pre')
+        # plottable alongside new ones ('post-ramp'/'pre-ramp'), and the
+        # legend follows the preview's order. Opaque marks hide what is
+        # under them, so marks that share a point are stacked largest
+        # first: the warm-up circle, drawn larger (MPL_WARMUP_SIZE), at
+        # the bottom, then the baseline diamond, then pre-ramp's square,
+        # and post-ramp's triangle on top. A warm-up and a baseline of one
+        # area then show the red diamond inside the white ring, and a
+        # landing's two snapshots of one area a blue triangle in a square
+        # with yellow corners. Drawn the other way, the circle covered the
+        # diamond's red and the square all of the triangle.
+        z = {'warmup': 2.0, 'baseline': 2.1, 'pre-ramp': 2.2,
+             'post-ramp': 2.3}
+        for tag, pref in (('warmup', 'warmup'), ('baseline', 'baseline'),
+                          ('post-ramp', 'post'), ('pre-ramp', 'pre')):
             px = [x for x, t in zip(xs, tags) if (t or '').startswith(pref)]
             py = [y for y, t in zip(ys, tags) if (t or '').startswith(pref)]
             if px:
-                ax.plot(px, py, mk, label=label, alpha=0.8, color=col,
-                        markeredgecolor=pv.OUTLINE)
+                ax.plot(px, py, zorder=z[tag], **pv.mpl_style(tag))
         ax.set_xlabel('nominal voltage (kV)')
         ax.set_ylabel('active area (mm²)' if scale else 'active area (px²)')
         ax.set_title(os.path.basename(self.rundir) + ' — active area vs voltage')

@@ -1781,22 +1781,32 @@ are no longer see-through (`#478`).
   as before, and the 07-23 era's `post`/`pre` still count as post-ramp and
   pre-ramp.
 - **Opaque, as on the canvas**, because the red and the blue fail the floor
-  as tints (below). An opaque mark hides what is under it. At one marker
-  size the triangle fits inside the square and the circle inside the
-  diamond, so post-ramp and warm-up are drawn above the rest. Equal areas
-  at a landing show a blue triangle in a square with yellow corners;
-  drawn the other way, the square covered all of the triangle but a speck
-  of edge at its apex. Equal areas at 0 kV show a white circle inside the
-  diamond's black points, and the diamond's red is covered: at 110 dpi
-  the circle is about 9 px across and the diamond 13 px point to point,
-  and the circle touches all four of its sides. Drawn the other way, the
-  diamond would hide the circle entirely. A warm-up and a baseline that
-  measure the same area are the expected case, since both are the
-  membrane at rest two seconds apart.
-- **One marker size**, 6 pt (`MPL_SIZE`, matplotlib's default written out),
-  for every frame kind, since the drawing order above relies on it.
-  matplotlib's `^` is as wide as it is tall, where the preview's triangle
-  is equilateral; both read as a triangle with its apex up.
+  as tints (below). An opaque mark hides what is under it, so marks that
+  share a point are stacked largest first: the warm-up circle at the
+  bottom, then the baseline diamond, then pre-ramp's square, and
+  post-ramp's triangle on top.
+- **The warm-up circle is larger than the rest and rings the baseline.** A
+  warm-up and a baseline that measure the same area are the expected case,
+  since both are the membrane at rest two seconds apart, so they land on
+  one point. At the other marks' size the circle fits exactly inside the
+  diamond (6 pt across, against 8.5 pt point to point, touching all four
+  sides): drawn over the diamond, its white face covered the red and left
+  only the diamond's black points; drawn under it, the diamond hid it
+  entirely. The first draft of this change drew it over; review decided,
+  within the owner's call to show the warm-up, to draw it first and
+  larger. At
+  `MPL_WARMUP_SIZE`, 13 pt, the circle's black edge starts 6.00 pt from
+  the centre and the diamond's mitred black tips end at 4.95 pt, so at
+  Save's 110 dpi 1.60 px of white face separates them (measured from the
+  drawn paths; 12 pt would leave 0.84 px, 14 pt 2.37 px). In the PNG the
+  red diamond shows inside a complete black ring.
+- **One marker size for the other three**, 6 pt (`MPL_SIZE`,
+  matplotlib's default written out): at one size the triangle fits inside
+  the square, so equal areas at a landing show a blue triangle in a
+  square with yellow corners. Drawn the other way, the square covered all
+  of the triangle but a speck of edge at its apex. matplotlib's `^` is as
+  wide as it is tall, where the preview's triangle is equilateral; both
+  read as a triangle with its apex up.
 
 **Evidence.** Measured with the simulator in `tests/test_sldea_preview.py`
 (worst-case CIEDE2000 over normal and Machado-2009 deutan, protan and tritan
@@ -1820,13 +1830,11 @@ vision, applied in linear RGB; house floor 18):
 - `tests/test_sldea_preview.py` reads both plots as drawn: the canvas items
   and the artists of the figure `_save_plot` writes, each outline named by
   its geometry, and requires the same shape, fill, edge and legend words
-  per tag. `tests/test_sldea_tol_colors.py` measures the figure's own
-  colors, opacity and edges.
-
-**Open.** Should the baseline's red stay visible under an equal-area
-warm-up? Drawing the warm-up circle with no face in this plot would show
-the red diamond with a black ring inside it, but the circle would then
-differ from the preview's white face where it overlaps another mark.
+  per tag. It also reads the saved PNG of a warm-up and a baseline of one
+  area: red pixels inside the diamond, and on every ray from the shared
+  point, 5 degrees apart, the ring's white face and then its black edge.
+  `tests/test_sldea_tol_colors.py` measures the figure's own colors,
+  opacity and edges.
 
 **Left as it is.** In the plot window a triangle means a sweep leg and an
 open diamond an advisory. That figure keys both in its own legend, and

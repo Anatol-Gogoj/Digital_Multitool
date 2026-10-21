@@ -5268,22 +5268,22 @@ class EdgeReviewApp:
         # floor of 18. The prefix match keeps old runs (tags 'post'/'pre')
         # plottable alongside new ones ('post-ramp'/'pre-ramp'), and the
         # legend follows the preview's order. Opaque marks hide what is
-        # under them, so the two marks that fit inside the one they share
-        # a voltage with are drawn above the rest: the warm-up circle
-        # inside the baseline diamond at 0 kV, and post-ramp's triangle
-        # inside the pre-ramp square at each landing. Equal areas then show
-        # a triangle in a square with the yellow at its corners, and a
-        # white circle in a diamond whose red is covered but whose black
-        # points still show. The other way round, the diamond would hide
-        # the circle outright.
+        # under them, so marks that share a point are stacked largest
+        # first: the warm-up circle, drawn larger (MPL_WARMUP_SIZE), at
+        # the bottom, then the baseline diamond, then pre-ramp's square,
+        # and post-ramp's triangle on top. A warm-up and a baseline of one
+        # area then show the red diamond inside the white ring, and a
+        # landing's two snapshots of one area a blue triangle in a square
+        # with yellow corners. Drawn the other way, the circle covered the
+        # diamond's red and the square all of the triangle.
+        z = {'warmup': 2.0, 'baseline': 2.1, 'pre-ramp': 2.2,
+             'post-ramp': 2.3}
         for tag, pref in (('warmup', 'warmup'), ('baseline', 'baseline'),
                           ('post-ramp', 'post'), ('pre-ramp', 'pre')):
             px = [x for x, t in zip(xs, tags) if (t or '').startswith(pref)]
             py = [y for y, t in zip(ys, tags) if (t or '').startswith(pref)]
             if px:
-                ax.plot(px, py,
-                        zorder=2.5 if tag in ('warmup', 'post-ramp') else 2,
-                        **pv.mpl_style(tag))
+                ax.plot(px, py, zorder=z[tag], **pv.mpl_style(tag))
         ax.set_xlabel('nominal voltage (kV)')
         ax.set_ylabel('active area (mm²)' if scale else 'active area (px²)')
         ax.set_title(os.path.basename(self.rundir) + ' — active area vs voltage')

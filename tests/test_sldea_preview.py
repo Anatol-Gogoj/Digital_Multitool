@@ -216,26 +216,51 @@ def _hex(colour):
     return mcolors.to_hex(colour).upper()
 
 
-def _area_plot_marks(rows, rejected=()):
+def _marker_reach(artist):
+    """How far a Line2D's marker path reaches from its centre, in points
+    (its largest vertex coordinate times its size)."""
+    from matplotlib.markers import MarkerStyle
+    ms = getattr(artist, '_marker', None)
+    if not isinstance(ms, MarkerStyle):
+        ms = MarkerStyle(artist.get_marker())
+    path = ms.get_path().transformed(ms.get_transform())
+    return float(max(max(abs(x), abs(y)) for x, y in path.vertices)
+                 * artist.get_markersize())
+
+
+def _area_plot_marks(rows, rejected=(), areas=None, png=False):
     """Run Edge Review's real Save plot (`_save_plot`) on `rows` and read
     back what the figure holds: ({label: mark}, [legend entry, ...]) where
-    a mark is {'shape', 'fill', 'edge', 'alpha', 'size', 'z', 'xs'} and a
-    legend entry is (text, shape, fill, edge), in the legend's order.
-    Every row has an accepted area except the indices in `rejected`,
-    which carry None, as Edge Review records a rejected frame."""
+    a mark is {'shape', 'fill', 'edge', 'alpha', 'size', 'z', 'xs',
+    'reach_pt', 'edge_pt', 'px'} ('px': each point's centre in the saved
+    PNG's pixels) and a legend entry is (text, shape, fill, edge), in the
+    legend's order. Every row has an accepted area (`areas[i]`, else
+    100 + i) except the indices in `rejected`, which carry None, as Edge
+    Review records a rejected frame. With `png`, the saved image (an RGB
+    array) and its dpi come back too."""
     import shutil
     import tempfile
     import types
+    import numpy as np
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib.figure import Figure
+    from PIL import Image
     import sldea_edge_gui
     d = tempfile.mkdtemp(prefix='preview_area_plot_')
     seen = {}
     real = Figure.savefig
 
-    def spy(fig, *a, **k):
+    def spy(fig, path, *a, **k):
         ax = fig.axes[0]
+        dpi = k.get('dpi') or fig.dpi
+        height = fig.get_figheight() * dpi
+
+        def px(ln):
+            pts = ax.transData.transform(np.column_stack(
+                [ln.get_xdata(), ln.get_ydata()]))
+            return [(x * dpi / fig.dpi, height - y * dpi / fig.dpi)
+                    for x, y in pts]
         seen['lines'] = [
             (ln.get_label(), {'shape': _drawn_shape(ln),
                               'fill': _hex(ln.get_markerfacecolor()),
@@ -243,7 +268,10 @@ def _area_plot_marks(rows, rejected=()):
                               'alpha': ln.get_alpha(),
                               'size': ln.get_markersize(),
                               'z': ln.get_zorder(),
-                              'xs': [float(x) for x in ln.get_xdata()]})
+                              'xs': [float(x) for x in ln.get_xdata()],
+                              'reach_pt': _marker_reach(ln),
+                              'edge_pt': ln.get_markeredgewidth(),
+                              'px': px(ln)})
             for ln in ax.lines]
         leg = ax.get_legend()
         handles = (getattr(leg, 'legend_handles', None)
@@ -252,12 +280,17 @@ def _area_plot_marks(rows, rejected=()):
                            _hex(h.get_markerfacecolor()),
                            _hex(h.get_markeredgecolor()))
                           for t, h in zip(leg.get_texts(), handles)]
-        return real(fig, *a, **k)
+        out = real(fig, path, *a, **k)
+        with Image.open(path) as im:
+            seen['png'] = np.asarray(im.convert('RGB')).astype(int)
+        seen['dpi'] = dpi
+        return out
     Figure.savefig = spy
     try:
         stub = types.SimpleNamespace(
             rundir=d, run={'rows': rows},
-            results={i: (None if i in rejected else {'area_px': 100.0 + i})
+            results={i: (None if i in rejected else
+                         {'area_px': (areas or {}).get(i, 100.0 + i)})
                      for i in range(len(rows))})
         sldea_edge_gui.EdgeReviewApp._save_plot(stub, None)
     finally:
@@ -266,6 +299,8 @@ def _area_plot_marks(rows, rejected=()):
     lines = seen.get('lines', [])
     labels = [label for label, _m in lines]
     assert len(set(labels)) == len(labels), f"one label twice: {labels}"
+    if png:
+        return dict(lines), seen.get('legend', []), seen['png'], seen['dpi']
     return dict(lines), seen.get('legend', [])
 
 
@@ -391,7 +426,10 @@ def test_matplotlib_marks_are_the_canvas_shapes():
         assert style['markerfacecolor'] == fill, (tag, style)
         assert style['markeredgecolor'] == pv.OUTLINE, (tag, style)
         assert style['label'] == label and style['linestyle'] == '', style
-        assert style['markersize'] == pv.MPL_SIZE, style   # one size, all
+        # one size for all but the warm-up, which rings what it shares a
+        # point with in the area plot
+        assert style['markersize'] == (pv.MPL_WARMUP_SIZE if tag == 'warmup'
+                                       else pv.MPL_SIZE), style
         assert 'alpha' not in style, style
 
 
@@ -427,13 +465,18 @@ def test_the_area_plot_marks_each_tag_as_the_preview_does():
     assert drawn['baseline 0 kV']['xs'] == [0.0]
     assert drawn['post-ramp']['xs'] == [1.0, 2.0]
     assert drawn['pre-ramp']['xs'] == [1.0, 2.0]
-    # opaque marks hide what is under them: the circle fits in the
-    # diamond and the triangle in the square at one size, so those two go
-    # on top, and equal areas at one voltage still show both marks
-    assert drawn['warm-up']['z'] > drawn['baseline 0 kV']['z'], drawn
-    assert drawn['post-ramp']['z'] > drawn['pre-ramp']['z'], drawn
-    assert drawn['post-ramp']['z'] > drawn['baseline 0 kV']['z'], drawn
-    assert {m['size'] for m in drawn.values()} == {pv.MPL_SIZE}, drawn
+    # opaque marks hide what is under them, so marks that share a point
+    # stack largest first: the warm-up ring, drawn larger, at the bottom,
+    # then baseline, pre-ramp, and post-ramp's triangle (which fits in the
+    # square at one size) on top
+    order = sorted(drawn, key=lambda label: drawn[label]['z'])
+    assert order == ['warm-up', 'baseline 0 kV', 'pre-ramp', 'post-ramp'], \
+        [(label, drawn[label]['z']) for label in order]
+    assert len({m['z'] for m in drawn.values()}) == 4, drawn
+    others = {m['size'] for label, m in drawn.items() if label != 'warm-up'}
+    assert others == {pv.MPL_SIZE}, drawn
+    assert drawn['warm-up']['size'] == pv.MPL_WARMUP_SIZE > pv.MPL_SIZE, \
+        drawn['warm-up']
     want = [(pv.MARKERS[t][2], pv.MARKERS[t][0], pv.MARKERS[t][1].upper(),
              pv.OUTLINE) for t in tags]
     assert legend == want, legend
@@ -446,6 +489,58 @@ def test_the_area_plot_marks_each_tag_as_the_preview_does():
         assert 'warm-up' not in drawn, (case, list(drawn))
         assert [text for text, _s, _f, _e in legend] == [
             'baseline 0 kV', 'post-ramp', 'pre-ramp'], (case, legend)
+
+
+def test_the_warmup_ring_shows_the_baseline_inside_it():
+    # The warm-up and the baseline are the membrane at rest two seconds
+    # apart, so they usually measure one area and land on one point. The
+    # warm-up circle is drawn first and larger (MPL_WARMUP_SIZE), so it
+    # rings the diamond (2026-10-21). Drawn over it at MPL_SIZE, the white
+    # circle covered the diamond's red; under it at MPL_SIZE, the diamond
+    # hid the circle. Read off the saved PNG: the red diamond shows, and
+    # the ring's black edge shows outside it all the way round, with the
+    # ring's white face between.
+    import math
+    import numpy as np
+    rows = [{'nominal_kV': '0', 'tag': 'warmup'},
+            {'nominal_kV': '0', 'tag': 'baseline'},
+            {'nominal_kV': '1', 'tag': 'post-ramp'},
+            {'nominal_kV': '1', 'tag': 'pre-ramp'}]
+    drawn, _legend, img, dpi = _area_plot_marks(
+        rows, areas={0: 201.0, 1: 201.0, 2: 204.0, 3: 204.0}, png=True)
+    ring, dia = drawn['warm-up'], drawn['baseline 0 kV']
+    assert ring['px'] == dia['px'], (ring['px'], dia['px'])
+    k = dpi / 72.0                                      # px per point
+    # From the drawn paths: the diamond's mitred black tips reach half
+    # its edge width over sin 45 degrees past its points; the ring's black
+    # edge starts half its own width inside its radius.
+    tip = dia['reach_pt'] + dia['edge_pt'] / 2 / math.sin(math.radians(45))
+    inner = ring['reach_pt'] - ring['edge_pt'] / 2
+    assert (inner - tip) * k >= 1.5, \
+        f"the ring clears the diamond by only {(inner - tip) * k:.2f} px"
+    cx, cy = ring['px'][0]
+    rows_, cols_ = np.mgrid[0:img.shape[0], 0:img.shape[1]]
+    near = ((cols_ + 0.5 - cx) ** 2 + (rows_ + 0.5 - cy) ** 2
+            <= (dia['reach_pt'] * k) ** 2)
+    red = np.abs(img - np.array([0xBB, 0x55, 0x66])).sum(axis=2) < 60
+    assert (red & near).sum() >= 20, \
+        f"only {(red & near).sum()} red px: the diamond is covered"
+
+    def gray(r, deg):
+        x = cx + r * math.cos(math.radians(deg))
+        y = cy - r * math.sin(math.radians(deg))
+        return int(img[int(math.floor(y)), int(math.floor(x))].mean())
+    # Along each ray: the diamond, then the ring's white face, then its
+    # black edge. The edge is 1 pt (about 1.5 px) wide, so where it falls
+    # between pixel centres it is two pixels near gray 105, not one black
+    # one: "dark" is under half white.
+    reach = (ring['reach_pt'] + ring['edge_pt']) * k + 2
+    for deg in range(0, 360, 5):
+        grays = [gray(i / 4, deg) for i in range(int(reach * 4))]
+        light = next((i for i, g in enumerate(grays) if g > 200), None)
+        assert light is not None, (deg, grays)
+        assert min(grays[light:]) < 128, \
+            f"no ring edge outside the diamond at {deg} degrees: {grays}"
 
 
 def test_marker_radius_follows_the_room():

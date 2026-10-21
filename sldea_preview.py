@@ -81,25 +81,38 @@ LEGEND_ORDER = ('warmup', 'baseline', 'post-ramp', 'pre-ramp')
 # apex up.
 MPL_MARKERS = {'circle': 'o', 'square': 's', 'diamond': 'D',
                'triangle': '^'}
-# One size for all four, in points: matplotlib's own default, written out
-# so a style sheet cannot change it. At one size the triangle fits inside
-# the square and the circle inside the diamond, which is what keeps a
-# post-ramp mark visible on a pre-ramp mark, and a warm-up mark on a
-# baseline mark, of the same area in Edge Review's area plot.
+# One size for the baseline, post-ramp and pre-ramp marks, in points:
+# matplotlib's own default, written out so a style sheet cannot change it.
+# At one size the triangle fits inside the square, which is what keeps a
+# post-ramp mark visible on a pre-ramp mark of the same area in Edge
+# Review's area plot.
 MPL_SIZE = 6.0
+# The warm-up's circle has its own, larger size (#478, 2026-10-21). In the
+# area plot the warm-up and the baseline are the membrane at rest two
+# seconds apart, so they usually land on one point. At MPL_SIZE the white
+# circle fits exactly inside the baseline diamond and, drawn over it,
+# covered its red. At this size, drawn under it, the circle rings the
+# diamond: the diamond's half-diagonal is 4.24 pt and its mitred black
+# tips reach 4.95 pt, while the circle's black edge starts at
+# 13 / 2 - 0.5 = 6.0 pt, so 1.05 pt (1.6 px at Save's 110 dpi) of the white
+# face shows between them and the whole ring stays visible.
+MPL_WARMUP_SIZE = 13.0
 
 
 def mpl_style(tag):
     """Keyword arguments for matplotlib's Axes.plot that mark `tag` the
     way the canvas does: its shape, its fill on the black edge, and its
-    legend text. No line joins the marks.
+    legend text. No line joins the marks. Every mark is MPL_SIZE across
+    but the warm-up's, which is MPL_WARMUP_SIZE so it can ring a mark on
+    the same point.
 
     Opaque, as on the canvas: at alpha 0.8 on a white face the baseline
     red and the post-ramp blue blend to #C97785 and #6992BB, 16.45 apart
     at worst under simulated color blindness, under the floor of 18
     (#478)."""
     shape, fill, label = MARKERS[tag]
-    return {'marker': MPL_MARKERS[shape], 'markersize': MPL_SIZE,
+    size = MPL_WARMUP_SIZE if tag == 'warmup' else MPL_SIZE
+    return {'marker': MPL_MARKERS[shape], 'markersize': size,
             'linestyle': '', 'color': fill, 'markerfacecolor': fill,
             'markeredgecolor': OUTLINE, 'label': label}
 

@@ -486,7 +486,7 @@ def _shadow_lines(app):
 def test_a_would_trip_never_stops_a_live_run():
     """The watchdog unticked, telemetry on: only the shadow watches. The
     current steps 30 uA 8 s into the 1 kV landing; the shadow would trip,
-    and the run still goes to its end and ramps down as every run does."""
+    and the run still goes to its end and zeroes the SG as every run does."""
     with tempfile.TemporaryDirectory() as tmp:
         app = _run(tmp, ticked=False, tel=True,
                    volts=lambda a: _step_volts(a, 8.0, 0.05, 0.2))

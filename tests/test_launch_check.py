@@ -507,7 +507,7 @@ def test_during_a_run_the_box_waits_for_the_run_to_end():
     Windows it is owner-modal, so while one is open ■ Abort (no key
     binding) does not respond. Edge Review..., Tune params and Plot
     runs... stay enabled during a run, and the worker opens Edge Review
-    itself before its ramp to 0. While _sldea_running or _sldea_starting
+    itself before it zeroes the SG. While _sldea_running or _sldea_starting
     is set, a launch that failed is said on the status line only; the box
     comes once the run has ended, in a callback of its own, never from
     the run's end path."""

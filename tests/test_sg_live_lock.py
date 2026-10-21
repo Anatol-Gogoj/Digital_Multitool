@@ -24,7 +24,7 @@ which would swap the run's DC drive for an arb. What is pinned here:
 
 Everything drives the REAL methods on a Tk-free stub app, against a fake
 signal generator that records every write. How `sldea_run` makes the
-claim, and holds it through the ramp-down and ■ Abort, is the Run gate's
+claim, and holds it through the shutdown and ■ Abort, is the Run gate's
 suite's job (tests/test_sldea_interlock.py, PR #334).
 
 Run: .venv/bin/python tests/test_sg_live_lock.py
@@ -372,7 +372,7 @@ def test_output_refuses_the_live_channel_and_the_other_still_switches():
 
 def test_reconnect_refuses_while_any_channel_is_live():
     """Reconnect closes the handle both channels share, and nulling it
-    mid-run once skipped the safety ramp-down (audit 2026-07-25, C1)."""
+    mid-run once skipped the safety shutdown (audit 2026-07-25, C1)."""
     with _patched(_MB()) as mb:
         app = _App(live=2)
         sg = app.sg

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Static check: no function reads an imported name before it binds that
-same name locally (#474, the bug class behind #468).
+"""Static check: no function rebinds an imported name locally, and no
+function reads one before its own local import of it (#474, the bug
+class behind #468).
 
 #468: arb_editor.ArbWaveformEditor._build_ui named a local Combobox `uc`.
 A binding anywhere in a function makes that name local to the WHOLE
@@ -12,41 +13,52 @@ parsing them with `ast`. It imports none of them, so it needs no display.
 
 What is checked. For each function (def, async def, lambda) it takes the
 names the module imports at module level (a module-level try or if
-included) and the names the function binds itself: assignment, augmented
-or annotated assignment, `for` target, `with ... as`, `except ... as`, a
-local import, a walrus, a nested def or class, a match capture, `del`.
-Parameters bind first. `global` and `nonlocal` exempt a name, because the
-function then does not own it. Comprehension targets stay inside the
-comprehension; a walrus inside one binds in the enclosing function, as in
-Python. A name that is both imported and local FAILS when the function
-reads it before its first local binding.
+included) and the names the function makes local: a parameter,
+assignment, augmented or annotated assignment, a bare annotation, `for`
+target, `with ... as`, `except ... as`, a local import, a walrus, a
+nested def or class, a match capture, `del`. `global` and `nonlocal`
+exempt a name, because the function then does not own it. Comprehension
+targets stay inside the comprehension; a walrus inside one binds in the
+enclosing function, as in Python. For a name that is both imported and
+local, the function FAILS when:
+  1. it makes the name local by anything but an import (a parameter or
+     a bare annotation included), in any order. Inside that function the
+     name is then never the module: `uc = Combobox()` breaks a
+     `uc.TEXT_MUTED` above it (UnboundLocalError) and below it
+     (AttributeError) alike, and inside an `if` it breaks a read below
+     the `if` whichever way the `if` went.
+  2. it re-imports the name locally (`import os` inside the function)
+     but reads it before that import. A local re-import placed above its
+     reads is fine; main has seven.
+`del` alone is no binding: a `del` with no binding before it is a read
+of an unbound local, and fails by rule 2.
 
-"Before" means evaluation order along one straight path through the
-function body: an assignment's value before its targets, a `for` iterable
-before its target, a `with` expression before its `as` name, the read in
-`x += 1` before the write, a comprehension's first iterable in the
-enclosing function, decorators and defaults before the def binds its
-name. A read inside a nested function, lambda or class body counts where
-that scope is written, since it sees the enclosing local and not the
-module: `lambda: uc.TEXT_MUTED` above `uc = ...` is #468 again, deferred
-to the click.
+"Before" in rule 2 means evaluation order along one straight path
+through the function body: an assignment's value before its targets, a
+`for` iterable before its target, a `with` expression before its `as`
+name, the read in `x += 1` before the write, a comprehension's first
+iterable in the enclosing function, decorators and defaults before the
+def binds its name. A read inside a nested function, lambda or class body
+counts where that scope is written, since it sees the enclosing local
+and not the module import.
 
-Known blind spots. The order is source order, not control flow:
-  * Branches: a binding in one arm of an `if` or `try` counts as done for
-    every later line. `if a: np = f()` then `np.x` passes, as does a read
-    in an `except` handler of a name the `try` body binds late.
-  * Loops: a read above a binding in the same loop body fails even when
-    it only runs on later passes, after the binding; a read below a
-    binding that runs on only some passes is taken as safe.
+Known blind spots of rule 2. The order is source order, not control flow:
+  * Branches: a local import in one arm of an `if` or `try` counts as
+    done for every later line.
+  * Loops: a read above a local import in the same loop body fails even
+    when it only runs on later passes, after the import; a read below an
+    import that runs on only some passes is taken as safe.
+  * A nested function or lambda written above the local import and read
+    from there is flagged even if it is only called after the import, so
+    it would work. The message says so; moving the import up fixes it.
   * A generator expression counts where it is written, like the other
     comprehensions, although its body runs only when it is consumed.
-  * Python deletes the name of `except E as name` when the handler ends;
-    a read of it after the handler is not caught.
-  * A read after the first binding is taken to mean the local. If that
-    local is a different object from the module (a Combobox named `uc`),
-    a later `uc.TEXT_MUTED` is an AttributeError this check cannot see.
+  * A read after a `del` of a locally re-imported name is not caught.
   * Annotations count as reads, even where Python never evaluates them.
     That is the strict side; none on main trips it.
+And of both rules:
+  * A local import is taken to be the same module as the module-level
+    one: `import other as uc` inside a function is not compared.
   * Only names imported at module level are checked. A module constant
     or a builtin shadowed the same way is not, and `from x import *`
     names are unknown.
@@ -73,12 +85,15 @@ OUTER = 'outer'
 # is invisible to them, so it passes through the class untouched
 THROUGH = 'through'
 
-# One local binding of a module-level import name, in one function.
-# early_reads holds (line, how) for every read before that binding; the
-# shadow is a failure only when it is not empty. bind_line is None when
-# the name is local only through `del` or a bare annotation.
+# A module-level import name that one function makes local. bind_line and
+# how are its first local binding; bind_line is None when nothing binds
+# it (only a `del` or a bare annotation makes it local). rebinds holds
+# (line, how) for every way the function makes it local other than an
+# import (rule 1); early_reads holds (line, how) for every read before the
+# first binding (rule 2). The shadow fails when either is not empty.
 Shadow = namedtuple(
-    'Shadow', 'path func name bind_line how import_line early_reads')
+    'Shadow',
+    'path func name bind_line how import_line early_reads rebinds')
 
 
 class _Scope:
@@ -89,7 +104,7 @@ class _Scope:
         self.events = []            # (kind, name, line, how)
         self.declared = set()       # named by `global` or `nonlocal`
         self.globals = set()        # named by `global`
-        self.unbound_locals = {}    # name -> (line, how): local, never bound
+        self.unbound_locals = {}    # name -> [(line, how)]: local, unbound
 
     def locals(self):
         bound = {e[1] for e in self.events if e[0] == BIND}
@@ -163,7 +178,8 @@ class _Builder:
         else:
             # `del x` needs x bound, and makes x local without binding it
             scope.events.append((READ, node.id, node.lineno, 'del'))
-            scope.unbound_locals.setdefault(node.id, (node.lineno, 'del'))
+            scope.unbound_locals.setdefault(node.id, []).append(
+                (node.lineno, 'del'))
 
     def visit_FunctionDef(self, node, scope, prefix, how):
         # decorators, defaults and annotations run here, before the def
@@ -256,8 +272,8 @@ class _Builder:
                                  'annotated assignment'))
         else:
             # a bare `x: int` makes x local without binding it
-            scope.unbound_locals.setdefault(
-                target.id, (target.lineno, 'bare annotation'))
+            scope.unbound_locals.setdefault(target.id, []).append(
+                (target.lineno, 'bare annotation'))
 
     def visit_For(self, node, scope, prefix, how):
         self.visit(node.iter, scope, prefix)
@@ -323,8 +339,8 @@ class _Builder:
 
 
 def scan_source(source, path='<string>'):
-    """Every local binding of a module-level import name in `source`, as
-    Shadow tuples in function order. Raises SyntaxError."""
+    """Every module-level import name that a function in `source` makes
+    local, as Shadow tuples in function order. Raises SyntaxError."""
     builder = _Builder()
     module = builder.module(ast.parse(source, filename=path))
     imports = {}
@@ -335,24 +351,31 @@ def scan_source(source, path='<string>'):
     for qualname, scope in builder.functions:
         events = scope.events
         for name in sorted(scope.locals() & set(imports)):
-            binds = [i for i, e in enumerate(events)
-                     if e[0] == BIND and e[1] == name]
+            binds = [e for e in events if e[0] == BIND and e[1] == name]
+            unbound = scope.unbound_locals.get(name, [])
             if binds:
-                stop = binds[0]
-                bind_line, how = events[stop][2], events[stop][3]
+                stop = events.index(binds[0])
+                bind_line, how = binds[0][2], binds[0][3]
             else:
                 stop = len(events)
-                bind_line, how = None, scope.unbound_locals[name][1]
+                bind_line, how = None, unbound[0][1]
             early = tuple((e[2], e[3]) for e in events[:stop]
                           if e[0] == READ and e[1] == name)
+            # rule 1: anything but an import, and a bare annotation, says
+            # the name means something else here; a `del` binds nothing
+            rebinds = tuple(sorted(
+                [(e[2], e[3]) for e in binds if e[3] != 'import']
+                + [u for u in unbound if u[1] == 'bare annotation']))
             shadows.append(Shadow(path, qualname, name, bind_line, how,
-                                  imports[name], early))
+                                  imports[name], early, rebinds))
     return shadows
 
 
 def scan_paths(paths):
-    """(shadows, errors) over files; an error is a file that will not
-    parse, which fails the suite too."""
+    """(shadows, errors) over files; an error is a file that will not be
+    read or parsed, which fails the suite too. A RecursionError (an
+    expression nested deeper than the parser or this walk can follow) is
+    one, so the failure still names its file."""
     shadows, errors = [], []
     for path in paths:
         shown = os.path.relpath(path, ROOT) if _inside(path) else path
@@ -360,7 +383,8 @@ def scan_paths(paths):
             with tokenize.open(path) as handle:
                 source = handle.read()
             shadows.extend(scan_source(source, shown))
-        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        except (OSError, SyntaxError, UnicodeDecodeError,
+                RecursionError) as exc:
             errors.append(f'{shown}: {type(exc).__name__}: {exc}')
     return shadows, errors
 
@@ -390,32 +414,66 @@ def repo_files():
     return files
 
 
+def _lines(pairs, skip=()):
+    """The distinct line numbers of (line, how) pairs, in order, as text."""
+    out = []
+    for line, _how in pairs:
+        if line not in out and line not in skip:
+            out.append(line)
+    return ', '.join(str(line) for line in out)
+
+
 def describe(shadow):
-    """The failure line for a shadow with early reads."""
+    """The failure message for a failing shadow."""
+    name = repr(shadow.name)
+    imported = f'the module imports {name} at line {shadow.import_line}'
+    if shadow.rebinds:
+        # rule 1: the name means something else in this function
+        line, how = shadow.rebinds[0]
+        text = (f'{shadow.path}:{line}: {shadow.func} makes {name} a local '
+                f'at line {line} ({how}), but {imported}. A local binding '
+                f'covers the whole function, so no line of it sees the '
+                f'import: a read above line {line} raises '
+                f'UnboundLocalError and a read below it gets the local '
+                f'(the #468 bug). Rename the local.')
+        more = _lines(shadow.rebinds, skip=(line,))
+        if more:
+            text += f' Also made local at line(s) {more}.'
+        if shadow.early_reads:
+            text += (f' Read before its first binding at line(s) '
+                     f'{_lines(shadow.early_reads)}.')
+        return text
+    # rule 2: only local imports bind it, and a read comes first
     line, how = shadow.early_reads[0]
     if shadow.bind_line is None:
-        binding = f'is local through a {shadow.how} and never bound'
+        text = (f'{shadow.path}:{line}: {shadow.func} reads or deletes '
+                f'{name}, but a `del` makes it local to the whole function '
+                f'and nothing binds it, so this raises UnboundLocalError; '
+                f'{imported}.')
+    elif how == 'nested':
+        text = (f'{shadow.path}:{line}: {shadow.func} has a nested '
+                f'function, lambda or class that reads {name} at line '
+                f'{line}, above the local import at line '
+                f'{shadow.bind_line}. It reads that local, not the module '
+                f'import at line {shadow.import_line}, so it fails if it '
+                f'runs before line {shadow.bind_line}; a nested def or '
+                f'lambda called only after it works. Move the import above '
+                f'line {line}.')
     else:
-        binding = (f'is bound locally at line {shadow.bind_line} '
-                   f'({shadow.how})')
-    if how == 'nested':
-        effect = ('this read, inside a nested function, lambda or class, '
-                  'gets the local and not the import')
-    else:
-        effect = 'this read raises UnboundLocalError'
-    more = ''
-    if len(shadow.early_reads) > 1:
-        rest = ', '.join(str(r[0]) for r in shadow.early_reads[1:])
-        more = f' Also read early at line(s) {rest}.'
-    return (f'{shadow.path}:{line}: {shadow.func} reads {shadow.name!r} '
-            f'(imported at line {shadow.import_line}) before its first '
-            f'local binding. {shadow.name!r} {binding}, which makes it '
-            f'local to the whole function, so {effect} (the #468 bug).'
-            f'{more}')
+        text = (f'{shadow.path}:{line}: {shadow.func} reads {name} before '
+                f'the local import at line {shadow.bind_line}. That import '
+                f'makes {name} local to the whole function, so this read '
+                f'raises UnboundLocalError instead of reaching the module '
+                f'import at line {shadow.import_line}. Move the import '
+                f'above line {line}.')
+    more = _lines(shadow.early_reads, skip=(line,))
+    if more:
+        text += f' Also read early at line(s) {more}.'
+    return text
 
 
 def _failing(shadows):
-    return [s for s in shadows if s.early_reads]
+    return [s for s in shadows if s.early_reads or s.rebinds]
 
 
 # Self-tests: crafted sources with a known answer.
@@ -448,12 +506,15 @@ class ArbWaveformEditor:
 
 def test_468_shape_is_caught():
     bad = _one_failure(SOURCE_468, 'ArbWaveformEditor._build_ui', 'uc')
+    assert bad.rebinds == ((8, 'assignment'),), bad
     assert bad.early_reads == ((7, 'read'),), bad
     assert (bad.bind_line, bad.how, bad.import_line) == \
         (8, 'assignment', 2), bad
     text = describe(bad)
-    assert text.startswith('<crafted>:7: ArbWaveformEditor._build_ui '
-                           "reads 'uc'"), text
+    assert text.startswith('<crafted>:8: ArbWaveformEditor._build_ui '
+                           "makes 'uc' a local at line 8 (assignment)"), text
+    assert text.endswith('Read before its first binding at line(s) 7.'), \
+        text
 
 
 def test_468_fix_passes():
@@ -462,8 +523,53 @@ def test_468_fix_passes():
     assert _scan(fixed) == [], _scan(fixed)
 
 
-# Each binding form below, written after a read of the imported name `np`,
-# must be caught, and named as the binding that shadows it.
+def test_a_read_after_the_rebinding_is_caught():
+    # #468 with the lines the other way round: no UnboundLocalError, but
+    # uc is the Combobox there, so uc.TEXT_MUTED is an AttributeError
+    source = '''
+import tkinter.ttk as ttk
+import ui_colors as uc
+
+
+class E:
+    def _build_ui(self, view):
+        uc = ttk.Combobox(view); uc.pack()
+        ttk.Label(view, foreground=uc.TEXT_MUTED)
+'''
+    bad = _one_failure(source, 'E._build_ui', 'uc')
+    assert (bad.rebinds, bad.early_reads) == \
+        (((7, 'assignment'),), ()), bad
+
+
+def test_a_rebinding_in_a_branch_is_caught():
+    # one arm binds the Combobox; the read below the if breaks either way
+    source = '''
+import tkinter.ttk as ttk
+import ui_colors as uc
+
+
+class E:
+    def _build_ui(self, view, show_units):
+        if show_units:
+            uc = ttk.Combobox(view)
+            uc.pack()
+        ttk.Label(view, foreground=uc.TEXT_MUTED)
+'''
+    bad = _one_failure(source, 'E._build_ui', 'uc')
+    assert (bad.rebinds, bad.early_reads) == \
+        (((8, 'assignment'),), ()), bad
+
+
+def test_a_parameter_named_like_an_import_is_caught():
+    source = 'import numpy as np\n\n\ndef f(np):\n    return np\n'
+    bad = _one_failure(source, 'f', 'np')
+    assert bad.rebinds == ((4, 'parameter'),), bad
+
+
+# Every form below makes the imported name `np` local. Each one but a
+# local import is rule 1 and fails wherever it stands. A local import
+# fails only after a read (rule 2). `del` binds nothing, so it reads an
+# unbound local and fails wherever it stands, by rule 2.
 BINDING_FORMS = [
     ('np = 1', 'assignment'),
     ('np, other = 1, 2', 'assignment'),
@@ -480,23 +586,37 @@ BINDING_FORMS = [
     ('rows = [(np := r) for r in range(3)]', 'walrus'),
     ('def np():\n        pass', 'def'),
     ('class np:\n        pass', 'class'),
+    ('match 1:\n        case np:\n            pass', 'match capture'),
     ('del np', 'del'),
 ]
 
 
 def test_every_binding_form_is_caught():
     for form, how in BINDING_FORMS:
-        source = ('import numpy as np\n\n\ndef f():\n'
-                  f'    print(np.pi)\n    {form}\n')
-        shadows = _scan(source)
-        bad = _failing(shadows)
-        assert [(s.func, s.name) for s in bad] == [('f', 'np')], \
-            (form, shadows)
-        assert bad[0].how == how, (form, bad)
-        assert bad[0].early_reads[0] == (5, 'read'), (form, bad)
-        # `del` and a bare annotation make np local without binding it
-        unbound = how in ('bare annotation', 'del')
-        assert (bad[0].bind_line is None) == unbound, (form, bad)
+        for read_first in (True, False):
+            body = ['print(np.pi)', form]
+            if not read_first:
+                body.reverse()
+            source = ('import numpy as np\n\n\ndef f():\n'
+                      + ''.join(f'    {line}\n' for line in body))
+            bad = _failing(_scan(source))
+            case = (form, read_first, bad)
+            if how == 'import' and not read_first:
+                assert bad == [], case
+                continue
+            assert [(s.func, s.name) for s in bad] == [('f', 'np')], case
+            shadow = bad[0]
+            assert shadow.how == how, case
+            if how in ('import', 'del'):
+                assert shadow.rebinds == (), case
+                assert shadow.early_reads, case
+            else:
+                assert shadow.rebinds[0][1] == how, case
+            if read_first:
+                assert shadow.early_reads[0] == (5, 'read'), case
+            # `del` and a bare annotation make np local without binding it
+            unbound = how in ('bare annotation', 'del')
+            assert (shadow.bind_line is None) == unbound, case
 
 
 def test_augmented_assignment_alone_is_caught():
@@ -552,7 +672,8 @@ def f(x):
 
 
 def test_local_import_before_reads_passes():
-    # the shape of the six local imports on main (gui.py, sldea_edge_gui.py)
+    # rule 2's good case, the shape of the seven local imports on main
+    # (gui.py, sldea_edge_gui.py)
     source = '''
 import numpy as np
 import os
@@ -625,10 +746,10 @@ def f(rows):
 
 
 def test_reads_in_nested_scopes_count():
-    # a nested scope written before the local binding sees the local, not
-    # the import: each of these reads is caught at its own line. A
-    # comprehension's first iterable is the exception that runs in the
-    # function itself, so it is a plain read.
+    # rule 2: a nested scope written above the local import sees the
+    # local, not the module import, so each of these reads is caught at
+    # its own line. A comprehension's first iterable is the exception: it
+    # runs in the function itself, so it is a plain read.
     readers = [
         ('cb = lambda: uc.TEXT_MUTED', 'nested'),
         ('def cb():\n        return uc.TEXT_MUTED', 'nested'),
@@ -640,10 +761,11 @@ def test_reads_in_nested_scopes_count():
     ]
     for reader, expected in readers:
         source = ('import ui_colors as uc\n\n\ndef build(view):\n'
-                  f'    {reader}\n    uc = view.combobox()\n')
+                  f'    {reader}\n    import ui_colors as uc\n')
         bad = _failing(_scan(source))
         assert [(s.func, s.name) for s in bad] == [('build', 'uc')], \
             (reader, bad)
+        assert bad[0].rebinds == (), (reader, bad)
         line, how = bad[0].early_reads[0]
         assert how == expected, (reader, bad)
         assert 'uc.' in source.splitlines()[line - 1], (reader, bad)
@@ -665,6 +787,66 @@ def f(rows):
     shadows = _scan(source)
     assert _failing(shadows) == [], shadows
     assert [(s.func, s.name) for s in shadows] == [('f', 'np')], shadows
+
+
+def test_a_nested_read_above_a_local_import_says_what_happens():
+    # the known limit: g only runs after the import, so this works, but it
+    # is flagged; the message says when it fails and how to fix it
+    source = '''
+import numpy as np
+
+
+def f():
+    def g():
+        return np.pi
+    import numpy as np
+    return g()
+'''
+    bad = _one_failure(source, 'f', 'np')
+    assert (bad.early_reads, bad.rebinds) == (((6, 'nested'),), ()), bad
+    text = describe(bad)
+    assert text.startswith("<crafted>:6: f has a nested function, lambda "
+                           "or class that reads 'np' at line 6, above the "
+                           "local import at line 7."), text
+    assert 'fails if it runs before line 7' in text, text
+    assert 'called only after it works' in text, text
+
+
+def test_the_message_names_each_early_line_once():
+    source = '''
+import numpy as np
+
+
+def f():
+    print(np.pi, np.e)
+    print(np.e, np.pi)
+    import numpy as np
+'''
+    bad = _one_failure(source, 'f', 'np')
+    assert [r[0] for r in bad.early_reads] == [5, 5, 6, 6], bad
+    text = describe(bad)
+    assert text.startswith("<crafted>:5: f reads 'np' before the local "
+                           "import at line 7."), text
+    assert text.endswith(' Also read early at line(s) 6.'), text
+    one_line = describe(_one_failure(
+        source.replace('    print(np.e, np.pi)\n', ''), 'f', 'np'))
+    assert 'Also' not in one_line, one_line
+
+
+def test_too_deep_a_file_is_an_error_that_names_it():
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix='shadow_scan_')
+    try:
+        path = os.path.join(folder, 'deep.py')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('total = ' + ' + '.join(['1'] * 5000) + '\n')
+        shadows, errors = scan_paths([path])
+        assert shadows == [], shadows
+        assert len(errors) == 1 and errors[0].startswith(path + ': ') \
+            and 'RecursionError' in errors[0], errors
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def test_a_class_scope_name_does_not_reach_methods():
@@ -707,7 +889,7 @@ def grab(cam):
     assert [(s.func, s.name) for s in bad] == [('grab', 'cv2')], bad
 
 
-def test_repo_has_no_shadowed_import_reads():
+def test_repo_has_no_shadowed_imports():
     files = repo_files()
     names = {os.path.basename(p) for p in files}
     # the scan is not vacuous: it reached the modules it exists for
@@ -716,8 +898,8 @@ def test_repo_has_no_shadowed_import_reads():
     assert not errors, '\n'.join(errors)
     bad = _failing(shadows)
     assert not bad, '\n' + '\n'.join(describe(s) for s in bad)
-    print(f'    {len(files)} files, {len(shadows)} local bindings of '
-          f'imported names, each one before its reads')
+    print(f'    {len(files)} files, {len(shadows)} local re-imports of '
+          f'imported names, each one above its reads')
 
 
 def _cli(paths):
@@ -725,8 +907,8 @@ def _cli(paths):
     bad = _failing(shadows)
     for text in errors + [describe(s) for s in bad]:
         print(text)
-    print(f'{len(paths)} file(s), {len(shadows)} local binding(s) of '
-          f'imported names, {len(bad)} read before binding, '
+    print(f'{len(paths)} file(s), {len(shadows)} function(s) making an '
+          f'imported name local, {len(bad)} failing, '
           f'{len(errors)} unparsed')
     return 1 if bad or errors else 0
 

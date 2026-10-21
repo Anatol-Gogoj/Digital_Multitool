@@ -6001,13 +6001,33 @@ class InstrumentControlGUI:
             # ~10 s when a stream will not start): do not switch the SG on
             # or learn a baseline for a run that is already over.
             # --- SG: DC control voltage, output ON (live only) ---
-            if not dry and self.sg and not self._sldea_stop:
-                self.sg.set_load_polarity(sgch, load='HZ', polarity='NOR')
-                self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
-                # From here the channel holds the run's levels, so window
-                # close zeroes it if the run has not finished (#460)
-                self._sldea_sg_dc_ch = sgch
-                self.sg.set_output(sgch, True)
+            # The stop is checked again under the SG's own I/O lock, and the
+            # three writes and the mark are all made before it is let go
+            # (#471), as the level writes are (#460). Continuous Logging can
+            # hold that lock past window close's wait; close then finds no
+            # mark, writes no zero and switches the outputs off, and writes
+            # queued here used to land after that, leaving the channel ON at
+            # DC 0 V. Now a stop set while this waits means no write and no
+            # mark, and a close after the check queues behind these writes.
+            # `sg` is the handle captured above, which the finally block
+            # zeroes; on a LIVE run it is self.sg, as the SG's Reconnect is
+            # refused once sldea_run has claimed the channel. Nothing under
+            # the lock may hand work to the Tk thread (no _sldea_log, status
+            # or root.after: a Tk callback, window close, can wait for this
+            # lock); only driver writes, each re-taking this RLock, and one
+            # attribute. A write that raises leaves the `with`, which lets
+            # the lock go.
+            if not dry and sg is not None and not self._sldea_stop:
+                with _io_lock(sg):
+                    if not self._sldea_stop:
+                        sg.set_load_polarity(sgch, load='HZ',
+                                             polarity='NOR')
+                        sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
+                        # From here the channel holds the run's levels, so
+                        # window close zeroes it if the run has not
+                        # finished (#460)
+                        self._sldea_sg_dc_ch = sgch
+                        sg.set_output(sgch, True)
 
             # Arming the breakdown watchdog. One rule (owner decision
             # 2026-10-08, #423): a ticked LIVE run always arms, and only a

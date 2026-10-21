@@ -4947,6 +4947,131 @@ replies, citing that session's date.** Not code now.
     stack, in files this change does not touch.
 - **No bench gate:** this adds no app I/O. The probe is the bench tool.
 
+## A LIVE run switches its SG channel on under the SG's lock, so a window close cannot leave the output ON at DC 0 V (2026-10-21)
+
+**TL;DR:** A LIVE run's first SG writes (load and polarity, DC at 0 V,
+output ON) checked the stop once, outside the SG's I/O lock. If those
+writes queued behind a long hold of that lock, a window close could switch
+the outputs off first, and the run's writes could then switch its channel
+back ON at 0 V. Now the run checks the stop again under the lock and makes
+all three writes, and the window-close mark, before it lets go (#471). What
+is sent is unchanged. Not bench-checked yet; the check is in #369.
+
+**Observation (on `38e4cbd`, from the second adversarial review of PR
+#467).**
+
+- `_sldea_worker` read `_sldea_stop` once, then called `set_load_polarity`
+  and `set_basic_wave(WVTP='DC', OFST=0.0)`, set the `_sldea_sg_dc_ch`
+  mark, and called `set_output(sgch, True)`. Each driver call takes
+  `instruments._io_lock` by itself, so the three writes were three
+  separate lock holds, all after the one check.
+- Continuous Logging reads the SG on its own thread, and one timed-out
+  query holds that lock for up to 5 s (`BK4055B.TIMEOUT_MS`), longer than
+  window close's 30 x 0.1 s wait. A worker that passed the check and then
+  queued behind such a hold had not set the mark, so the close wrote no
+  zero and went on to switch CH1 and CH2 off. Those writes queue on the
+  same lock, and the run's writes and the close's then take turns on it,
+  so the run's output ON could land after the close's OFF, before the
+  session closed. The channel was left ON at DC 0 V.
+- That is 0 V, not a level, but it is the opposite of what the close
+  promises, and it is in the HV path.
+
+**Decision (2026-10-21; the fix #471 asks for, the pattern of #460's level
+writes).**
+
+- The run's start takes `_io_lock(sg)`, checks `_sldea_stop` again under
+  it, and makes the three writes and the mark before it releases the lock.
+  A stop set while the worker waits for the lock means no write and no
+  mark. A close that comes after the check waits for those writes, so its
+  outputs-off lands after the output ON.
+- `sg` is the handle the worker captured at its start, the one its finally
+  block zeroes. On a LIVE run it is `self.sg`: the SG's Reconnect is
+  refused from the moment `sldea_run` claims the channel, before the
+  worker starts.
+- Nothing sent changes: the same three calls, with the same arguments, in
+  the same order. A DRY run still takes no SG lock and writes nothing.
+- No deadlock. Under the lock the worker makes only driver writes, which
+  re-take the same RLock on the same thread, and one attribute write. It
+  hands nothing to the Tk thread there (no `_sldea_log`,
+  `_sldea_set_status` or `root.after`), and no SG driver call does either.
+  That matters because a Tk callback can wait for this lock (window close
+  does). On threaded Tcl a call into Tk from another thread waits for the
+  Tk thread to run it, so a worker that called `root.after` while holding
+  the lock a Tk callback waits on would deadlock; the adversarial review
+  reproduced that on real Tk. The close holds no SG lock during its wait.
+  So the Tk thread can wait for the worker's hold, but the worker never
+  waits for the Tk thread. A write that raises leaves the `with` block,
+  and that releases the lock.
+- Cost: a close that comes during the start writes waits for the rest of
+  them before its own. A link that dies costs one timeout, not three: the
+  write that times out raises, and leaving the `with` block releases the
+  lock. Each write is bounded by the session's timeout, 5 s
+  (`BK4055B.TIMEOUT_MS`), with one exception that predates this change:
+  `upload_arb` on the other channel raises the shared session's timeout
+  to 20 s while it runs, outside the lock, and then restores it. Before,
+  the close's writes went in between the run's.
+
+**Evidence.** `tests/test_sldea_start_under_lock.py`, 6 cases, all on the
+real `sldea_run`, worker and `_on_app_close`. The fake SG takes the SG's
+lock around each of its own writes, as `VisaInstrument.write` does, and
+notes whether the caller already held it. The lock lets waiting threads in
+strictly in arrival order and knows who holds it. It fails a wait over
+60 s, so a lock-against-lock cycle fails instead of hanging, but it cannot
+see a wait on the Tk thread. For that, the stub app's `_sldea_log`,
+`_sldea_set_status` and `root.after` fail when the calling thread holds
+the SG's lock, and every case checks that none did.
+
+- With no contention, the last stop check before the start writes, the
+  three writes and the mark are made in one lock hold the worker took
+  itself, in the old order and with the old arguments.
+- Abort pressed while the worker waits for the lock: no start write and no
+  mark, and the run's only SG writes are its finally block's zero.
+- A close while another thread holds the lock past the close's wait: the
+  close writes CH1 OFF, CH2 OFF and `SYST:LOC`, nothing switches CH1 on,
+  and both outputs end OFF.
+- A close in the middle of the start writes: the Tk thread waits on the
+  lock, the worker finishes without it, and the close's CH1 OFF lands
+  after the run's ON.
+- Each start write in turn times out inside the hold. The lock is free
+  afterwards, no output ON lands, no level is written, and the finally
+  block's zero lands. A close afterwards does not wait. The mark is set
+  exactly when the DC write landed: it means the channel is in DC, where
+  the close's 0 V offset is a known write, not that the output is ON. So
+  a failed output ON leaves it set until `_sldea_finished` clears it, and
+  the finally block zeroes that channel anyway.
+- A DRY run takes no SG lock and writes nothing.
+
+On main's code, 4 of the 6 cases fail. The end-to-end close case shows the
+race itself: the run's load write, the close's CH1 OFF, the run's DC
+write, the close's CH2 OFF, then the run's CH1 ON.
+
+Fourteen mutants of the start block were run against the new file, in a
+scratch copy with `python -B` and every `__pycache__` wiped. Thirteen are
+caught, each by at least one case:
+
+- main's code (one check, outside the lock);
+- the stop read before the lock is taken, with the lock kept;
+- the check under the lock, and the writes after it is released;
+- only the output ON after the release;
+- the check and the writes in two separate holds;
+- the mark before the check, inside the lock or before it (two mutants);
+- no check under the lock;
+- the mark after output ON;
+- the DRY guard dropped;
+- and three from the adversarial review: a log line and a status line
+  inside the hold; a failed DC write swallowed, then the mark and output
+  ON anyway; and the lock taken with `acquire()` and `release()` and no
+  try/finally, which a raising write leaves held by the dead worker.
+
+The fourteenth survives, and it is equivalent: dropping the check before the
+lock leaves the check under it, which stops the same writes. #460's level
+writes have the same equivalent mutant. One case in
+`tests/test_app_close_zeroes_sg.py` counts the run's entries into the SG's
+lock, and the start's hold adds one to that count.
+
+**Not changed.** The level writes, the finally block and the close
+handler. Bench check owed in #369.
+
 ## Window close zeroes a LIVE run's SG channel when the run has not stopped in time, and a stopping run writes no new level (2026-10-19)
 
 **TL;DR:** Closing the window during a LIVE run waits about 3 s for the

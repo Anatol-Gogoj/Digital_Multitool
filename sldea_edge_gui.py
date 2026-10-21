@@ -1223,6 +1223,27 @@ CAL_STRETCH_PAD_FRAC = 0.45     # display window padding, as a fraction of
 CAL_STRETCH_MIN_SPAN = 6.0      # never stretch a narrower window than this:
                                 # past it the display is amplifying sensor
                                 # noise, not revealing an edge
+# What every calibration mode draws in (#454, 2026-10-19): Paul Tol's
+# high-contrast white for the circle, the cross, the handles and the
+# two-point markers, and his black for the halo, companion ring and
+# handle edges beside them. Only the color changed from the Material green
+# #00e676 the `#215` measurements were made with; every width, dash and
+# halo is as it was, because a wider stroke moves hand placement (+2.07 %
+# diameter at 3 px, `#215`). One color plus black, so no pair has to stay
+# apart under color blindness, and white is the same white under all of
+# them. On a P3 baseline stretched for display (disc 166 -> about gray 60,
+# paper 186 -> about gray 195) white stands off the disc at 11.0:1 where
+# the green managed 6.6:1, and the black stands off the paper at 11.9:1
+# where the green alone was 1.06:1. Raw, on gray 147: white 3.07:1, green
+# 1.84:1.
+CAL_INK = '#FFFFFF'
+CAL_HALO = '#000000'
+# The palette the calibration dialog and the tracer draw in, written into
+# every trace label and every calibration round-set (#454 review,
+# 2026-10-20). A lab PC runs whatever build it last updated to, so a
+# record's date cannot say which colors it was made with. A record without
+# this key was made with the Material colors that came before.
+TOOL_PALETTE = 'tol-454'
 
 
 def disc_paper_lum(arr, cx, cy, r, inner=0.60, ring=(1.25, 1.55)):
@@ -5228,16 +5249,25 @@ class EdgeReviewApp:
             tags.append(row.get('tag'))
         if not xs:
             return
+        import sldea_preview as pv
         fig, ax = plt.subplots(figsize=(8, 5))
         # prefix match keeps old runs (tags 'post'/'pre') plottable alongside
-        # new ones ('post-ramp'/'pre-ramp')
-        for pref, mk, label in (('post', 'o', 'post-ramp'),
-                                ('pre', 's', 'pre-ramp'),
-                                ('baseline', '^', 'baseline')):
+        # new ones ('post-ramp'/'pre-ramp'). Post- and pre-ramp wear the
+        # colors the SLDEA tab's preview gives them (Tol bright blue and
+        # yellow; matplotlib's default cycle before #454), on the preview's
+        # black edge because yellow is light on the white face. Baseline is
+        # Tol black, not the preview's grey, which is only 16.02 from the
+        # yellow under simulated color blindness; black is 39.2 from both.
+        # The marker shape stays the cue that needs no color.
+        for pref, mk, label, col in (
+                ('post', 'o', 'post-ramp', pv.MARKERS['post-ramp'][1]),
+                ('pre', 's', 'pre-ramp', pv.MARKERS['pre-ramp'][1]),
+                ('baseline', '^', 'baseline', '#000000')):
             px = [x for x, t in zip(xs, tags) if (t or '').startswith(pref)]
             py = [y for y, t in zip(ys, tags) if (t or '').startswith(pref)]
             if px:
-                ax.plot(px, py, mk, label=label, alpha=0.8)
+                ax.plot(px, py, mk, label=label, alpha=0.8, color=col,
+                        markeredgecolor=pv.OUTLINE)
         ax.set_xlabel('nominal voltage (kV)')
         ax.set_ylabel('active area (mm²)' if scale else 'active area (px²)')
         ax.set_title(os.path.basename(self.rundir) + ' — active area vs voltage')
@@ -5265,8 +5295,14 @@ class EdgeReviewApp:
             img = cv2.imread(path)
             if img is None:
                 continue
+            # Tol high-contrast black (#454; was a green, BGR (80, 200, 0),
+            # 1.37:1 on the membrane). One outline and no legend, whatever
+            # candidate it came from, so it wears no candidate's color (D's
+            # white included); black stands off the gray membrane (about
+            # 147 of 255) at 6.84:1 and off the bright foil further, at
+            # the same 2 px.
             cv2.polylines(img, [np.asarray(r['contour'], np.int32)], True,
-                          (80, 200, 0), 2)
+                          (0, 0, 0), 2)
             cv2.imwrite(os.path.join(outdir, os.path.basename(path)), img)
 
     def _diam_recorded(self):
@@ -6581,18 +6617,18 @@ class EdgeReviewApp:
                 # which is what the thin/dashed options are here to test
                 # (cal_stroke_spec, the third arm of the A/B).
                 wid, dash = cal_stroke_spec(stroke_var.get())
-                halo = {'outline': '#000000', 'width': wid + 2}
-                core = {'outline': '#00e676', 'width': wid}
+                halo = {'outline': CAL_HALO, 'width': wid + 2}
+                core = {'outline': CAL_INK, 'width': wid}
                 if dash:
                     halo['dash'] = core['dash'] = dash
                 cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr, **halo)
                 cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr, **core)
-                cv.create_line(vx - 6, vy, vx + 6, vy, fill='#00e676')
-                cv.create_line(vx, vy - 6, vx, vy + 6, fill='#00e676')
+                cv.create_line(vx - 6, vy, vx + 6, vy, fill=CAL_INK)
+                cv.create_line(vx, vy - 6, vx, vy + 6, fill=CAL_INK)
                 for _nm, hx, hy in circle_handles(ccx, ccy, r):
                     hvx, hvy = vt.to_view(hx, hy)
                     cv.create_rectangle(hvx - 4, hvy - 4, hvx + 4, hvy + 4,
-                                        fill='#00e676', outline='#000000')
+                                        fill=CAL_INK, outline=CAL_HALO)
 
             def paint_verify():
                 """The verify mode: the AUTOMATIC fit, drawn thin enough to
@@ -6619,18 +6655,18 @@ class EdgeReviewApp:
                 vr = r * vt.zoom
                 # the dark companion sits OUTSIDE, never on the boundary
                 cv.create_oval(vx - vr - 1, vy - vr - 1,
-                               vx + vr + 1, vy + vr + 1, outline='#000000',
+                               vx + vr + 1, vy + vr + 1, outline=CAL_HALO,
                                width=CAL_VERIFY_STROKE_PX,
                                dash=CAL_VERIFY_DASH)
                 cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
-                               outline='#00e676', width=CAL_VERIFY_STROKE_PX,
+                               outline=CAL_INK, width=CAL_VERIFY_STROKE_PX,
                                dash=CAL_VERIFY_DASH)
                 g = CAL_MARK_GAP_VIEW
                 for x0, y0, x1, y1 in ((vx + g, vy, vx + 12, vy),
                                        (vx - g, vy, vx - 12, vy),
                                        (vx, vy + g, vx, vy + 12),
                                        (vx, vy - g, vx, vy - 12)):
-                    cv.create_line(x0, y0, x1, y1, fill='#00e676', width=1)
+                    cv.create_line(x0, y0, x1, y1, fill=CAL_INK, width=1)
 
             def paint_points():
                 """The two-point mode's markers: a 1 px hollow ring and a
@@ -6646,7 +6682,7 @@ class EdgeReviewApp:
                 if len(vpts) == 2:
                     seg = chord_segment(vpts[0], vpts[1])
                     if seg:
-                        cv.create_line(*seg, fill='#00e676', width=1,
+                        cv.create_line(*seg, fill=CAL_INK, width=1,
                                        dash=(3, 5))
                 for vx, vy in vpts:
                     sh = marker_shapes(vx, vy)
@@ -6655,10 +6691,10 @@ class EdgeReviewApp:
                     # without either ring thickening
                     cv.create_oval(sh['ring'][0] - 1, sh['ring'][1] - 1,
                                    sh['ring'][2] + 1, sh['ring'][3] + 1,
-                                   outline='#000000', width=1)
-                    cv.create_oval(*sh['ring'], outline='#00e676', width=1)
+                                   outline=CAL_HALO, width=1)
+                    cv.create_oval(*sh['ring'], outline=CAL_INK, width=1)
                     for arm in sh['arms']:
-                        cv.create_line(*arm, fill='#00e676', width=1)
+                        cv.create_line(*arm, fill=CAL_INK, width=1)
 
             def accept(dpx_full, source_frame, src_is_baseline=None,
                        stats=None, guard=None, overridden=False,
@@ -6955,6 +6991,7 @@ class EdgeReviewApp:
                     'stroke': (stroke_var.get()
                                if st['mode'] == se.CAL_MODE_CIRCLE
                                else None),
+                    'palette': TOOL_PALETTE,
                     'auto_diam_px': auto_px,
                     'auto_pct': (None if vfy else
                                  (100.0 * (stats['mean'] - auto_px) / auto_px)
@@ -9018,6 +9055,39 @@ class EdgeReviewApp:
                    command=lambda: apply(True)).pack(side=tk.LEFT, padx=4)
 
 
+# The tracer's own colors (#454, 2026-10-19). This is the window where an
+# operator places points on the edge, so only the colors changed: every
+# width, dash and marker size is as it was, and nothing gets a halo, which
+# would widen it (a wider stroke moves hand placement: +2.07 % diameter at
+# 3 px, `#215`).
+#  - The trace itself (its segments, the dashed closing segment, the
+#    rubber band to the cursor and the vertex rings) is Tol high-contrast
+#    white, the color candidate D, the manual trace, wears on the review
+#    card since #450. It was the Material green #00e676, with a teal
+#    #80cbc4 rubber band.
+#  - The rings' face is Tol black (was #003322, all but black).
+#  - The previous frame's outline is Tol muted indigo (was the Material
+#    lavender #b39ddb), and the resting disc Tol black (was #888888).
+#  - Candidate overlays wear A, B and C's colors only, wrapping, so no
+#    machine candidate is ever drawn in the trace's white.
+# Every pair that involves one of these clears the house floor of 18:
+# worst-case CIEDE2000 19.14 (white vs A's Tol cyan, protanopia), or 21.33
+# (indigo vs black, tritanopia) beside the Material A/B/C that main had
+# before #450. Alone on the membrane's median gray (147 of 255 on the
+# manual's bench frame) each reaches 3:1: white 3.07, indigo 3.96, black
+# 6.84, where the colors they replace reached 1.15 to 1.84. White falls to
+# 2.41:1 at the frame's 95th percentile, gray 167 (the green: 1.44), and
+# the dark two to 2.25 and 3.88 at its 5th, gray 106 (the lavender: 2.26).
+# Only white and the darkest Tol colors pass 3:1 at 147 at all, and a halo
+# is not allowed here. The dash pattern stays a second cue: the trace is
+# solid with a ring at each vertex, candidates dash (2, 4), the previous
+# outline (6, 3) and the resting disc (4, 4).
+TRACE_INK = '#FFFFFF'
+TRACE_FACE = '#000000'
+TRACE_PREV = '#332288'
+TRACE_REST = '#000000'
+
+
 class TraceWindow(tk.Toplevel):
     """Manual boundary tracing (#162): click points that close into the
     outer edge of the active area. All geometry/undo/coordinate state
@@ -9298,17 +9368,20 @@ class TraceWindow(tk.Toplevel):
                 and self.app.base_ref.get('contour') is not None:
             self.cv.create_polygon(
                 *self._poly_view(self.app.base_ref['contour']),
-                outline='#888888', fill='', dash=(4, 4), tags='vec')
+                outline=TRACE_REST, fill='', dash=(4, 4), tags='vec')
         if self.ov_cand.get():
             # the on-demand pairing is drawable too (#162): the operator
             # should SEE the candidate their trace will be compared with.
-            # Colour index wraps -- candidates() can return more than the
-            # three review slots (disc-fit + three diff tiers + tex).
+            # Color index wraps -- candidates() can return more than the
+            # three review slots (disc-fit + three diff tiers + tex) --
+            # over A, B and C only: D's slot is the trace, and its white
+            # is TRACE_INK here (#454).
+            machine = CAND_COLORS[:TRACE_SLOT]
             for k, c in enumerate(self.app.trace_overlay_cands(
                     self.row_index)):
                 self.cv.create_polygon(
                     *self._poly_view(c['contour']),
-                    outline=CAND_COLORS[k % len(CAND_COLORS)], fill='',
+                    outline=machine[k % len(machine)], fill='',
                     dash=(2, 4), tags='vec')
         if self.ov_prev.get():
             prev = None
@@ -9321,25 +9394,25 @@ class TraceWindow(tk.Toplevel):
             if prev is not None:
                 self.cv.create_polygon(
                     *self._poly_view(prev['contour']),
-                    outline='#b39ddb', fill='', dash=(6, 3), tags='vec')
+                    outline=TRACE_PREV, fill='', dash=(6, 3), tags='vec')
         pts = self.model.points
         vp = [self.vt.to_view(x, y) for x, y in pts]
         if len(vp) >= 2:
             for a, b in zip(vp[:-1], vp[1:]):
-                self.cv.create_line(*a, *b, fill='#00e676', width=2,
+                self.cv.create_line(*a, *b, fill=TRACE_INK, width=2,
                                     tags='vec')
         if len(vp) >= 3:
-            self.cv.create_line(*vp[-1], *vp[0], fill='#00e676',
+            self.cv.create_line(*vp[-1], *vp[0], fill=TRACE_INK,
                                 dash=(3, 4), tags='vec')
         if self._cursor and vp and self._drag_idx is None:
-            self.cv.create_line(*vp[-1], *self._cursor, fill='#80cbc4',
+            self.cv.create_line(*vp[-1], *self._cursor, fill=TRACE_INK,
                                 dash=(2, 4), tags='vec')
         for k, (vx, vy) in enumerate(vp):
             r = 5 if k == 0 else 3
             self.cv.create_oval(vx - r, vy - r, vx + r, vy + r,
-                                outline='#00e676',
+                                outline=TRACE_INK,
                                 width=2 if k == 0 else 1,
-                                fill='#003322', tags='vec')
+                                fill=TRACE_FACE, tags='vec')
         self.undo_btn.config(
             state='normal' if self.model.can_undo() else 'disabled')
         self.redo_btn.config(
@@ -9368,6 +9441,7 @@ class TraceWindow(tk.Toplevel):
                              'prev': bool(self.ov_prev.get())},
                 'elapsed_s': time.time() - self._t_open,
                 'snapped': self._snap_used,
+                'palette': TOOL_PALETTE,
                 'unpaired_ack': self._unpaired_ack}
         self.grab_release()
         self.destroy()

@@ -1872,6 +1872,10 @@ def calibration_log_line(rec):
     bits.append(f"outcome={rec.get('outcome', '?')}")
     if rec.get('frame'):
         bits.append(f"frame={rec['frame']}")
+    # the colors the dialog drew in (#454 review, 2026-10-20): last, and only
+    # when the record names them, so every older field keeps its place
+    if rec.get('palette'):
+        bits.append(f"palette={rec['palette']}")
     line = ' '.join(b for b in bits if b)
     # the block grammar of setup.txt does not apply here, but a stray
     # newline would still split one record into two

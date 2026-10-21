@@ -298,9 +298,10 @@ data.csv until you press Save. Closing the window first loses your accept and re
 3. The scale window (title starts "Calibrate - applied at Save") turns pixels into millimeters. It
    offers "VERIFY the automatic fit", "BY HAND: fit a circle" and "BY HAND: two opposite points".
    - **Verify (the normal case).** The picture has extra contrast, so its colors are not real. The
-     dashed green circle is the automatic fit. "Automatic fit" gives its pixels across (= 16 mm) and
-     "Quality" gives "fit residual" and "circularity" (on file: 0.4 to 1.3 percent of diameter, 0.97
-     to 1.0). Does the circle follow the edge of the dark disc all the way round, not a strip, glare
+     dashed white circle, with a thin black ring just outside it, is the automatic fit. "Automatic
+     fit" gives its pixels across (= 16 mm) and "Quality" gives "fit residual" and "circularity"
+     (on file: 0.4 to 1.3 percent of diameter, 0.97 to 1.0). Does the circle follow the edge of the
+     dark disc all the way round, not a strip, glare
      or a pale ring? Then press "Accept the automatic fit (at Save)" (Enter will not: "Enter cannot
      approve an anchor"). Wrong feature? "Cancel (Esc)" and ask.
    - **When the fit refuses** (6 of the 16 on file) the first line reads "NO automatic fit on this

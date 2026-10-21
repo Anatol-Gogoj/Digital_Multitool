@@ -5,11 +5,15 @@ Both address long-standing GUI complaints (2026-07-10): content taller
 than the window was simply CUT OFF with no scrollbar, and none of the
 controls explained themselves (e.g. the LCR Speed/Avg fields).
 
+The Usage Tips window every instrument tab opens (#480) is here too, after
+the scrollable tabs; its words are in usage_tips.py.
+
 The output-folder pickers' Browse and New folder... buttons (#394) live
 here too, at the end; their decisions are in output_folder.py.
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import font as tkfont
 
 import output_folder
 import ui_colors as uc
@@ -436,6 +440,236 @@ class ScrollableTab(ScrollableFrame):
 
     def __init__(self, notebook):
         super().__init__(notebook, always_vbar=True, stretch_height=False)
+
+
+# ---- Usage Tips window (#480) ---------------------------------------------
+# Each instrument tab's "Show Usage Tips" used to call messagebox.showinfo.
+# On Windows that is the native message box: narrow, fixed in size and
+# unable to scroll, so a 630-word tip wrapped line by line down the screen.
+# This is one window for all six tabs:
+#   * resizable, with a vertical scrollbar, and words that wrap to the
+#     window's width as it is resized (a Text widget, wrap='word');
+#   * modeless: no grab, so the tab stays usable beside it;
+#   * one per tab: pressing the button again raises the open window rather
+#     than stacking a second copy;
+#   * Esc and a Close button close it;
+#   * a starting size for the 1920x1080 bench monitor, never larger than
+#     the screen it opens on;
+#   * placed at the screen's right edge, level with the top of the app's
+#     window, so it covers as little of the app as the screen allows. It is
+#     transient (it stays above the app), so where it opens matters: left
+#     open during a LIVE run it must not sit over the middle of a tab.
+# Words are uc.TEXT on white, headings uc.TEXT_ACCENT, and a page's safety
+# heading uc.TEXT_ALERT behind a warning sign, so its words say what the
+# color repeats. All three reach 4.5:1 on white (tests/test_usage_tips.py).
+
+TIPS_SIZE_96DPI = (640, 560)    # starting width, height in px at 96 dpi
+TIPS_MIN_SIZE = (360, 240)      # the smallest the window may be dragged to
+TIPS_SCREEN_MARGIN = 80         # px left free for a taskbar and title bar
+TIPS_FRAME_PAD = 16             # px for the window border at the right edge
+TIPS_BG = 'white'               # the page the words are written on
+ALERT_SIGN = '⚠'           # the warning sign before a safety heading
+BULLET = '•'
+
+
+def tips_size(dpi, screen_w, screen_h):
+    """(width, height) in px the tips window starts at.
+
+    TIPS_SIZE_96DPI scaled by the screen's dots per inch (a Tk that reports
+    a high dpi gets a window of the same physical size), and never more
+    than the screen less TIPS_SCREEN_MARGIN, nor less than TIPS_MIN_SIZE
+    (the minimum wins on a screen smaller than that)."""
+    scale = max(1.0, float(dpi) / 96.0)
+    out = []
+    for want, screen, least in zip(TIPS_SIZE_96DPI, (screen_w, screen_h),
+                                   TIPS_MIN_SIZE):
+        room = int(screen) - TIPS_SCREEN_MARGIN
+        out.append(max(least, min(int(round(want * scale)), room)))
+    return tuple(out)
+
+
+def tips_place(screen_w, screen_h, w, h, app_top):
+    """(x, y) of the top-left corner of a w x h tips window.
+
+    At the screen's right edge (less TIPS_FRAME_PAD for the border), level
+    with `app_top`, the top of the app's window. Clamped onto the screen:
+    never left of 0, never above 0, and its bottom never in the last
+    TIPS_SCREEN_MARGIN px (the taskbar), however low the app sits."""
+    x = max(0, int(screen_w) - int(w) - TIPS_FRAME_PAD)
+    y = max(0, min(int(app_top),
+                   int(screen_h) - int(h) - TIPS_SCREEN_MARGIN))
+    return x, y
+
+
+def tips_text(page):
+    """A usage_tips page as plain text, in the order the window shows it.
+
+    The window inserts exactly these lines, so tests that read this read
+    what an operator sees. `page` has .heading, .sections and .manual; a
+    section is (heading, lines) or (heading, lines, alert)."""
+    out = [page.heading]
+    for section in page.sections:
+        heading, lines = section[0], section[1]
+        alert = len(section) > 2 and bool(section[2])
+        out.append(f"{ALERT_SIGN} {heading}" if alert else heading)
+        out.extend(f"{BULLET}\t{line}" for line in lines)
+    if page.manual:
+        out.append(page.manual)
+    return '\n'.join(out)
+
+
+class TipsWindow(tk.Toplevel):
+    """One tab's Usage Tips: a resizable, scrolled, read-only page.
+
+    Built fail-closed, like Edge Review's How-to panel: a failure part way
+    through destroys the half-built window rather than leaving one that a
+    later press would raise and show empty."""
+
+    def __init__(self, master, page):
+        super().__init__(master)
+        try:
+            self._build(master, page)
+        except Exception:
+            self.destroy()
+            raise
+
+    def _build(self, master, page):
+        self.title(page.title)
+        self.transient(master)              # stays with its app; no grab
+        self.resizable(True, True)
+        self.minsize(*TIPS_MIN_SIZE)
+        self.configure(bg=TIPS_BG)
+
+        # Fonts: the platform's own default, bold for headings and a size
+        # up for the page heading. Kept on self: a tkfont.Font is deleted
+        # from Tk when its Python object goes.
+        base = tkfont.nametofont('TkDefaultFont')
+        self._font_body = base.copy()
+        self._font_head = base.copy()
+        self._font_head.configure(weight='bold')
+        self._font_title = base.copy()
+        size = int(str(base.actual('size')))
+        self._font_title.configure(weight='bold',
+                                   size=size + 3 if size > 0 else size - 4)
+
+        foot = ttk.Frame(self, padding=(8, 6))
+        foot.pack(side=tk.BOTTOM, fill='x')
+        self.close_btn = ttk.Button(foot, text="Close",
+                                    command=self.destroy)
+        self.close_btn.pack(side=tk.RIGHT)
+
+        body = tk.Frame(self, bg=TIPS_BG)
+        body.pack(side=tk.TOP, fill='both', expand=True)
+        self.text = tk.Text(body, wrap='word', bg=TIPS_BG, fg=uc.TEXT,
+                            font=self._font_body, relief='flat', bd=0,
+                            highlightthickness=0, padx=16, pady=12,
+                            cursor='arrow', spacing1=1, spacing3=3)
+        self.vbar = ttk.Scrollbar(body, orient='vertical',
+                                  command=self.text.yview)
+        self.text.configure(yscrollcommand=self.vbar.set)
+        self.vbar.pack(side=tk.RIGHT, fill='y')
+        self.text.pack(side=tk.LEFT, fill='both', expand=True)
+
+        # A bullet hangs in the left margin and its wrapped lines line up
+        # under the words, not under the bullet.
+        hang = self.text.winfo_pixels('0.25i')
+        self.text.tag_configure('title', font=self._font_title,
+                                foreground=uc.TEXT, spacing3=6)
+        self.text.tag_configure('head', font=self._font_head,
+                                foreground=uc.TEXT_ACCENT,
+                                spacing1=12, spacing3=3)
+        self.text.tag_configure('alert', font=self._font_head,
+                                foreground=uc.TEXT_ALERT,
+                                spacing1=12, spacing3=3)
+        self.text.tag_configure('item', lmargin1=4, lmargin2=hang,
+                                tabs=(hang,))
+        self.text.tag_configure('manual', foreground=uc.TEXT_MUTED,
+                                spacing1=14)
+        self._fill(page)
+        self.text.configure(state='disabled')
+
+        # A click puts the focus in the text, so a selection can be copied.
+        self.text.bind('<Button-1>', lambda _e: self.text.focus_set(),
+                       add='+')
+        # Keys and the wheel scroll the page from anywhere in the window.
+        # Each is bound on the text, its scrollbar AND the window, and
+        # returns 'break': over (or with the focus in) the text, its own
+        # binding scrolls once and nothing else runs. The Text class would
+        # move a cursor too, the scrollbar class would scroll a second time,
+        # and a tab's application-wide wheel binding would scroll the tab.
+        def scroll(n, what):
+            self.text.yview_scroll(n, what)
+            return 'break'
+
+        def wheel(event):
+            up = event.num == 4 or getattr(event, 'delta', 0) > 0
+            return scroll(-3 if up else 3, 'units')
+
+        for key, n, what in (('<Prior>', -1, 'pages'),
+                             ('<Next>', 1, 'pages'),
+                             ('<Up>', -1, 'units'), ('<Down>', 1, 'units')):
+            for w in (self.text, self):
+                w.bind(key, lambda _e, n=n, what=what: scroll(n, what))
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            for w in (self.text, self.vbar, self):
+                w.bind(seq, wheel)
+        self.bind('<Escape>', lambda _e: self.destroy())
+
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = tips_size(self.winfo_fpixels('1i'), sw, sh)
+        app_top = master.winfo_toplevel().winfo_rooty()
+        x, y = tips_place(sw, sh, w, h, app_top)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.focus_set()
+
+    def _fill(self, page):
+        lines = tips_text(page).split('\n')
+        self.text.insert('end', lines[0] + '\n', 'title')
+        rest = lines[1:]
+        for i, line in enumerate(rest):
+            end = '' if i == len(rest) - 1 else '\n'
+            if line.startswith(BULLET + '\t'):
+                tag = 'item'
+            elif page.manual and i == len(rest) - 1:
+                tag = 'manual'
+            elif line.startswith(ALERT_SIGN + ' '):
+                tag = 'alert'
+            else:
+                tag = 'head'
+            self.text.insert('end', line + end, tag)
+
+
+# The open tips windows: (app window, tab key) -> TipsWindow.
+_TIPS_OPEN = {}
+
+
+def show_tips(master, key, page):
+    """Open tab `key`'s Usage Tips window, or raise it if it is open.
+
+    -> the window. `page` is a usage_tips page. Modeless: nothing waits on
+    the window and it takes no grab."""
+    top = master.winfo_toplevel()
+    win = _TIPS_OPEN.get((top, key))
+    if win is not None:
+        try:
+            alive = bool(win.winfo_exists())
+        except tk.TclError:                   # its Tk has gone
+            alive = False
+        if alive:
+            win.deiconify()
+            win.lift()
+            win.focus_set()
+            return win
+        _TIPS_OPEN.pop((top, key), None)
+    win = TipsWindow(top, page)
+    _TIPS_OPEN[(top, key)] = win
+
+    def forget(event, slot=(top, key)):
+        # <Destroy> fires for every child too; only the window itself counts
+        if event.widget is win and _TIPS_OPEN.get(slot) is win:
+            _TIPS_OPEN.pop(slot, None)
+    win.bind('<Destroy>', forget, add='+')
+    return win
 
 
 # ---- output-folder pickers (#394) ---------------------------------------

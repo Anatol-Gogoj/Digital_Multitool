@@ -58,8 +58,10 @@ from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
 import ui_colors as uc
+import usage_tips
 from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
-                        browse_folder, folder_buttons, new_folder)
+                        browse_folder, folder_buttons, new_folder,
+                        show_tips)
 from tk_checkmarks import install_check_marks, mark_classic_checkbutton
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
@@ -1474,264 +1476,29 @@ class InstrumentControlGUI:
         if not self._run_bg(work, done, busy='connect') and key == 'scope':
             self._scope_reconnecting = False       # never started
     
+    # ---- Usage Tips (#480) ----------------------------------------------
+    # Each instrument tab's "Show Usage Tips" button opens its page in a
+    # window of its own: resizable, scrolled and modeless, one per tab
+    # (ui_widgets.show_tips). Until #480 these were messagebox.showinfo
+    # strings, which the native Windows box could neither grow nor scroll.
+    # The words are usage_tips.PAGES, keyed by the tab's slug.
+
+    def _show_usage_tips(self, slug):
+        """Open tab `slug`'s Usage Tips window, or raise it if it is open."""
+        return show_tips(self.root, slug, usage_tips.PAGES[slug])
+
     def show_lcr_tips(self):
-        """Show LCR meter tips"""
-        tips = """BK Precision 894 LCR Meter - Usage Tips
+        return self._show_usage_tips('lcr')
 
-CONNECTION:
-- Instrument must be powered on before connecting
-- Auto-detected via PyVISA (USB VID 0x0471, PID 0x2827)
-
-CONFIGURATION:
-- Mode: which pair the meter reports (primary + secondary)
-  - CPD / CPQ: capacitance + D (loss) or Q - the everyday capacitor
-    modes; D = tan(delta), lower means a better dielectric
-  - CPG / CPRP: capacitance + conductance / parallel resistance
-  - CSD / CSQ / CSRS: SERIES-model capacitance - use for large C or
-    low impedance (e.g. electrolytics at 100 Hz)
-  - LSRS / LSRD / LPRS / LPRP: inductance (series/parallel model)
-    + winding resistance
-  - RX: resistance + reactance (general impedance parts)
-  - ZTD / ZTR: impedance magnitude + phase (degrees / radians)
-  - Rule of thumb: high impedance (>10 kΩ) -> parallel model
-    (CP*/LP*); low impedance (<1 kΩ) -> series model (CS*/LS*)
-- Frequency: Test frequency (100 Hz to 500 kHz)
-  - Use 1 kHz for general capacitor testing
-  - Use 100 Hz for electrolytics
-  - Use 10 kHz+ for high-frequency components
-- Voltage: AC test signal amplitude (0.01 to 2.0 V)
-  - 1.0V is standard for most measurements
-
-DC BIAS, SPEED & RANGE:
-- DC Bias applies a steady voltage across the DUT during the AC test
-  (C-vs-bias derating of class-II ceramics, etc.): set the volts, tick
-  Bias ON, Apply. Untick + Apply to switch it off.
-- Speed = the meter's APERTURE (integration time per reading):
-  SLOW is most accurate with the quietest D readings, FAST updates
-  quickest, MED is the everyday default
-- Avg = how many raw readings the METER averages into each reported
-  result (1-256); SLOW + Avg 8-16 gives the cleanest dissipation
-  numbers on small capacitors
-- Auto range OFF holds the current range: no mid-sweep range-hunting
-  glitches on a fixed DUT (re-enable for unknown parts)
-
-FIXTURE CORRECTION:
-- Open Correction (fixture empty) / Short Correction (terminals
-  shorted) sweep all test frequencies and de-embed the fixture from
-  every later reading
-- Redo the corrections whenever the fixture or leads change
-- The sweep takes tens of seconds; the meter is busy while it runs
-
-MEASUREMENTS:
-- Single Measurement: Take one reading
-- Start Continuous: Update display every 200ms
-- Stop: Halt continuous measurements
-- Status = 0 means good measurement
-- Very small values (~fF) indicate open circuit
-
-BEST PRACTICES:
-- Keep test leads short to minimize stray capacitance
-- For low-impedance measurements, use 4-wire Kelvin clips
-- Allow readings to settle (2-3 seconds) after changing frequency
-- Zero/open/short compensation improves accuracy (see manual)"""
-        
-        messagebox.showinfo("LCR Meter Tips", tips)
-    
     def show_scope_tips(self):
-        """Show oscilloscope tips"""
-        tips = """Tektronix MSO24 Oscilloscope - Usage Tips
-
-CONNECTION:
-- Scope must be powered on before connecting
-- Auto-detected via PyVISA (USB VID 0x0699, PID 0x0105)
-
-CHANNEL CONFIGURATION:
-- Enable/Disable: Turn channels on/off for viewing
-- Vertical (V/div): Voltage scale per division
-  - Adjust so signal fills ~60-80% of screen height
-- Coupling: 
-  - DC: Show full signal including DC offset
-  - AC: Block DC component, show AC only
-  - GND: Ground input to check baseline
-- Horizontal (s/div): Time scale per division
-  - Adjust to show 2-3 cycles for periodic signals
-
-TRIGGER:
-- Source: Which channel to trigger from
-- Level: Voltage threshold for triggering
-- Slope: RISE (rising edge) or FALL (falling edge)
-- Set trigger level to middle of signal for stable display
-
-ACQUISITION MODES:
-- Run: Continuous acquisition and display
-- Single: Capture one triggered event then stop
-- Stop: Freeze current display
-
-AUTOMATED MEASUREMENTS:
-- Get Measurements: Query all standard measurements
-- Frequency/Period: Only valid for periodic signals
-- Invalid measurements show as "No signal"
-- RMS is true RMS, not peak/√2
-
-WAVEFORM CAPTURE:
-- Transfers the acquired sample record (not a screenshot) and shows it
-  in a plot window: min/max envelope, auto-scaled axes, pk-pk summary
-- Save CSV from the plot window for offline analysis
-- Narrow glitches survive the plot's decimation (min/max per column)
-
-TIPS:
-- Use AutoSet for quick setup on unknown signals
-- Stop acquisition before changing major settings
-- Ground unused channels to reduce noise"""
-        
-        messagebox.showinfo("Oscilloscope Tips", tips)
+        return self._show_usage_tips('scope')
 
     def show_sg_tips(self):
-        """Show signal generator tips"""
-        tips = """B&K Precision 4055B Signal Generator - Usage Tips
-
-CONNECTION:
-- Generator must be powered on before connecting
-- Auto-detected via PyVISA (USB VID 0xf4ec, PID 0xee38)
-- Two independent output channels (CH1, CH2)
-
-WAVEFORMS (fields adapt to the selected type):
-- SINE: clean tones, frequency response, audio
-- SQUARE: clocks, digital/logic stimulus; set Duty Cycle (%)
-- RAMP: sawtooth/triangle, sweeps; set Symmetry (%)
-  (50% = triangle, 100% = rising sawtooth, 0% = falling)
-- PULSE: timing tests; Duty plus Rise/Fall/Delay (Advanced mode)
-- NOISE: broadband stimulus; set Noise Stdev (level) and Mean (bias)
-- DC: fixed level only (set with DC Offset)
-- ARB: arbitrary waveform - design it in the Waveform Editor, export a
-  .bin to a flash drive, recall it on the 4055B (see ARBITRARY WAVEFORMS)
-
-BASIC vs ADVANCED:
-- Advanced mode reveals Phase, pulse edge timing (Rise/Fall/Delay),
-  Load and Polarity
-- Apply always pushes the full configuration for the selected
-  waveform, whether or not Advanced mode is showing the fields
-
-APPLY vs OUTPUT:
-- "Apply CH<n> Settings" pushes the configuration ONLY
-- The Output button turns the physical output on/off (red = ON)
-- Workflow: configure -> Apply -> check preview/applied -> Output ON
-
-APPLIED READOUTS & PREVIEW:
-- Gray values beside each field show what the instrument actually
-  accepted (refreshed on connect and after Apply) - if they differ
-  from your input, the box clamped or coerced your value
-- The preview renders ~3 periods of the configured waveform; it is
-  a drawing of your inputs, not measured data
-
-FREQUENCY RANGE:
-- Depends on waveform and model; check the front panel for the unit's
-  rated maxima (sine reaches the highest; square/pulse/ramp are lower)
-- Enter frequency in Hz (e.g. 1000 for 1 kHz, 5e5 for 500 kHz — the meter's cap)
-
-AMPLITUDE, OFFSET & LOAD:
-- Amplitude is peak-to-peak (Vpp); Offset is the DC level (V)
-- LOAD (Advanced) matters: amplitude is calibrated for the selected load
-  - High-Z: what you see on a scope's 1 MOhm input
-  - 50 (or any ohms): into a matched load; open-circuit V is then ~2x
-  - Set LOAD to match how the output is actually terminated
-
-PRESETS:
-- Save Preset: store both channels' current settings under a name
-- Load Preset: restore settings and push the CONFIGURATION to the
-  instrument (output on/off state is NOT changed by a preset load)
-- Delete Preset: remove a saved preset
-- Presets are stored in presets/siggen_presets.json
-
-ARBITRARY WAVEFORMS:
-- Select ARB and click "Waveform Editor..." to design a custom shape
-- USB cannot carry the waveform data (52-byte firmware cap), so use
-  "Export .bin for 4055B flash drive...": save the .bin to a flash
-  drive, plug it into the 4055B's FRONT USB port, and recall it via
-  Store/Recall on the front panel
-- The export pre-fills the channel (ARB + frequency/amplitude/offset);
-  after recalling, click Apply to push those settings over USB (they
-  are short commands and safe) - or dial them in on the front panel
-- "Upload & Select" (direct upload) works over LAN only (issue #20)
-
-BURST & SYNC:
-- Burst emits exactly N cycles per trigger, then the output idles -
-  bounded energy per shot, the safest way to drive the HV amplifier
-- Trigger MAN: click Fire (or use the front panel); INT: auto-repeat
-  every Interval seconds; EXT: edge on the rear Aux In
-- Workflow: configure the wave, tick Burst, Apply, Output ON, Fire
-- Sync out puts a trigger edge on the rear Sync BNC every waveform
-  period - feed it to the scope's Aux In for rock-solid triggering
-  on slow arbs
-
-BEST PRACTICES:
-- Confirm the load setting before trusting the amplitude reading
-- Configure and Apply with output OFF, then switch Output ON
-- Use DC waveform + offset for a steady bias voltage"""
-
-        messagebox.showinfo("Signal Generator Tips", tips)
+        return self._show_usage_tips('siggen')
 
     def show_logging_tips(self):
-        """Show continuous logging tips"""
-        tips = """Continuous Logging - Usage Tips
+        return self._show_usage_tips('logging')
 
-CONFIGURATION:
-- Log Directory: Where CSV files will be saved
-  - Creates directory automatically if it doesn't exist
-  - Default is ./logs in current working directory
-- Sample cadence: type seconds between samples (s) or samples per
-  second (Hz); the hint beside the box shows the other unit, and
-  switching the unit converts the number so the cadence stays the same
-  - 1 s (1 Hz) is good for slow processes
-  - 0.1 s (10 Hz) for faster dynamics
-  - Consider instrument settling time
-  - Samples start on a fixed grid. If reading every ticked source takes
-    longer than the cadence, the missed slots are skipped (counted under
-    the live table), never made up in a burst
-- Log Instruments: Select which instruments to record
-
-LIVE VALUES:
-- During a run the table shows each logged number: its latest value and
-  the min and max since you pressed Start
-- A failed or empty read (no signal, overload, an LCR status error) shows
-  as -- and never becomes a min or max
-- Start clears the table; after Stop it keeps the last run's values
-- Display only: the CSV files hold every sample
-
-FILE FORMAT:
-- Separate CSV file for each instrument
-- Filename includes timestamp: lcr_20260206_143052.csv
-- LCR columns: Timestamp, Mode, Frequency, Primary, Secondary, Status
-- Scope columns: Timestamp, Frequency, Period, Mean, Pk-Pk, RMS, Amplitude
-- SigGen columns: Timestamp, Waveform, Frequency, Amplitude, Offset,
-  Stdev, Mean, Output - the STIMULUS that was driving the DUT, so a
-  swept run records cause and effect in the same session
-- DC Supply columns: Timestamp, Set V, Meas V, Meas A, Power (W) -
-  applied voltage, measured current, and calculated power (V*I)
-- A source that errors 5 times in a row is dropped from the run with
-  one notice (no endless error spam); logging stops if all sources die
-
-USAGE:
-- Start Logging: Begin recording to CSV files
-- Stop Logging: Close files and stop recording
-- Files are flushed after each sample (safe if interrupted)
-- Log status shows errors and warnings
-
-TIPS:
-- Configure instruments BEFORE starting logging
-- For long tests, use longer sample intervals to reduce file size
-- CSV files can be opened in Excel, Python, MATLAB, etc.
-- Timestamps are in format: YYYY-MM-DD HH:MM:SS.mmm
-- Check disk space for long-duration logging
-- Stop logging before disconnecting instruments
-
-ANALYSIS:
-- Use pandas in Python: df = pd.read_csv('lcr_xxx.csv')
-- Plot in Excel: Insert > Chart > Scatter
-- For frequency sweeps: log at each frequency step"""
-
-        messagebox.showinfo("Continuous Logging Tips", tips)
-    
     def create_lcr_tab(self):
         """Create LCR meter control tab"""
         _tab = ScrollableTab(self.notebook)
@@ -1779,8 +1546,9 @@ ANALYSIS:
         self.lcr_volt.grid(row=2, column=1, padx=10, pady=5)
         self.lcr_volt.insert(0, "1.0")
         add_tooltip(self.lcr_volt,
-                    "AC test level, 0.01 to 2.0 V. 1.0 V is standard; the "
-                    "meter clamps anything higher to 2.0 V.")
+                    "AC test level, 0.01 to 2.0 V. 1.0 V is standard; a "
+                    "level outside that stops Apply with a Configuration "
+                    "Error.")
 
         # Bias / aperture / range / correction (issue #44) -- laid out to
         # the RIGHT of mode/freq/volt so the tab gets no taller (issue #26).
@@ -3010,36 +2778,7 @@ ANALYSIS:
         self._run_bg(work, done, busy='psu-io', quiet=True)
 
     def show_psu_tips(self):
-        tips = """DC Supply (BK 9174B) - Usage Tips
-
-WHAT IT IS:
-- Dual-output, dual-range programmable supply.
-  Each output:  0-35 V at up to 3 A,  or  35-70 V at up to 1.5 A (105 W).
-- Talks over its built-in serial port (CP2102 -> /dev/ttyUSB0), 57600 baud.
-
-SETTING AN OUTPUT:
-1. Pick the Channel tab (1 or 2).
-2. Type Set Voltage and Current Limit, then "Apply V / I limit".
-   - Apply NEVER switches the output -- it only stages V and the limit.
-   - Values are range-checked (>1.5 A above 35 V is refused).
-3. Press "Output: OFF" to energize -- it asks first, then turns red "ON".
-
-PROTECTION:
-- OVP/OCP set the hardware trip points; set them before enabling output.
-
-READOUT & LOGGING:
-- Tick "Live readout" for a 0.5 s measured V / I / power display.
-- To record over time, use the Continuous Logging tab: tick DC Supply
-  CH1/CH2.
-  Each channel writes psu_chN_<timestamp>.csv with columns
-  Timestamp, Set V, Meas V, Meas A, Power (W) -- power is V*I.
-
-SAFETY:
-- Current-limit is constant-current, not a fuse: at the limit the supply
-  drops voltage to hold the current. Set it just above your expected draw.
-- Closing the app leaves the supply exactly as-is (it will NOT turn the
-  output off -- it may be powering something you care about)."""
-        messagebox.showinfo("DC Supply Tips", tips)
+        return self._show_usage_tips('psu')
 
     # ==================== DMM tab (BK 5493C) ====================
     DMM_POLL_MS = 500
@@ -3155,26 +2894,7 @@ SAFETY:
         self.dmm_live_job = self.root.after(self.DMM_POLL_MS, self._dmm_poll)
 
     def show_dmm_tips(self):
-        tips = """DMM (BK 5493C) - Usage Tips
-
-CONNECTION:
-- LAN only on this unit (USB enumeration failed). It speaks SCPI over a
-  raw socket on the non-standard port 45454.
-- Set the meter's IP on its front panel (Menu -> I/O / LAN). "DHCP Once"
-  grabs an address on the bench subnet; type that IP here and Reconnect.
-- Override the auto-connect IP with the SCPI_DMM_ADDR environment variable.
-
-USE:
-- Pick a Function (DC/AC volts, DC/AC current, 2W/4W resistance, frequency,
-  capacitance), then "Read once" or tick "Live reading" for a ~2 Hz display.
-- The big number is engineering-formatted (e.g. 16.74 mV); the line under it
-  shows the raw value + unit.
-- Overload / non-numeric replies show as OVLD.
-
-LOGGING:
-- Tick "DMM" on the Continuous Logging tab to record the selected function
-  to CSV alongside the other instruments."""
-        messagebox.showinfo("DMM Tips", tips)
+        return self._show_usage_tips('dmm')
 
     # ==================== SLDEA test tab ====================
     # A dedicated Single-Layer DEA characterisation tab: plug in a voltage

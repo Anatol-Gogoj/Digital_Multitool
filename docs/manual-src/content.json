@@ -21,6 +21,10 @@
     "what": "Closes and reopens that one instrument; use after powering a box on or replugging its cable."
    },
    {
+    "label": "📖 Show Usage Tips (bottom right of the instrument tabs)",
+    "what": "Opens that tab's quick reference in a window of its own, safety lines first. It opens at the right edge of the screen, stays above the app, can be resized and scrolled, and leaves the tab usable. Pressing the button again brings the open window to the front; Esc or Close shuts it. This manual has the full detail."
+   },
+   {
     "label": "Status bar (footer, left)",
     "what": "Running commentary: save/load confirmations, busy notices, and shared-drive fallback warnings."
    },
@@ -140,15 +144,15 @@
    },
    {
     "label": "Mode",
-    "what": "Picks the measurement pair (e.g. CPD = capacitance + dissipation); CP/LP are parallel-model, CS/LS series-model variants."
+    "what": "Picks the measurement pair (e.g. CPD = capacitance + dissipation); CP/LP are parallel-model, CS/LS series-model variants. Rule of thumb: above about 10 kΩ use a parallel mode (CP, LP), below about 1 kΩ a series mode (CS, LS)."
    },
    {
     "label": "Frequency (Hz)",
-    "what": "AC test frequency, 100 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics."
+    "what": "AC test frequency, 100 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics. Use 10 kHz and up for high-frequency parts."
    },
    {
     "label": "Voltage (V)",
-    "what": "AC test level, 0.01 to 2.0 V; 1.0 V is standard and the meter clamps anything higher to 2.0 V."
+    "what": "AC test level, 0.01 to 2.0 V; 1.0 V is standard, and a level outside that stops Apply with a Configuration Error."
    },
    {
     "label": "DC Bias (V) + Bias ON",
@@ -205,7 +209,7 @@
    "7. For curves: set the sweep axes and click Start Sweep — results go to CSV."
   ],
   "cautions": [
-   "The meter silently clamps the AC level at 2.0 V and frequency at 500 kHz — no error appears; readings simply use the clamped value.",
+   "Apply stops with a Configuration Error at an AC level outside 0.01 to 2.0 V or a frequency outside 100 Hz to 500 kHz. What it sent before the bad value (the mode, and for a bad level the frequency) has already reached the meter, so fix the value and Apply again.",
    "Nothing reaches the meter until Apply Configuration; the Primary/Secondary readouts are labeled by the last APPLIED mode, not whatever the dropdown currently shows.",
    "A sweep switches the meter to the dropdown's mode and leaves frequency/voltage at the last sweep point — re-Apply your configuration before trusting spot readings afterwards.",
    "DC bias stays on until you untick Bias ON and click Apply — do not leave bias across a bias-sensitive part.",
@@ -259,7 +263,7 @@
     "how_opened": "Start Sweep"
    },
    {
-    "name": "LCR Meter Tips (usage notes)",
+    "name": "LCR Meter Tips window (quick reference)",
     "how_opened": "📖 Show Usage Tips"
    }
   ]
@@ -319,7 +323,7 @@
    },
    {
     "label": "CH1–CH4 Measurements tabs",
-    "what": "Frequency, Period, Mean, Pk-Pk, RMS and Amplitude readouts per channel; Get CHx Measurements refreshes them, Capture CHx Waveform opens the sample record in a plot window with Save CSV."
+    "what": "Frequency, Period, Mean, Pk-Pk, RMS and Amplitude readouts per channel; Get CHx Measurements refreshes them, Capture CHx Waveform opens the sample record in a plot window with Save CSV. RMS is true RMS, not peak/√2. The plot draws each column's min/max envelope, so narrow glitches survive its decimation."
    },
    {
     "label": "Run / Stop / Single",
@@ -388,7 +392,7 @@
     "how_opened": "Capture CH1 Waveform (one button per channel measurements tab)"
    },
    {
-    "name": "Oscilloscope Tips info dialog",
+    "name": "Oscilloscope Tips window (quick reference)",
     "how_opened": "📖 Show Usage Tips"
    }
   ]
@@ -521,7 +525,7 @@
     "how_opened": "Click \"Output: OFF\" (asks before energizing; warns 1 V = 1 kV at the Trek)"
    },
    {
-    "name": "Signal Generator Tips popup",
+    "name": "Signal Generator Tips window (quick reference)",
     "how_opened": "Click \"📖 Show Usage Tips\""
    },
    {
@@ -710,7 +714,7 @@
    },
    {
     "label": "📖 Show Usage Tips",
-    "what": "Pops up a quick-reference summary of this tab."
+    "what": "Opens this tab's quick reference, safety lines first, in a window of its own."
    }
   ],
   "workflow": [
@@ -761,7 +765,7 @@
     "how_opened": "Pressing \"Output: OFF\" (asks before energizing the terminals)"
    },
    {
-    "name": "DC Supply Tips",
+    "name": "DC Supply Tips window (quick reference)",
     "how_opened": "📖 Show Usage Tips"
    },
    {
@@ -809,7 +813,7 @@
    },
    {
     "label": "📖 Show Usage Tips",
-    "what": "Opens a short reference on connection, use, and logging."
+    "what": "Opens a short reference on connection, reading and logging in a window of its own."
    }
   ],
   "workflow": [
@@ -858,12 +862,12 @@
    },
    {
     "widget_text": "📖 Show Usage Tips",
-    "note": "Quick reference dialog"
+    "note": "Quick reference window"
    }
   ],
   "subwindows": [
    {
-    "name": "DMM Tips (info dialog)",
+    "name": "DMM Tips window (quick reference)",
     "how_opened": "📖 Show Usage Tips"
    }
   ]
@@ -1104,27 +1108,27 @@
    },
    {
     "label": "LCR Meter",
-    "what": "Log the LCR reading each tick: mode, frequency, primary, secondary, status."
+    "what": "Log the LCR reading each tick to lcr_<stamp>.csv: Timestamp, Mode, Frequency (Hz), Primary, Secondary, Status."
    },
    {
     "label": "Oscilloscope Channels (CH1–CH4)",
-    "what": "Log scope measurements per ticked channel: frequency, period, mean, pk-pk, RMS, amplitude."
+    "what": "Log scope measurements per ticked channel to scope_chN_<stamp>.csv: Timestamp, Frequency (Hz), Period (s), Mean (V), Pk-Pk (V), RMS (V), Amplitude (V)."
    },
    {
     "label": "Sig Gen (stimulus) (CH1/CH2)",
-    "what": "Log what was driving the DUT: waveform, frequency, amplitude, offset, output ON/OFF."
+    "what": "Log what was driving the DUT to siggen_chN_<stamp>.csv: Timestamp, Waveform, Frequency (Hz), Amplitude (Vpp), Offset (V), Stdev (V), Mean (V), Output (ON/OFF). Cause and effect land in the same run."
    },
    {
     "label": "DC Supply (BK 9174B) (CH1/CH2)",
-    "what": "Log set voltage, measured voltage, measured current, and calculated power per channel."
+    "what": "Log each ticked channel to psu_chN_<stamp>.csv: Timestamp, Set V, Meas V, Meas A, Power (W), the power being V × I."
    },
    {
     "label": "DMM (BK 5493C — selected function)",
-    "what": "Log the function currently selected on the DMM tab (value + unit)."
+    "what": "Log the function selected on the DMM tab when Start Logging is pressed, to dmm_<stamp>.csv: Timestamp, Function, Value, Unit."
    },
    {
     "label": "Start Logging",
-    "what": "Opens one fresh timestamped CSV per ticked source and begins sampling; sources not connected are skipped with a notice."
+    "what": "Opens one fresh timestamped CSV per ticked source and begins sampling; sources not connected are skipped with a notice. <stamp> is the Start time as YYYYMMDD_HHMMSS, and every row's Timestamp reads YYYY-MM-DD HH:MM:SS.mmm: the time that sample began, the same for every source in it."
    },
    {
     "label": "Stop Logging",
@@ -1140,7 +1144,7 @@
    },
    {
     "label": "📖 Show Usage Tips",
-    "what": "Popup listing the exact CSV columns per instrument and analysis hints."
+    "what": "Opens a quick reference in a window of its own: cadence, live values, dropped sources and files. The columns are listed above."
    }
   ],
   "workflow": [
@@ -1191,7 +1195,7 @@
    },
    {
     "widget_text": "📖 Show Usage Tips",
-    "note": "CSV column reference and tips"
+    "note": "Quick reference window"
    }
   ],
   "subwindows": [
@@ -1200,7 +1204,7 @@
     "how_opened": "Browse"
    },
    {
-    "name": "Continuous Logging Tips (info popup)",
+    "name": "Continuous Logging Tips window (quick reference)",
     "how_opened": "📖 Show Usage Tips"
    },
    {

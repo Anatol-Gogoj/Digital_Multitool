@@ -35,20 +35,23 @@ it.
 TEXT = '#000000'          # plain text (Tol high-contrast: black)
 TEXT_MUTED = '#444444'    # secondary text, hints, idle, busy (Tol dark: grey)
 TEXT_OK = '#2255AA'       # connected, done, saved, in range (dark: sapphire)
-TEXT_ACCENT = TEXT_OK     # the app's accent: summaries, readouts, ▶ Detect
+TEXT_ACCENT = TEXT_OK     # the app's accent: summaries, readouts, Detect
 TEXT_ALERT = '#775500'    # connecting, warnings and errors (dark: brown)
 
 # ---- filled buttons and banners, written on in white. A Tk button also needs
 # activeforeground, or its words turn black under the pointer. -------------
 TEXT_ON_FILL = '#FFFFFF'
 TEXT_ON_FILL_MUTED = '#AACCEE'   # second line on a dark banner (pale: blue)
-# Red means energized, wherever it is: the LIVE run button, and an SG or PSU
+# On a button, red means energized: the LIVE run button, and an SG or PSU
 # Output: ON (an SG output can drive the Trek). The DRY run button is blue.
 # Normal and pointer-over colors of the one stay 21.5 or more from both of
-# the other's under every simulated vision.
-FILL_DRY = '#2255AA'          # ▶ Run (DRY), no HV (dark: sapphire)
+# the other's under every simulated vision. Red off the buttons means other
+# things and always comes with its own words or shape: the live view's NO
+# FRAME and STREAM DOWN, the fill behind Edge Review's "STOP" mark, and the
+# SLDEA preview's 0 kV baseline diamond (#461).
+FILL_DRY = '#2255AA'          # Run button, DRY, no HV (dark: sapphire)
 FILL_DRY_ACTIVE = '#004488'   # the same under the pointer (high-contrast blue)
-FILL_LIVE = '#CC4466'         # ▶ Run, LIVE HV, and Output: ON (dark: red)
+FILL_LIVE = '#CC4466'         # Run button LIVE, and Output: ON (dark: red)
 FILL_LIVE_ACTIVE = '#994455'  # the same under the pointer (medium: dark red)
 BANNER_ALERT = '#775500'     # a state banner over an image (dark: brown)
 BANNER_ERROR = '#993366'     # a frame that cannot be shown (dark: maroon)

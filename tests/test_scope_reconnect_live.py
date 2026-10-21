@@ -322,7 +322,7 @@ def test_the_refusal_after_the_question_says_what_run_bg_says():
 
 
 def test_a_failed_connect_after_yes_leaves_the_retry_unasked():
-    """Yes, then the connect fails: no handle, the error in red with its
+    """Yes, then the connect fails: no handle, the error in brown with its
     dialog -- the run is blind now, which the question said. A retry has
     nothing left to lose, so it goes straight through, and monitoring is
     back once it lands."""

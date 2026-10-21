@@ -49,7 +49,8 @@ You need:
 1. The Linux bench PC (a live run refuses on Windows: "Linux only") with the scope, signal generator
    and camera on and connected. Start the app from its desktop icon. On the "Oscilloscope (MSO24)"
    and "Signal Gen (BK 4055B)" tabs the "Connection" line must be blue and read "Connected"; if
-   it reads "Not connected" (brown), power the instrument on and press "Reconnect". **The Trek's HV output stays OFF through sections 2 to 4.**
+   it reads "Not connected", or "Error: ..." after a Reconnect that failed (both brown), power the
+   instrument on and press "Reconnect". **The Trek's HV output stays OFF through sections 2 to 4.**
 2. The wiring the software assumes (docs/manual-src/addendum_a_stack.json): signal generator CH1 is
    a DC source into the Trek control input (1 V per kV, 10 kV maximum). Trek V_Out goes to scope
    CH2 (1 kV per scope volt), I_Out to CH3 (200 uA per scope volt): the defaults of "SG CH",

@@ -344,8 +344,8 @@ def test_a_reconnect_with_nothing_in_flight_goes_ahead_as_before():
 
 
 def test_a_failed_reconnect_still_reports_the_error():
-    """A Reconnect that RAN and failed leaves no handle, and says so in red
-    with a dialog. A refused one never ran, so it leaves things as they
+    """A Reconnect that RAN and failed leaves no handle, and says so in the
+    alert brown with a dialog. A refused one never ran, so it leaves things as they
     were."""
     with _patched() as mb:
         app = _App()

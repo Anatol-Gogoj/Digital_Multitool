@@ -418,9 +418,10 @@ def test_a_stop_that_comes_while_the_run_waits_for_the_sg_lock_still_holds():
         assert after == [('set_offset', 1, 0.0), ('set_output', 1, False)], \
             after
         # every level the run wrote went through the lock, and so did the
-        # one it then did not write
+        # one it then did not write, and the run's start before them
+        # (#471: its DC write and output ON are made under the lock)
         levels = [w for w in app.sg.writes[:hit[0]] if w[0] == 'set_offset']
-        assert gate.entries == len(levels) + 1, (gate.entries, levels)
+        assert gate.entries == len(levels) + 2, (gate.entries, levels)
 
 
 class _OwnedLock:

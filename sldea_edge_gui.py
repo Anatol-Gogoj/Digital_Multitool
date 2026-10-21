@@ -303,6 +303,34 @@ def card_geometry(img_w, img_h, view_w, view_h, max_upscale=MAX_UPSCALE):
     return scale, w, h, (view_w - w) // 2, (view_h - h) // 2
 
 
+def tag_shift(box, taken, card_h):
+    """How far to move a letter tag down (+) or up (-) on the review card
+    so it clears every earlier tag. `box` is the tag's (x0, y0, x1, y1),
+    halo included, at its outline's rightmost point; `taken` holds the
+    boxes of the tags drawn before it.
+
+    Two outlines can end at the same rightmost point, and the later tag
+    then hid the earlier one: B under C on the manual's bench frame
+    (#477). The tag keeps its x, beside its own outline's right edge,
+    and steps one tag height at a time, down first. 0 when the spot is
+    free, or when no step fits on the card. Pure, for the tests."""
+    x0, y0, x1, y1 = box
+    step = (y1 - y0) + 1
+
+    def free(dy):
+        return not any(x0 < t[2] and t[0] < x1
+                       and y0 + dy < t[3] and t[1] < y1 + dy
+                       for t in taken)
+
+    if free(0):
+        return 0
+    for k in range(1, len(taken) + 1):
+        for dy in (k * step, -k * step):
+            if y0 + dy >= 0 and y1 + dy <= card_h and free(dy):
+                return dy
+    return 0
+
+
 def elide(text, width_px, measure):
     """Longest prefix of `text` (plus an ellipsis) that `measure`s within
     width_px. The side panel is a fixed box (#179): text must fit the
@@ -4168,6 +4196,7 @@ class EdgeReviewApp:
             dr.line(pts + [pts[0]], fill=CAND_HALO, width=wdt + 2)
         for slot, pts, wdt in strokes:
             dr.line(pts + [pts[0]], fill=CAND_COLORS[slot], width=wdt)
+        taken = []                         # boxes of the tags drawn so far
         for slot, pts in tagged:
             # letter tag: candidate↔outline mapping must not rely on
             # color alone (audit 2026-07-25); large + solid halo (#173).
@@ -4175,6 +4204,13 @@ class EdgeReviewApp:
             tx, ty = max(pts, key=lambda p: p[0])
             tx = min(tx + 6, img.width - TAG_PX - 2)
             ty = min(max(ty - TAG_PX / 2, 0), img.height - TAG_PX - 4)
+            # clear of the earlier tags (#477), halo (2 px) included
+            bx0, by0, bx1, by1 = dr.textbbox((tx, ty), CAND_KEYS[slot],
+                                             font=font)
+            box = (bx0 - 2, by0 - 2, bx1 + 2, by1 + 2)
+            shift = tag_shift(box, taken, img.height)
+            ty += shift
+            taken.append((box[0], box[1] + shift, box[2], box[3] + shift))
             for dx in range(-2, 3):
                 for dy in range(-2, 3):
                     if dx or dy:

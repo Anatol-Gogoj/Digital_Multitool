@@ -731,7 +731,9 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
   background:var(--code-bg); border:1px solid var(--line);
   border-radius:8px; white-space:pre-wrap;
   font:12.5px/1.5 Consolas, "Cascadia Mono", monospace; }
-.print-toc li.partline { list-style:none; margin-left:-22px;
+/* display:block, not just list-style:none: a hidden marker still counts,
+   so Part II's first chapter was numbered 14 after 12 (v1.4.6, #477). */
+.print-toc li.partline { display:block; list-style:none; margin-left:-22px;
   font-family:Consolas, monospace; text-transform:uppercase;
   letter-spacing:.1em; font-size:11.5px; color:var(--steel);
   padding-top:10px; }
@@ -757,8 +759,27 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
   .shot, .chip, .cautions .c, .tool, .use, details tr { break-inside:avoid; }
   .dialogpair > div, .advbox { break-inside:avoid; }
   .subh { break-after:avoid; }
+  /* #477 (v1.4.6 build): a legend split across two pages (02/03, 14/15,
+     22/23, 32/33) left its first rows under the shot and the rest
+     overleaf. A legend now moves whole; the tighter print chips let the
+     shorter ones stay on the shot's own page. */
+  .legend { break-inside:avoid; gap:6px 12px; margin-top:10px; }
+  .chip { padding:5px 10px; font-size:13px; line-height:1.4; }
+  /* A heading never ends a page: "Shortcuts, environment and every tool
+     control" sat alone at the foot of page 46. The cautions box is a
+     block on paper, because a break rule between grid rows did nothing
+     and its WATCH OUT heading was left the same way. */
+  h4, summary { break-after:avoid; }
+  .cautions { display:block; }
+  .cautions .c { margin-top:6px; }
   .addendum pre, .addendum tr { break-inside:avoid; }
   .addendum .tblwrap { break-inside:auto; }
+  /* A chapter's closing paragraph moves whole, with the end of the block
+     before it, so its last line never sits alone before the next
+     chapter's forced page break (page 58 of the v1.4.6 build, #477).
+     Not for a closing table or code block, which may outrun a page. */
+  .addendum > p:last-child, .addendum > ul:last-child {
+    break-inside:avoid; break-before:avoid; }
   /* A Part II chapter is heading-dense prose, not two .subh in a page of
      screenshots: on screen the 30px rhythm reads well, on paper it spends
      a page per chapter on white space. */

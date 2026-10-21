@@ -11,7 +11,7 @@ tools. Pinned here:
   video_edges.csv exists, so the window itself says what is missing; a
   folder with no video, and a window that cannot open, are said in a box
   as well as on the console, then exit 0 (not a failure, so the SLDEA tab
-  adds no box of its own, #473) and 1;
+  adds no box of its own, #473; 2 when that box could not show) and 1;
 * the plot window's right-click menu offers Video review... for the run
   that was clicked, live only when that run's folder holds a recording,
   and the window starts one review per run;
@@ -303,11 +303,18 @@ def test_a_folder_with_no_video_exits_0_so_the_tab_says_it_once():
     video is not a failure, and the program has said so in its own info
     box, so it exits 0: an operator who clicks OK in time gets no second,
     error-styled box. Exit code 2 used to put one there. The process's
-    exit code is main()'s: the __main__ block hands it to sys.exit. A
+    exit code is main()'s: the __main__ block hands it to sys.exit. A box
+    that could not be shown (Tk failing in this process while it works in
+    the app) told nobody, so that still exits 2 and the tab says it. A
     window that cannot open still exits 1 (the case below)."""
     import inspect
     import sldea_video_review as vr
     p = _tmp()
+
+    class _NoBox:
+        def showinfo(self, *a, **k):
+            raise vr.tk.TclError("no box in this process")
+        showerror = showinfo
     try:
         plain = _run(p, 'SLDEA_20261006_100500')
         with _program_roots() as made, _review_boxes() as boxes:
@@ -316,6 +323,10 @@ def test_a_folder_with_no_video_exits_0_so_the_tab_says_it_once():
             assert len(boxes.infos) == 1 and not boxes.errors, boxes.errors
             assert 'There is no video of SLDEA_20261006_100500' in \
                 boxes.infos[0][1], boxes.infos
+            # the box fails to show: nobody was told, so not 0
+            vr.messagebox = _NoBox()
+            assert vr.main([plain]) == 2
+            assert not any(r.looped for r in made), made
     finally:
         shutil.rmtree(p, ignore_errors=True)
     src = inspect.getsource(vr)

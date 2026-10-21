@@ -328,6 +328,45 @@ def test_detect_panels_prefers_the_recorded_manual_anchor():
         "anchor preference is indistinguishable from the auto fit"
 
 
+def test_selftest_candidates_stand_clear_of_each_other():
+    """#477: the manual's tuner figure (`--selftest`) names a solid best,
+    a dashed 2nd and a dotted 3rd outline, but showed no 2nd. Its
+    synthetic discs had hard edges, so the three diff thresholds cut
+    within a pixel of each other and the best outline, drawn last and
+    thickest, covered the 2nd. With soft edges each candidate's
+    equal-area radius sits 3 px or more from the next one's. The figure
+    draws 1.35 screen px per frame px at 90 dpi, so the best line's halo
+    reaches 2 pt (1.9 frame px) either side of its centre, and a 1 pt
+    line clears it from 2.3 frame px out. Measured 2026-10-20: 4.0 px
+    or more with the soft edge; with the old hard one the best and the
+    2nd were 0.6 to 0.8 px apart."""
+    import math
+    import shutil
+    import tempfile
+    import sldea_edge as se
+    d = st._selftest_run(tempfile.mkdtemp(prefix='tuner_selftest_gap_'))
+    try:
+        run = se.load_run(d)
+        panels = st.load_panels(run, st.choose_indices(run['rows']))
+        base = st.baseline_panel(panels)['gray']
+        _r, cands, _s = st.detect_panels(panels, base,
+                                         st.build_settings(d), run['rows'])
+        content = [p for p in panels if p['label'] != 'baseline']
+        assert [p['label'] for p in content] == ['mid-run', 'late'], content
+        for p in content:
+            cl = cands[p['idx']]
+            assert len(cl) == 3, (p['label'], [c['method'] for c in cl])
+            radii = [math.sqrt(c['area_px'] / math.pi) for c in cl]
+            for k in (0, 1):
+                gap = abs(radii[k] - radii[k + 1])
+                assert gap >= 3.0, (
+                    f"{p['label']}: candidates {k + 1} and {k + 2} "
+                    f"({cl[k]['method']}, {cl[k + 1]['method']}) are "
+                    f"{gap:.2f} px apart; the figure would hide one")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # `#197` — the run picker
 # ---------------------------------------------------------------------------
@@ -339,8 +378,9 @@ _COLS = ['snapshot', 'step', 'tag', 'nominal_kV', 'frame_file',
 def _frames_run(parent, name, csv_name='data.csv'):
     """A run the tuner can actually LOAD: baseline + two activated frames.
 
-    Same shapes as the module's own --selftest, so detection finds a
-    region in the late frame and the window reaches its loaded state."""
+    The disc sizes of the module's own --selftest (with hard edges, which
+    the self-test softened in #477), so detection finds a region in the
+    late frame and the window reaches its loaded state."""
     import csv
     import cv2
     import numpy as np

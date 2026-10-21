@@ -253,16 +253,23 @@ def build_settings(rundir):
 # headless self-test: synthesise a tiny run, render, save a PNG (no window)
 # ---------------------------------------------------------------------------
 
-def _selftest(out_png):
+SELFTEST_EDGE_PX = 12.0    # half-width of the self-test discs' soft edge
+
+
+def _selftest_run(d):
+    """Write the self-test's synthetic run (a flat baseline and two
+    activated discs) into the empty folder `d` and return `d`.
+
+    Each disc's edge is a ramp, SELFTEST_EDGE_PX either side of its
+    radius, the way a real membrane's edge is a gradient rather than a
+    line. On the hard-edged discs this used before #477 the three diff
+    thresholds (0.6x, 1x and 1.5x Otsu) cut within a pixel of each other,
+    so the best outline, drawn last and thickest, hid the dashed 2nd one
+    in the manual's figure, whose caption names all three."""
     import csv
-    import tempfile
 
     import cv2
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
 
-    d = tempfile.mkdtemp(prefix='tuner_selftest_')
     frames = os.path.join(d, 'frames')
     os.makedirs(frames)
     cols = ['snapshot', 'step', 'tag', 'nominal_kV', 'control_V',
@@ -273,8 +280,10 @@ def _selftest(out_png):
     def disc(r, level, texture=False):
         img = np.full((240, 320), 90.0, np.float32)
         yy, xx = np.mgrid[0:240, 0:320]
-        m = (xx - 160) ** 2 + (yy - 120) ** 2 <= r * r
-        img[m] += level + (30 * ((xx[m] // 4) % 2) if texture else 0)
+        rr = np.hypot(xx - 160.0, yy - 120.0)
+        weight = np.clip((r + SELFTEST_EDGE_PX - rr)
+                         / (2 * SELFTEST_EDGE_PX), 0.0, 1.0)
+        img += weight * (level + (30 * ((xx // 4) % 2) if texture else 0))
         return np.clip(img, 0, 255).astype(np.uint8)
 
     rows = []
@@ -290,7 +299,17 @@ def _selftest(out_png):
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         w.writerows(rows)
+    return d
 
+
+def _selftest(out_png):
+    import tempfile
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    d = _selftest_run(tempfile.mkdtemp(prefix='tuner_selftest_'))
     run = se.load_run(d)
     picks = choose_indices(run['rows'])
     assert [p[0] for p in picks] == ['baseline', 'mid-run', 'late'], picks

@@ -450,9 +450,18 @@ def test_preflight_reticle_is_white_on_a_black_halo():
     a black halo 1 px wider on each side, on the frame. Across the
     vertical line near the top the pixels read frame, black, white, black,
     frame. Where the two lines cross, both stay white: every halo goes
-    down before any white, so one line's halo never cuts the other."""
+    down before any white, so one line's halo never cuts the other.
+
+    The live view draws the same reticle (#476), so its colors are pinned
+    here as values: on the membrane's gray 147 the white alone stands off
+    by 3.07:1, and Tol cyan, the live view's color before, by 1.67:1."""
     from PIL import Image
     import gui
+    import sldea_liveview as lv
+    assert (lv.RETICLE_INK, lv.RETICLE_HALO) == ('#FFFFFF', '#000000')
+    assert _contrast(lv.RETICLE_INK, MEMBRANE) >= 3.0
+    assert _contrast(lv.TOL_CYAN, MEMBRANE) < 3.0
+    assert _contrast(lv.RETICLE_HALO, MEMBRANE) >= 3.0
     img = Image.new('RGB', (520, 292), (147, 147, 147))
     gui.draw_preflight_reticle(img)
     a = np.asarray(img).astype(int)
@@ -471,6 +480,27 @@ def test_preflight_reticle_is_white_on_a_black_halo():
     colors = {tuple(px) for px in a.reshape(-1, 3)}
     assert colors <= {(147, 147, 147), (0, 0, 0), (255, 255, 255)}, \
         colors - {(147, 147, 147), (0, 0, 0), (255, 255, 255)}
+
+
+def test_the_live_view_draws_the_preflights_reticle():
+    """#476: the live view drew the pre-flight's reticle in Tol cyan, and
+    its circle's halo lay all inside the ring (the box was not grown to
+    center it). It now draws the very same reticle: on the same picture,
+    the live view's frame below its banner is the pre-flight's, pixel
+    for pixel."""
+    from PIL import Image
+    import gui
+    import sldea_liveview as lv
+    thumb = np.full((270, 480, 3), 147, np.uint8)
+    pre = Image.fromarray(thumb.copy())
+    gui.draw_preflight_reticle(pre)
+    live = lv.render(thumb, 'live')
+    a, b = np.asarray(pre), np.asarray(live)
+    assert a.shape == b.shape, (a.shape, b.shape)
+    band = 25                       # the banner covers rows 0 to 24
+    assert (a[band:] != 147).any(), "no reticle was drawn"
+    diff = np.argwhere((a[band:] != b[band:]).any(axis=2))
+    assert not len(diff), f"{len(diff)} pixels differ, first {diff[:3]}"
 
 
 # ------------------------------------------------------------- needs Tk

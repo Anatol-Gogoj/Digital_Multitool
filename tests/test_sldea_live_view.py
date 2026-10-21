@@ -197,12 +197,12 @@ def test_the_reticle_has_the_preflights_geometry_and_never_marks_the_frame():
     assert _np.array_equal(th, before), "render drew into the thumbnail"
     w, h = img.size
     cx, cy, r = w / 2.0, h / 2.0, h * 0.32
-    assert _hex(_px(img, cx, h * 0.8)) == lv.TOL_CYAN    # vertical line
-    assert _hex(_px(img, w * 0.1, cy)) == lv.TOL_CYAN    # horizontal line
+    assert _hex(_px(img, cx, h * 0.8)) == lv.RETICLE_INK  # vertical line
+    assert _hex(_px(img, w * 0.1, cy)) == lv.RETICLE_INK  # horizontal line
     # the circle: where it crosses the row 40 px below the centre
     xs = cx + (r * r - 40 * 40) ** 0.5
     hit = [_hex(_px(img, xs + d, cy + 40)) for d in (-1, 0, 1)]
-    assert lv.TOL_CYAN in hit, hit
+    assert lv.RETICLE_INK in hit, hit
     # a NO FRAME picture carries no old frame at all
     img = lv.render(th, 'stalled')
     arr = _np.asarray(img)[30:]
@@ -1399,7 +1399,7 @@ def test_a_dead_streams_stills_show_under_video_stream_down():
         img = lv.render(st['thumb'], st['kind'])
         assert _hex(_px(img, img.width - 3, 4)) == lv.TOL_RED    # banner
         assert _hex(_px(img, img.width / 2.0, img.height * 0.8)) == \
-            lv.TOL_CYAN                    # the picture and its reticle
+            lv.RETICLE_INK                 # the picture and its reticle
         app._sldea_live_still = _still(step=2, tag='baseline')
         _pump(root, 0.3)
         assert 'step 2 [baseline]' in view._state_lbl.cget('text')

@@ -286,23 +286,12 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
 def draw_preflight_reticle(img):
     """Draw the camera pre-flight's centering reticle on the PIL image
     `img`, in place: a cross through the middle and a circle 0.32 of the
-    height in radius.
+    height in radius, Tol white on a Tol black halo.
 
-    A framing guide, not an edge to place points on, so it may be widened:
-    Tol white on a Tol black halo 1 px wider on each side (#454; it was
-    the Material green #00e676 alone, 1.84:1 on the gray membrane), which
-    reads on the dark rim, the membrane and the bright foil it crosses.
-    Both halos go down before either white line. PIL draws an ellipse's
-    width inward, so the halo's box is 1 px larger to center it."""
-    from PIL import ImageDraw
-    dr = ImageDraw.Draw(img)
-    cx, cy = img.width / 2, img.height / 2
-    r = img.height * 0.32
-    for col, pad in (('#000000', 1), ('#FFFFFF', 0)):
-        dr.line([(cx, 0), (cx, img.height)], fill=col, width=1 + 2 * pad)
-        dr.line([(0, cy), (img.width, cy)], fill=col, width=1 + 2 * pad)
-        dr.ellipse([cx - r - pad, cy - r - pad, cx + r + pad, cy + r + pad],
-                   outline=col, width=2 + 2 * pad)
+    The SLDEA live view draws the same reticle, so both go through
+    sldea_liveview.draw_reticle (#476). The geometry is described there,
+    and the measurements behind the colors sit beside RETICLE_INK."""
+    sldea_liveview.draw_reticle(img)
 
 
 # How often a launch error box held back by an SLDEA run looks for the
@@ -587,8 +576,9 @@ def draw_focus_overlay(img, score):
     its label on `img` (an RGB PIL image, changed in place); return the
     label's height in pixels, 0 with no label (#400).
 
-    Drawn like the live view's reticle (sldea_liveview): Tol cyan over a
-    black under-stroke, so it reads on a bright picture and on a dark one.
+    Tol cyan over a black under-stroke, so it reads on a bright picture
+    and on a dark one (the live view's reticle wore these colors until
+    #476 made it the pre-flight's white on black).
     The label is CAM_FOCUS_LABEL_PX type, about twice its old height, and
     shrinks only when the picture is too narrow for it. `score` None draws
     the circle alone."""

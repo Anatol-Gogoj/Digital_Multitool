@@ -304,6 +304,10 @@ def main():
         json.dump(manifest, f, indent=1)
     print("DONE", len(manifest["images"]), "images")
     root.destroy()
+    # os._exit skips the flush, and a log redirected to a file is buffered:
+    # without this, "arb editor failed: ..." was lost and the run looked clean
+    sys.stdout.flush()
+    sys.stderr.flush()
     os._exit(0)
 
 

@@ -205,7 +205,7 @@
       "heading": "Where to read next",
       "bullets": [
         "SLDEA_MEASUREMENT.md — the full error budget: §1.1 what uncertainty to quote for which quantity, §1.2 how much to trust each method, §2 every term with its measured size, §4 a provenance row for every number. Read it before quoting any figure in a methods section.",
-        "SLDEA_HANDOFF.md — the dated, append-only decision log for the measurement chain. Every behaviour in this chapter has an observation → decision entry there with the evidence that settled it.",
+        "SLDEA_DECISIONS.md — the dated, append-only decision log for the measurement chain. Every behaviour in this chapter has an observation → decision entry there with the evidence that settled it.",
         "CLAUDE.md — the timeless traps, including the two that cost the most time: the pre-2026-07-28 scale bug, and the calibration-method vocabulary.",
         "python sldea_trace.py <run-or-parent> — pools every edge_labels.json it finds and prints the conf-vs-IoU calibration table, plus a warning naming any label that can never yield an IoU. Any ranking change is re-scored against the stored polygons offline, at no operator cost.",
         "python sldea_diag.py <run> --out DIR — the per-run diagnostic, read-only. ALWAYS pass --out: run folders already hold outputs from earlier sessions and the default path overwrites them. And read sldea_diag_contact.png, not only the numbers — the statistics said nothing while every outline sat on the electrode strips."

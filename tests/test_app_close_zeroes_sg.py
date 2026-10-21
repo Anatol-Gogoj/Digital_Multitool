@@ -27,16 +27,19 @@ Trek. What is pinned here:
   lock, and every level is written while the worker still holds the lock
   it checked the stop under;
 * a close whose offset and output-off writes on the run's channel both
-  went through records that (#472), holding the SG's I/O lock from its
-  zero until the session is closed, so a write queued behind it lands on
-  the closed session. Once a close has begun, the run's own zero takes
-  that lock and reads the record; failing on the closed session, it then
-  logs what the close did instead of FAILED TO ZERO, with no NOT ZEROED
-  status and no box. The alarm stays whenever the channel may not be at
-  0 V and off: a close that failed (dead link), zeroed another channel or
-  another SG handle, or zeroed only after the run's own zero had failed,
-  and a failed zero with no close at all. With no close begun, the run's
-  zero is made as before: unlocked, reading no record.
+  went through records that (#472), and so does a close whose output-off
+  went through on the channel of a run that never marked one (never
+  switched it on), holding the SG's I/O lock from those writes until the
+  session is closed, so a write queued behind it lands on the closed
+  session. Once a close has begun, the run's own zero takes that lock
+  and reads the record; failing on the closed session, it then logs what
+  the close did instead of FAILED TO ZERO, with no NOT ZEROED status and
+  no box. The alarm stays whenever the channel may be on or may still
+  hold the run's level: a close that failed (dead link), zeroed another
+  channel or another SG handle, zeroed only after the run's own zero had
+  failed, or only switched off a channel the run had marked, and a
+  failed zero with no close at all. With no close begun, the run's zero
+  is made as before: unlocked, reading no record.
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
@@ -103,13 +106,16 @@ class _SessionSG(_SG):
     link does after its timeout, and `dead_for_run` only the writes made
     off the main thread, which in these tests are the run's. `fail` also
     takes (method, channel). `on_zero(channel)` runs on the run's thread
-    as an offset write of 0 V starts, before it is recorded."""
+    as an offset write of 0 V starts, before it is recorded. With
+    `locking`, each write takes the SG's I/O lock around itself, as
+    VisaInstrument.write does."""
     CLOSED = 'Invalid session handle. The resource might be closed.'
 
-    def __init__(self, fail=()):
+    def __init__(self, fail=(), locking=False):
         super().__init__(fail)
         self.closed = self.dead = self.dead_for_run = False
         self.on_zero = None
+        self.locking = locking
 
     def _fail_now(self, name, channel):
         run = threading.current_thread() is not threading.main_thread()
@@ -119,25 +125,31 @@ class _SessionSG(_SG):
                 or (name, channel) in self.fail):
             raise IOError('VI_ERROR_TMO (fake dead link)')
 
+    def _write(self, record):
+        name, channel = record[0], record[1]
+        if not self.locking:
+            self.writes.append(record)
+            self._fail_now(name, channel)
+            return
+        with gui._io_lock(self):
+            self.writes.append(record)
+            self._fail_now(name, channel)
+
     def set_load_polarity(self, channel, load=None, polarity=None):
-        self.writes.append(('set_load_polarity', channel, load))
-        self._fail_now('set_load_polarity', channel)
+        self._write(('set_load_polarity', channel, load))
 
     def set_basic_wave(self, channel, **params):
-        self.writes.append(('set_basic_wave', channel, params))
-        self._fail_now('set_basic_wave', channel)
+        self._write(('set_basic_wave', channel, params))
 
     def set_offset(self, channel, offset_v):
         if (self.on_zero is not None and offset_v == 0.0
                 and threading.current_thread()
                 is not threading.main_thread()):
             self.on_zero(channel)
-        self.writes.append(('set_offset', channel, offset_v))
-        self._fail_now('set_offset', channel)
+        self._write(('set_offset', channel, offset_v))
 
     def set_output(self, channel, on):
-        self.writes.append(('set_output', channel, on))
-        self._fail_now('set_output', channel)
+        self._write(('set_output', channel, on))
 
     def close(self):
         super().close()
@@ -234,10 +246,20 @@ def _stuck_run(app, ch, dc=True, live=True):
 
 OUTPUTS_OFF = [('set_output', 1, False), ('set_output', 2, False)]
 SESSION_END = [('go_local',), ('close',)]
-# What run.log says in place of the alarm when the close zeroed CH1 (#472)
+# What run.log says in place of the alarm (#472) when the close zeroed CH1,
+# and when it switched off CH1 of a run that had never switched it on
 CLOSE_LINE = ("SG CH1 is at 0 V and off: window close set it to 0 V and "
               "switched it off, then closed the SG session, so this run's "
               "own zeroing found the session already closed")
+OFF_LINE = ("SG CH1 is off: this run never switched it on, and window close "
+            "switched it off and closed the SG session, so this run's own "
+            "zeroing found the session already closed")
+
+
+def _close_lines(app):
+    """run.log's lines that speak for a close in place of the alarm."""
+    return [ln for ln in app.lines
+            if ln.startswith('SG CH') and 'window close' in ln]
 
 
 # --------------------------------------------------------------------------
@@ -352,12 +374,12 @@ def test_a_dead_link_everywhere_still_closes_the_window():
 
 
 def test_a_close_records_the_zero_only_when_both_writes_went_through():
-    """#472. The record is (SG handle, channel), set only when the offset
-    write AND the output-off write on the run's channel both went through:
-    either one failing may leave the channel at a level or switched on.
-    The other channel failing to switch off leaves the run's channel at
-    0 V and off, so the record stands. The SG writes are the same either
-    way."""
+    """#472. For a run that marked its channel, the record is (SG handle,
+    channel, True), set only when the offset write AND the output-off
+    write on that channel both went through: either one failing may leave
+    the channel at a level or switched on. The other channel failing to
+    switch off leaves the run's channel at 0 V and off, so the record
+    stands. The SG writes are the same either way."""
     for fail, ch, recorded in (
             (set(), 2, True),
             ({'set_offset'}, 1, False),
@@ -374,41 +396,71 @@ def test_a_close_records_the_zero_only_when_both_writes_went_through():
                                  + SESSION_END), (case, app.sg.writes)
         rec = app._sldea_close_zeroed
         if recorded:
-            assert rec is not None and rec[0] is app.sg and rec[1] == ch, \
-                (case, rec)
+            assert (rec is not None and rec[0] is app.sg
+                    and rec[1:] == (ch, True)), (case, rec)
         else:
             assert rec is None, (case, rec)
         assert app.root.destroyed, case
 
 
-def test_a_close_that_writes_no_zero_records_nothing():
-    """No offset write, no record: no run, a run that finished within the
-    wait, a run that never set its channel to DC, a DRY run."""
+def test_a_close_records_switching_off_a_channel_the_run_never_marked():
+    """#472, from #471's review. A LIVE run closed before it set its
+    channel to DC (camera start-up, or its start writes found the stop)
+    never switched that channel on. The close writes no offset there, as
+    before, and records (SG handle, channel, False) once the output-off
+    write on the run's channel went through: off, offset untouched. The
+    other channel failing does not void it; the run's channel failing
+    does."""
+    for fail, recorded in ((set(), True), ({('set_output', 1)}, True),
+                           ({('set_output', 2)}, False),
+                           ({'set_output'}, False)):
+        app = _App(sg=_SessionSG(fail=fail))
+        _stuck_run(app, ch=2, dc=False)
+        with _fast_clock():
+            app._on_app_close()
+        assert app.sg.writes == OUTPUTS_OFF + SESSION_END, \
+            (fail, app.sg.writes)
+        rec = app._sldea_close_zeroed
+        if recorded:
+            assert (rec is not None and rec[0] is app.sg
+                    and rec[1:] == (2, False)), (fail, rec)
+        else:
+            assert rec is None, (fail, rec)
+
+
+def test_a_close_with_no_live_run_records_nothing():
+    """No LIVE run still flagged, no record: no run, a run that finished
+    within the wait, a DRY run. None of them takes the SG's lock."""
     def finished(app):
         _stuck_run(app, ch=2)
         app.root.after(0, app._sldea_finished)
     for name, setup in (
             ('no run', lambda app: None),
             ('finished', finished),
-            ('no DC mark', lambda app: _stuck_run(app, ch=2, dc=False)),
             ('DRY', lambda app: _stuck_run(app, ch=1, live=False))):
-        app = _App(sg=_SessionSG())
+        sg = _SessionSG()
+        gate = _CloseLock()
+        sg.__dict__['_io_rlock'] = gate
+        app = _App(sg=sg)
         setup(app)
         with _fast_clock():
             app._on_app_close()
-        assert app.sg.offsets(1) == app.sg.offsets(2) == [], \
-            (name, app.sg.writes)
+        assert sg.offsets(1) == sg.offsets(2) == [], (name, sg.writes)
         assert app._sldea_close_zeroed is None, name
+        assert not gate.main_waiting.is_set(), f"{name}: took the lock"
 
 
 def test_the_close_holds_the_sg_lock_from_its_zero_to_the_session_close():
-    """#472. With the zero made, the close keeps the SG's I/O lock until
-    the SG session is closed, so no other write can reach the channel in
-    between. With the zero failed, it lets the lock go once both outputs
-    are off, and the run's own zero still gets the open session. Either
-    way the lock is free once the window has gone."""
-    for fail, held_to_close in ((set(), True), ({'set_offset'}, False),
-                                ({('set_output', 1)}, False)):
+    """#472. With the zero made (or, on a channel the run never marked,
+    the output-off), the close keeps the SG's I/O lock until the SG
+    session is closed, so no other write can reach the channel in
+    between. With those writes failed, it lets the lock go once both
+    outputs are off, and the run's own zero still gets the open session.
+    Either way the lock is free once the window has gone."""
+    for fail, dc, held_to_close in (
+            (set(), True, True), ({'set_offset'}, True, False),
+            ({('set_output', 1)}, True, False),
+            (set(), False, True), ({('set_output', 1)}, False, False)):
         sg = _SessionSG(fail=fail)
         gate = _CloseLock()
         sg.__dict__['_io_rlock'] = gate
@@ -419,13 +471,15 @@ def test_the_close_holds_the_sg_lock_from_its_zero_to_the_session_close():
                 return _inner(*args)
             setattr(sg, name, watch)
         app = _App(sg=sg)
-        _stuck_run(app, ch=1)
+        _stuck_run(app, ch=1, dc=dc)
         with _fast_clock():
             app._on_app_close()
-        assert held == [('set_offset', True), ('set_output', True),
-                        ('set_output', True), ('go_local', held_to_close),
-                        ('close', held_to_close)], (fail, held)
-        assert gate.depth == 0 and gate.owner is None, (fail, gate.depth)
+        case = (fail, dc)
+        assert held == ([('set_offset', True)] if dc else []) + [
+            ('set_output', True), ('set_output', True),
+            ('go_local', held_to_close), ('close', held_to_close)], \
+            (case, held)
+        assert gate.depth == 0 and gate.owner is None, (case, gate.depth)
         assert app.root.destroyed
 
 
@@ -472,7 +526,7 @@ def test_a_write_queued_behind_the_close_lands_on_the_closed_session():
     assert (sg.writes.index(('set_output', 1, True))
             > sg.writes.index(('close',))), sg.writes
     rec = app._sldea_close_zeroed
-    assert rec is not None and rec[0] is sg and rec[1] == 1, rec
+    assert rec is not None and rec[0] is sg and rec[1:] == (1, True), rec
 
 
 # --------------------------------------------------------------------------
@@ -669,6 +723,59 @@ class _CloseLock(_OwnedLock):
         self.__exit__(None, None, None)
 
 
+class _FifoLock:
+    """A reentrant SG I/O lock that lets waiting threads in strictly in
+    the order they came, so a test can say who gets it next (#472;
+    threading.RLock promises no order). acquire()/release() and `with`.
+    `queued()` counts the threads waiting; `main_waiting` is set as the
+    main thread starts to wait. A wait over 60 s fails instead of
+    hanging."""
+
+    def __init__(self):
+        self._cond = threading.Condition(threading.Lock())
+        self._owner = None
+        self._depth = 0
+        self._queue = []
+        self.main_waiting = threading.Event()
+
+    def acquire(self):
+        me = threading.get_ident()
+        with self._cond:
+            if self._owner == me:
+                self._depth += 1
+                return True
+            if threading.current_thread() is threading.main_thread():
+                self.main_waiting.set()
+            self._queue.append(me)
+            deadline = time.monotonic() + 60
+            while self._owner is not None or self._queue[0] != me:
+                left = deadline - time.monotonic()
+                assert left > 0, "waited 60 s for the SG's lock"
+                self._cond.wait(left)
+            self._queue.pop(0)
+            self._owner, self._depth = me, 1
+        return True
+
+    def release(self):
+        with self._cond:
+            assert self._owner == threading.get_ident(), "not the holder"
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._cond.notify_all()
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+    def queued(self):
+        with self._cond:
+            return len(self._queue)
+
+
 def test_every_level_is_written_under_the_lock_its_stop_check_took():
     """The stop check under the SG's lock only helps if the level write
     happens before that lock is let go: checked under the lock, then
@@ -733,8 +840,9 @@ def test_close_during_a_long_scope_read_leaves_the_run_channel_at_0v():
         # the run's own zero went through after the close's: it zeroed the
         # channel itself, so run.log has neither the alarm nor the close's
         # line (#472)
-        assert not any('FAILED TO ZERO' in ln or ln == CLOSE_LINE
-                       for ln in app.lines), app.lines
+        assert not any('FAILED TO ZERO' in ln for ln in app.lines), \
+            app.lines
+        assert not _close_lines(app), app.lines
 
 
 # --------------------------------------------------------------------------
@@ -751,12 +859,12 @@ def _alarmed(app, mb):
             'HV NOT ZEROED' in mb.titles('showerror'))
 
 
-def _close_mid_ramp(app, before_close=None):
+def _close_mid_ramp(app, before_close=None, after_close=None):
     """Block the run in its first I_Out read after the ramp has started,
-    run `before_close()` there, close the window, then let the read come
-    back and wait for the run to end. -> the SG writes the close made.
-    The close's wait runs on the fast clock: the run is blocked in the
-    read meanwhile, so it reads no clock."""
+    run `before_close()` there, close the window, run `after_close()`,
+    then let the read come back and wait for the run to end. -> the SG
+    writes the close made. The close's wait runs on the fast clock: the
+    run is blocked in the read meanwhile, so it reads no clock."""
     entered, release, hit = _block_first_ramp_read(app)
     try:
         app.sldea_run()
@@ -769,6 +877,8 @@ def _close_mid_ramp(app, before_close=None):
             app._on_app_close()
         closing = app.sg.writes[n:]
         assert app.root.destroyed
+        if after_close is not None:
+            after_close()
     finally:
         # the worker must be done with the run folder before the
         # temporary directory goes, pass or fail
@@ -795,7 +905,8 @@ def test_a_close_that_zeroed_the_channel_is_logged_instead_of_the_alarm():
         assert closing == ([('set_offset', 1, 0.0)] + OUTPUTS_OFF
                            + SESSION_END), closing
         rec = app._sldea_close_zeroed
-        assert rec is not None and rec[0] is app.sg and rec[1] == 1, rec
+        assert (rec is not None and rec[0] is app.sg
+                and rec[1:] == (1, True)), rec
         assert app.sg.writes[-1] == ('set_offset', 1, 0.0), app.sg.writes
         assert _alarmed(app, mb) == (False, False, False), \
             (app.lines, app.statuses, mb.calls)
@@ -818,7 +929,7 @@ def test_a_close_on_a_dead_link_keeps_the_alarm():
         assert app._sldea_close_zeroed is None
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def test_a_close_that_zeroed_another_channel_keeps_the_alarm():
@@ -833,7 +944,7 @@ def test_a_close_that_zeroed_another_channel_keeps_the_alarm():
             app, before_close=lambda: setattr(app, '_sldea_sg_dc_ch', 2))
         assert closing[0] == ('set_offset', 2, 0.0), closing
         rec = app._sldea_close_zeroed
-        assert rec is not None and rec[1] == 2, rec
+        assert rec is not None and rec[1:] == (2, True), rec
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
         assert not any(ln.startswith('SG CH') for ln in app.lines), \
@@ -860,13 +971,135 @@ def test_a_close_through_another_sg_handle_keeps_the_alarm():
         assert closing == ([('set_offset', 1, 0.0)] + OUTPUTS_OFF
                            + SESSION_END), closing
         rec = app._sldea_close_zeroed
-        assert rec is not None and rec[0] is other and rec[1] == 1, rec
+        assert (rec is not None and rec[0] is other
+                and rec[1:] == (1, True)), rec
         tries = [ln for ln in app.lines
                  if ln.startswith('SG zeroing attempt failed')]
         assert len(tries) == 2, app.lines
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
+
+
+def test_a_close_during_camera_start_up_is_logged_as_off_not_as_the_alarm():
+    """From #471's review. The window closes while the run is still in its
+    camera start-up, before its SG start writes: the run has not marked a
+    channel, so the close writes no offset, switches both outputs off and
+    closes the session. The run then skips its start writes (the stop is
+    set), never switches CH1 on, and its own zero fails on the closed
+    session. That used to say FAILED TO ZERO, "the Trek may still be
+    energized", for a channel that was never switched on. Now run.log says
+    CH1 is off, and neither the status nor the box goes up."""
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)) as mb:
+        app = _live_app(tmp, sg=_SessionSG())
+        in_camera, release = threading.Event(), threading.Event()
+        inner = gui.webcam.resolve_camera
+
+        def resolve_camera(idx):
+            if threading.current_thread() is not threading.main_thread():
+                in_camera.set()
+                assert release.wait(30), "the test never let the run on"
+            return inner(idx)
+        gui.webcam.resolve_camera = resolve_camera      # _patched restores
+        try:
+            app.sldea_run()
+            assert in_camera.wait(30), app.lines
+            assert app._sldea_running and app._sldea_sg_dc_ch is None
+            with _fast_clock():
+                app._on_app_close()
+            closing = list(app.sg.writes)
+        finally:
+            release.set()
+            done = app.worker_done.wait(30)
+        assert done, app.lines
+        assert app.worker_error is None, repr(app.worker_error)
+        app.root.run_pending()
+        assert closing == OUTPUTS_OFF + SESSION_END, closing
+        assert app.sg.writes[len(closing):] == [('set_offset', 1, 0.0)], \
+            app.sg.writes
+        rec = app._sldea_close_zeroed
+        assert (rec is not None and rec[0] is app.sg
+                and rec[1:] == (1, False)), rec
+        assert _alarmed(app, mb) == (False, False, False), \
+            (app.lines, app.statuses, mb.calls)
+        assert _close_lines(app) == [OFF_LINE], app.lines
+
+
+def test_a_close_while_the_run_start_waits_for_the_sg_lock_is_logged_as_off():
+    """From #471's review. Another thread holds the SG's lock (Continuous
+    Logging); the run passed its first stop check and waits for the lock
+    to make its start writes; the window closes and waits for the lock
+    too, after the run. When the lock is let go, the run gets it first.
+    With #471 the run finds the stop under the lock and writes nothing;
+    without it, its first start write lands and the next one queues
+    behind the close. Either way the close then finds no mark, switches
+    both outputs off and closes the session, the run's later writes fail
+    there, CH1 is never switched on, and run.log says it is off."""
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)) as mb:
+        sg = _SessionSG(locking=True)
+        lock = _FifoLock()
+        sg.__dict__['_io_rlock'] = lock
+        app = _live_app(tmp, sg=sg)
+        holding, let_go = threading.Event(), threading.Event()
+
+        def logger():                     # Continuous Logging, say
+            with lock:
+                holding.set()
+                assert lock.main_waiting.wait(30), "the close never waited"
+            let_go.set()
+        thread = threading.Thread(target=logger, daemon=True)
+        thread.start()
+        assert holding.wait(5)
+        try:
+            app.sldea_run()
+            deadline = time.monotonic() + 30
+            while lock.queued() < 1:
+                assert time.monotonic() < deadline, app.lines
+                time.sleep(0.01)
+            with _fast_clock():
+                app._on_app_close()
+        finally:
+            lock.main_waiting.set()       # never leave the logger holding
+            thread.join(30)
+            done = app.worker_done.wait(30)
+        assert let_go.is_set()
+        assert done, app.lines
+        assert app.worker_error is None, repr(app.worker_error)
+        app.root.run_pending()
+        end = sg.writes.index(('close',)) + 1
+        assert ('set_output', 1, True) not in sg.writes[:end], sg.writes
+        assert sg.writes[end - 4:end] == OUTPUTS_OFF + SESSION_END, \
+            sg.writes
+        rec = app._sldea_close_zeroed
+        assert rec is not None and rec[0] is sg and rec[1:] == (1, False), \
+            rec
+        assert app._sldea_sg_dc_ch is None
+        assert _alarmed(app, mb) == (False, False, False), \
+            (app.lines, app.statuses, mb.calls)
+        assert _close_lines(app) == [OFF_LINE], app.lines
+
+
+def test_a_close_that_only_switched_off_a_marked_channel_keeps_the_alarm():
+    """The close saw no mark and only switched CH1 off, but the run had
+    marked CH1 (in the app, a mark set between the close's look and its
+    writes): CH1 may still hold the run's last level, so the run's failed
+    zero keeps the alarm. The mark is hidden from the close by hand."""
+    with tempfile.TemporaryDirectory() as tmp, \
+            L._patched(L._MB(L.LIVE_OK)) as mb:
+        app = _live_app(tmp, sg=_SessionSG())
+        closing = _close_mid_ramp(
+            app,
+            before_close=lambda: setattr(app, '_sldea_sg_dc_ch', None),
+            after_close=lambda: setattr(app, '_sldea_sg_dc_ch', 1))
+        assert closing == OUTPUTS_OFF + SESSION_END, closing
+        rec = app._sldea_close_zeroed
+        assert (rec is not None and rec[0] is app.sg
+                and rec[1:] == (1, False)), rec
+        assert _alarmed(app, mb) == (True, True, True), \
+            (app.lines, app.statuses, mb.calls)
+        assert not _close_lines(app), app.lines
 
 
 def test_a_failed_zero_with_no_close_keeps_the_alarm():
@@ -877,7 +1110,7 @@ def test_a_failed_zero_with_no_close_keeps_the_alarm():
     with tempfile.TemporaryDirectory() as tmp, \
             L._patched(L._MB(L.LIVE_OK)) as mb:
         app = _live_app(tmp, sg=_SessionSG())
-        app._sldea_close_zeroed = (app.sg, 1)
+        app._sldea_close_zeroed = (app.sg, 1, True)
 
         def die_then_abort():
             app.sg.dead = True
@@ -891,7 +1124,7 @@ def test_a_failed_zero_with_no_close_keeps_the_alarm():
         assert hit, "the worker never read I_Out while ramping"
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def test_without_a_close_the_run_zero_is_made_as_before():
@@ -903,7 +1136,7 @@ def test_without_a_close_the_run_zero_is_made_as_before():
         app = _live_app(tmp, sg=_SessionSG())
         gate = _OwnedLock()
         app.sg.__dict__['_io_rlock'] = gate
-        app._sldea_close_zeroed = (app.sg, 1)    # must not be read
+        app._sldea_close_zeroed = (app.sg, 1, True)    # must not be read
         held = []
         for name in ('set_offset', 'set_output'):
             def watch(channel, value, _inner=getattr(app.sg, name),
@@ -922,7 +1155,7 @@ def test_without_a_close_the_run_zero_is_made_as_before():
                         ('set_output', False, False)], held
         assert _alarmed(app, mb) == (False, False, False), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def test_a_close_that_zeroes_after_the_run_zero_failed_keeps_the_alarm():
@@ -966,10 +1199,11 @@ def test_a_close_that_zeroes_after_the_run_zero_failed_keeps_the_alarm():
         assert closing == ([('set_offset', 1, 0.0)] + OUTPUTS_OFF
                            + SESSION_END), closing
         rec = app._sldea_close_zeroed
-        assert rec is not None and rec[0] is app.sg and rec[1] == 1, rec
+        assert (rec is not None and rec[0] is app.sg
+                and rec[1:] == (1, True)), rec
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def _close_during_the_run_zero(app, fail):
@@ -1033,7 +1267,7 @@ def test_a_close_while_the_run_is_zeroing_waits_and_logs_no_alarm():
                           + SESSION_END), writes
         assert _alarmed(app, mb) == (False, False, False), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def test_a_close_while_the_run_zero_times_out_keeps_the_alarm():
@@ -1047,10 +1281,10 @@ def test_a_close_while_the_run_zero_times_out_keeps_the_alarm():
         assert writes == ([('set_offset', 1, 0.0), ('set_offset', 1, 0.0)]
                           + OUTPUTS_OFF + SESSION_END), writes
         rec = app._sldea_close_zeroed
-        assert rec is not None and rec[1] == 1, rec
+        assert rec is not None and rec[1:] == (1, True), rec
         assert _alarmed(app, mb) == (True, True, True), \
             (app.lines, app.statuses, mb.calls)
-        assert CLOSE_LINE not in app.lines, app.lines
+        assert not _close_lines(app), app.lines
 
 
 def _run():

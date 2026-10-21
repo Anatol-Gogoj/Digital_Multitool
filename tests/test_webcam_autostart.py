@@ -1060,21 +1060,39 @@ def test_a_blocker_that_appears_before_the_delayed_start_still_holds():
     """The start waits CAM_AUTOSTART_DELAY_MS for the tab to paint. A
     capture or a run that takes the camera inside that window must still
     hold it off: the start checks again when it fires. The start is then
-    still owed, and runs once that blocker clears (#393)."""
+    still owed, and runs once that blocker clears (#393).
+
+    The run begins inside the call that schedules the start, so it is
+    inside that window however long the Tk pass around it takes. It used
+    to begin from this test's code once an update() had scheduled the
+    start, which needed that update() to return before the start fired.
+    A pass that ran past the delay, as one can on a busy PC, fired the
+    start inside it with no run yet, and the camera opened (#479)."""
     with _Patched() as p:
-        # wide enough that a slow update() on a busy desktop cannot run
-        # the start in the same pass that scheduled it
+        # long enough for the reason watch to look a few times while the
+        # start waits with the run on; it must not schedule another
         gui.CAM_AUTOSTART_DELAY_MS = 600
         root, app = _app()
         if root is None:
             return
         try:
+            scheduled = []
+            schedule = app._cam_resume_if_clear
+
+            def schedule_then_run():
+                got = schedule()
+                if got and not scheduled:
+                    scheduled.append(app._cam_autostart_job)
+                    app._sldea_running = True      # e.g. Run, meanwhile
+                return got
+            app._cam_resume_if_clear = schedule_then_run
             _select_webcam(app)
-            assert _pump_until(root,
-                               lambda: app._cam_autostart_job is not None)
-            app._sldea_running = True              # e.g. Run, meanwhile
-            _pump(root, 1.0)
-            assert app._cam_autostart_job is None, "the start never fired"
+            assert _pump_until(root, lambda: bool(scheduled)
+                               and app._cam_autostart_job is None,
+                               secs=3.0), ("the start never fired",
+                                           scheduled)
+            assert scheduled[0] is not None, "the start was not delayed"
+            _pump(root, WATCH)                     # the watch, run still on
             assert not app.cam_previewing and _opens() == [], _FakeCam.log
             assert p.mb.calls == [], p.mb.calls
             assert app.cam_splash[1] == gui.CAM_OFF_SLDEA, app.cam_splash

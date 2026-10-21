@@ -678,13 +678,25 @@ def test_the_loop_picks_up_a_swapped_still():
 
 
 def test_a_still_says_it_is_a_still_and_how_old_it_is():
+    """The age is the still's at the tick that drew it: 8 s at the
+    hand-over plus however long the Tk thread took to get to that tick.
+    That wait is measured, not assumed. A fixed '8.' needed the tick
+    within about 0.95 s of the hand-over; a busy PC held the Tk thread
+    longer and the view rightly said "9.0 s ago" (#479)."""
     with _view() as (root, app, view):
         _start(app, view)
+        before = _time.monotonic()
         app._sldea_live_still = _still(step=12, age=8.0)
         _pump(root, 0.3)
         text = view._state_lbl.cget('text')
+        waited = _time.monotonic() - before
         assert text.startswith('LAST STILL, not live: step 12'), text
-        assert '8.' in text and 's ago' in text, text
+        # every age fmt_age can print between 8 s and 8 s plus the wait:
+        # 0.05 s steps reach each of its 0.1 s steps
+        ages = {lv.fmt_age(8.0 + k * 0.05)
+                for k in range(int(waited / 0.05) + 1)}
+        ages.add(lv.fmt_age(8.0 + waited))
+        assert any(f"taken {a} ago" in text for a in ages), (text, waited)
         assert 'LIVE video' not in _texts(view)
         assert view.state['banner'] == "LAST STILL, NOT LIVE"
         # its exposure is the still's own, in words

@@ -30,6 +30,7 @@ import sys
 import numpy as np
 
 import sldea_edge as se
+import ui_colors as uc
 import tk_fontfix                      # must run before tkinter connects:
 tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 
@@ -408,8 +409,8 @@ def dirty_keys(loaded, current):
 # ---------------------------------------------------------------------------
 
 TITLE = "SLDEA edge tuner"
-BANNER_LOADED = '#0f2b46'          # the run-identity bar: loaded / nothing
-BANNER_EMPTY = '#4a4a4a'
+BANNER_LOADED = uc.BANNER_INFO     # the run-identity bar: loaded / nothing
+BANNER_EMPTY = uc.BANNER_EMPTY
 
 
 class TunerWindow:
@@ -476,7 +477,7 @@ class TunerWindow:
         self.browse_btn = ttk.Button(top, text="Browse…",
                                      command=self._browse)
         self.browse_btn.pack(side='left')
-        self.status = ttk.Label(top, foreground='#666', text='')
+        self.status = ttk.Label(top, foreground=uc.TEXT_MUTED, text='')
         self.status.pack(side='left', padx=12)
 
         # THE IDENTITY BAR. The issue's second ask: the loaded run has to
@@ -490,7 +491,7 @@ class TunerWindow:
                                    font=('TkDefaultFont', 12, 'bold'))
         self.banner_run.pack(fill='x')
         self.banner_path = tk.Label(self.banner, bg=BANNER_EMPTY,
-                                    fg='#cfd8e3', anchor='w', padx=10,
+                                    fg=uc.TEXT_ON_FILL_MUTED, anchor='w', padx=10,
                                     pady=0, font=('TkDefaultFont', 8))
         self.banner_path.pack(fill='x')
 
@@ -523,7 +524,7 @@ class TunerWindow:
             self._slider_cb[key] = cb
             hint = SLIDER_HINTS.get(key)
             if hint:
-                ttk.Label(ctl, text=hint, foreground='#555').grid(
+                ttk.Label(ctl, text=hint, foreground=uc.TEXT_MUTED).grid(
                     row=r, column=3, sticky='w', padx=(10, 0))
         ctl.columnconfigure(1, weight=1)
 
@@ -545,7 +546,7 @@ class TunerWindow:
         self.reset_btn = ttk.Button(bar, text="Reset to defaults",
                                     command=self.do_reset, state='disabled')
         self.reset_btn.pack(side='left', padx=8)
-        ttk.Label(bar, foreground='#666',
+        ttk.Label(bar, foreground=uc.TEXT_MUTED,
                   text="outlines here = exactly what Edge Review will produce"
                   ).pack(side='right')
 
@@ -745,7 +746,7 @@ class TunerWindow:
         ax = self.fig.add_subplot(111)
         ax.axis('off')
         ax.text(0.5, 0.5, msg or "pick a run to tune", ha='center',
-                va='center', wrap=True, fontsize=11, color='#555')
+                va='center', wrap=True, fontsize=11, color=uc.TEXT_MUTED)
         self.canvas.draw_idle()
 
     # ---------------- live update ----------------

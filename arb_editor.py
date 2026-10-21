@@ -18,6 +18,7 @@ from tkinter import ttk, filedialog, messagebox
 import arb_bin
 import arb_build as ab
 import easywave_export as ew
+import ui_colors as uc
 from siggen_presets import (arb_from_csv, write_arb_template, sanitize_arb_name)
 from instruments import BK4055B
 
@@ -147,7 +148,7 @@ class ArbWaveformEditor(tk.Toplevel):
         self.seg_param_frame = ttk.Frame(self.seg_frame)
         self.seg_param_frame.grid(row=2, column=0, columnspan=2, sticky='w')
         self.seg_param_vars = {}
-        tk.Label(self.seg_frame, fg='gray', justify=tk.LEFT, wraplength=190,
+        tk.Label(self.seg_frame, fg=uc.TEXT_MUTED, justify=tk.LEFT, wraplength=190,
                  text="Vpk = peak (±) about the baseline. "
                       "Sine: Vpp = 2×Vpk, Vrms ≈ 0.707×Vpk.").grid(
                           row=3, column=0, columnspan=2, sticky='w', pady=(4, 0))
@@ -224,7 +225,7 @@ class ArbWaveformEditor(tk.Toplevel):
 
         hint = ("Click canvas to add a point - drag a dot to move it - right-click a dot to delete. "
                 "Edit exact X/Y in the table (double-click a cell). Ctrl+Z / Ctrl+Y to undo/redo.")
-        tk.Label(self, text=hint, fg='gray', anchor='w', justify=tk.LEFT,
+        tk.Label(self, text=hint, fg=uc.TEXT_MUTED, anchor='w', justify=tk.LEFT,
                  wraplength=820).pack(fill='x', padx=12, pady=(0, 8))
 
         self._lib_refresh()
@@ -564,18 +565,18 @@ class ArbWaveformEditor(tk.Toplevel):
                           fill=color, outline='white')
 
         # Y axis labels (volts at full scale)
-        c.create_text(_PAD + 2, _PAD, anchor='nw', fill='#999',
+        c.create_text(_PAD + 2, _PAD, anchor='nw', fill=uc.TEXT_MUTED,
                       font=('Arial', 8), text=f'+{self.y_scale:g} V')
-        c.create_text(_PAD + 2, _PAD + h, anchor='sw', fill='#999',
+        c.create_text(_PAD + 2, _PAD + h, anchor='sw', fill=uc.TEXT_MUTED,
                       font=('Arial', 8), text=f'-{self.y_scale:g} V')
 
         # X axis labels, anchored to the bottom edge so they aren't clipped
         left_i = self._px_to_sample(_PAD)
         right_i = self._px_to_sample(_PAD + self._cw())
         yb = self.canvas.winfo_height() - 2
-        c.create_text(_PAD, yb, anchor='sw', fill='#666',
+        c.create_text(_PAD, yb, anchor='sw', fill=uc.TEXT_MUTED,
                       font=('Arial', 8), text=self._axis_text(left_i))
-        c.create_text(_PAD + self._cw(), yb, anchor='se', fill='#666',
+        c.create_text(_PAD + self._cw(), yb, anchor='se', fill=uc.TEXT_MUTED,
                       font=('Arial', 8), text=self._axis_text(right_i))
 
         # scrollbar thumb
@@ -890,7 +891,7 @@ class BinExportDialog(tk.Toplevel):
                        "Save the .bin, copy it to a FLASH DRIVE, and plug the "
                        "drive into the\n4055B's FRONT USB port "
                        "(Store/Recall > recall the file as an ARB)."),
-                 bg='#7a4a00', fg='white', justify=tk.LEFT,
+                 bg=uc.BANNER_ALERT, fg='white', justify=tk.LEFT,
                  font=('TkDefaultFont', 10, 'bold'),
                  padx=12, pady=10, anchor='w').pack(fill='x')
 
@@ -943,13 +944,13 @@ class BinExportDialog(tk.Toplevel):
         self._sticks = sticks
         if sticks:
             self.stick_label.config(
-                text=f"Flash drive detected: {sticks[0]}", foreground='#006400')
+                text=f"Flash drive detected: {sticks[0]}", foreground=uc.TEXT_OK)
             self.stick_btn.state(['!disabled'])
         else:
             self.stick_label.config(
                 text=("No flash drive detected -- plug one into this PC "
                       "(or use 'Save .bin...' and copy it over yourself)."),
-                foreground='#8a5a00')
+                foreground=uc.TEXT_ALERT)
             self.stick_btn.state(['disabled'])
         # keep polling while the dialog is open
         self._poll_id = self.after(1000, self._poll_sticks)
@@ -1054,7 +1055,7 @@ class EasyWaveXExportDialog(tk.Toplevel):
                        "(firmware limit).\n"
                        "Save the CSV, copy it to a FLASH DRIVE, and load it in "
                        "EasyWaveX manually."),
-                 bg='#7a4a00', fg='white', justify=tk.LEFT,
+                 bg=uc.BANNER_ALERT, fg='white', justify=tk.LEFT,
                  font=('TkDefaultFont', 10, 'bold'),
                  padx=12, pady=10, anchor='w').pack(fill='x')
 
@@ -1075,7 +1076,7 @@ class EasyWaveXExportDialog(tk.Toplevel):
             self._vars[key] = var
             ttk.Entry(frm, width=14, textvariable=var).grid(
                 row=r, column=1, sticky='w', padx=6, pady=2)
-            ttk.Label(frm, text=hint, foreground='gray').grid(
+            ttk.Label(frm, text=hint, foreground=uc.TEXT_MUTED).grid(
                 row=r, column=2, sticky='w', pady=2)
 
         n_src = len(self.values_v)

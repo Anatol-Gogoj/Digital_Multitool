@@ -46,11 +46,12 @@ import threading  # noqa: E402
 import time  # noqa: E402
 
 import gui  # noqa: E402
+import ui_colors as uc  # noqa: E402
 import sldea_profile as sprof  # noqa: E402
 import test_sldea_interlock as T  # noqa: E402
 
 REFUSED = 'SLDEA run folder'
-WINE = '#882255'
+ALERT = uc.TEXT_ALERT
 EARLIER = 'an earlier run\n'
 LINE_THREAD = 'sldea-run-folder-line'
 
@@ -785,20 +786,20 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
         assert _settle(root, lambda: _holds_run(line.cget('text'))), \
             line.cget('text')
         assert line.cget('text').split('\n')[1].startswith('⚠')
-        assert line.cget('fg') == WINE
+        assert line.cget('fg') == ALERT
         note()
         # a name that cannot be a folder name: warned at once
         app.sldea_runname_var.set('a:b')
         root.update()
         assert 'cannot contain :' in line.cget('text'), line.cget('text')
-        assert line.cget('fg') == WINE
+        assert line.cget('fg') == ALERT
         note()
         # a µ in the name: warned at once, with New folder's way round it
         app.sldea_runname_var.set('P3_7_2.5µL')
         root.update()
         assert 'u for µ, as in 2.5uL' in line.cget('text'), \
             line.cget('text')
-        assert line.cget('fg') == WINE
+        assert line.cget('fg') == ALERT
         note()
         app.sldea_runname_var.set('')
         root.update()
@@ -880,7 +881,7 @@ def test_the_line_warns_while_the_share_is_not_mounted():
             app.sldea_runname_var.set(name)
             assert _settle(root, lambda: 'not mounted' in line.cget('text')), \
                 (name, line.cget('text'))
-            assert line.cget('fg') == WINE
+            assert line.cget('fg') == ALERT
             assert mnt in app._sldea_folder_tip.text
         local = os.path.join(tmp, 'local')
         os.mkdir(local)
@@ -948,7 +949,7 @@ def test_a_share_that_hangs_never_freezes_the_window():
             assert line.cget('text').startswith(
                 _saves_to(app, os.path.join(tmp, burst[-1]))), \
                 line.cget('text')
-            assert line.cget('fg') == WINE
+            assert line.cget('fg') == ALERT
             # A check reads the boxes when it goes, so one sent before the
             # typing paused checks the newest name too, and only its time
             # gives it away. A Tk timer never fires early; 20 ms covers

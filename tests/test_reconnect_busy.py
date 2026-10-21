@@ -44,12 +44,13 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
 import gui  # noqa: E402
+import ui_colors as uc  # noqa: E402
 
 G = gui.InstrumentControlGUI
 KEYS = ('lcr', 'scope', 'sg', 'psu', 'dmm')
 LOCK = 'Channel in use — LIVE HV run'
 BUSY_NOTE = 'Still working on the previous connect operation...'
-CONNECTING = ('Connecting...', '#b36b00')
+CONNECTING = ('Connecting...', uc.TEXT_ALERT)
 
 
 class _Label:
@@ -126,7 +127,7 @@ class _App:
         for key in KEYS:
             setattr(self, key, _FakeInst(f'OLD {key}'))
             setattr(self, f'{key}_status',
-                    _Label(f'Connected (USB): OLD {key}', 'green'))
+                    _Label(f'Connected (USB): OLD {key}', uc.TEXT_OK))
 
     def _run_bg(self, work, done, busy=None, quiet=False):
         started = G._run_bg(self, work, done, busy=busy, quiet=quiet)
@@ -231,7 +232,7 @@ def test_a_reconnect_refused_behind_another_tab_works_once_that_lands():
         app._reconnect('sg', lambda: _FakeInst('NEW sg'), app.sg_status)
         app.root.pump()
         assert sg.closed and app.sg.idn == 'NEW sg'
-        assert app.sg_status.state() == ('Connected (USB): NEW sg', 'green')
+        assert app.sg_status.state() == ('Connected (USB): NEW sg', uc.TEXT_OK)
         assert app.jobs_started() == 2 and mb.calls == [], mb.calls
 
 
@@ -258,7 +259,7 @@ def test_a_second_press_on_the_same_tab_leaves_the_first_to_land():
         release.set()
         app.root.pump()
         assert opened == ['lcr'] and old.closed and app.lcr.idn == 'NEW lcr'
-        assert app.lcr_status.state() == ('Connected (USB): NEW lcr', 'green')
+        assert app.lcr_status.state() == ('Connected (USB): NEW lcr', uc.TEXT_OK)
         assert app.root.pending.empty() and mb.calls == [], mb.calls
 
 
@@ -337,14 +338,14 @@ def test_a_reconnect_with_nothing_in_flight_goes_ahead_as_before():
         app.root.pump()                  # the worker's completion
         assert seen == [(None, True)], seen
         assert app.psu.idn == 'NEW psu' and old.closed
-        assert app.psu_status.state() == ('Connected (USB): NEW psu', 'green')
+        assert app.psu_status.state() == ('Connected (USB): NEW psu', uc.TEXT_OK)
         assert synced == ['NEW psu'] and app._bg_busy == set()
         assert mb.calls == [] and app.status_bar.text is None
 
 
 def test_a_failed_reconnect_still_reports_the_error():
-    """A Reconnect that RAN and failed leaves no handle, and says so in red
-    with a dialog. A refused one never ran, so it leaves things as they
+    """A Reconnect that RAN and failed leaves no handle, and says so in the
+    alert brown with a dialog. A refused one never ran, so it leaves things as they
     were."""
     with _patched() as mb:
         app = _App()
@@ -357,7 +358,7 @@ def test_a_failed_reconnect_still_reports_the_error():
         app.root.pump()
         assert old.closed and app.dmm is None
         assert app.dmm_status.state() == (
-            'Error: DMM not reachable at 10.0.0.9:45454', 'red')
+            'Error: DMM not reachable at 10.0.0.9:45454', uc.TEXT_ALERT)
         assert mb.calls == [('showerror', 'Connection Error',
                              'DMM not reachable at 10.0.0.9:45454')], mb.calls
         assert app._bg_busy == set()

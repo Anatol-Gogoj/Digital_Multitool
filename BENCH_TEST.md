@@ -7,10 +7,10 @@ Launch: `.venv/bin/python gui.py`
 
 ## A. Connect & populate (PR #7, #11)
 
-- [ ] SG tab status shows **Connected: BK,4055B,…** (green) on launch
+- [ ] SG tab status shows **Connected: BK,4055B,…** (blue) on launch
 - [ ] CH1/CH2 input fields match the **front panel's** current settings
 - [ ] Gray *applied* readouts beside each field match the front panel too
-- [ ] Output buttons match reality (green **Output: ON** only if a channel is actually on)
+- [ ] Output buttons match reality (red **Output: ON** only if a channel is actually on)
 
 ## B. Adaptive fields (#8) — flip waveform on CH1, watch the form
 
@@ -33,7 +33,7 @@ Launch: `.venv/bin/python gui.py`
    - [ ] **Output LED did NOT change** (Apply must not touch output)
    - [ ] Applied readouts update to 1000 / 2 / 0 / 25
 2. Press **Output** button
-   - [ ] Button goes green **Output: ON**, front-panel output LED lights
+   - [ ] Button goes red **Output: ON**, front-panel output LED lights
    - [ ] Scope shows a 1 kHz square, high ~25% of the period
    - [ ] Scope tab → Get CH1 Measurements: Frequency ≈ 1 kHz, Pk-Pk ≈ 2 V
 3. Press **Output** again → [ ] OFF, LED out, scope flatlines
@@ -72,7 +72,7 @@ Launch: `.venv/bin/python gui.py`
 
 - [ ] Frequency `abc` → Apply → error dialog, GUI alive
 - [ ] Duty `150` → Apply → validation error ("between 0 and 100"), nothing sent
-- [ ] (Optional) Unplug sig gen USB → Apply → error dialog; replug → **Reconnect** → status green, fields repopulate
+- [ ] (Optional) Unplug sig gen USB → Apply → error dialog; replug → **Reconnect** → status blue (Connected), fields repopulate
 
 ## J. Channel independence
 
@@ -156,7 +156,7 @@ and then gives no baseline frame stops the run too (§S7).
    - [ ] **Enabled** is ticked and **Rate (Hz)** reads `2`
 3. Make the run short so this takes minutes, not an hour: **Start 0**, **End 1**, **Step 0.5**, **Ramp 2**, **Landing 10**
    - [ ] the summary line under the fields shows a total well under two minutes
-4. **The `DRY RUN — HV OFF` checkbox stays TICKED.** The run button must read **▶ Run (DRY)** in amber
+4. **The `DRY RUN — HV OFF` checkbox stays TICKED.** The run button must read **▶ Run (DRY)** in blue
    - [ ] if it reads **▶ Run — LIVE HV** in red, re-tick the box — do not continue
 5. Press **▶ Run (DRY)** and let it finish. The run log's first line is `run dir: …` — that folder is what everything below refers to
 6. Open the run folder:
@@ -425,7 +425,7 @@ uses the §M dry-run mechanic, so it commands nothing.
 2. **Webcam** tab: **Stabilize (pin gain 0)**, then **🔒 Apply & Lock**
    (`#193` — every gray level of the margin above matters here)
    - [ ] note the exposure/gain the Stabilize step landed on
-3. **SLDEA Test** tab, **DRY RUN — HV OFF ticked**, button amber
+3. **SLDEA Test** tab, **DRY RUN — HV OFF ticked**, button blue
    **▶ Run (DRY)**. Short profile: **Start 0, End 1, Step 0.5, Ramp 2,
    Landing 10**. Note the `run dir:` line.
 4. Analyse it:
@@ -804,7 +804,7 @@ one does, when the pre-flight had a camera (S7).
 2. **▶ Run (DRY)**
    - [ ] the pre-flight shows the disc, the verdict reads `exposure OK`, and the numbers line ends in `contrast NN gray levels` with NN at 20 or more
    - [ ] a line reads `Disc found: NNN px across, fit quality 0.NN` (or `Disc not found: ...` for a device that is not a disc; either is fine here)
-   - [ ] the same `Camera for this run: ...` line is in the dialog, and nothing in the dialog is red
+   - [ ] the same `Camera for this run: ...` line is in the dialog, and nothing in the dialog is brown or starts with ⚠
    - [ ] the button reads **✔ Looks good — start run** and **Enter** starts the run
 3. Let it finish
    - [ ] the run completes as it always did, and `run.log` holds `camera pre-flight: mean ..., saturated ...%, contrast ... gray levels, focus ..., verdict OK` and `baseline picture check: contrast ... gray levels, saturated ...% - OK`
@@ -812,7 +812,7 @@ one does, when the pre-flight had a camera (S7).
 **S2. A flat frame is refused at the pre-flight**
 
 4. Webcam tab: flat frame, **Apply & Lock**. SLDEA tab → **▶ Run (DRY)**
-   - [ ] bold red text: `NO PICTURE: the frame is flat (contrast N gray levels). The disc is not visible. Raise the exposure or the light on the Webcam tab.`
+   - [ ] bold brown text: `NO PICTURE: the frame is flat (contrast N gray levels). The disc is not visible. Raise the exposure or the light on the Webcam tab.`
    - [ ] a `Disc not found: ...` line under it
    - [ ] the button reads **⚠ Start anyway (no picture)**, the focus ring is on **✎ Adjust**, and pressing **Enter** does nothing at all
 5. Click **⚠ Start anyway (no picture)**
@@ -823,12 +823,12 @@ one does, when the pre-flight had a camera (S7).
 **S3. A flat baseline stops a DRY run, unless the pre-flight was overridden**
 
 7. The stop. Covered start: **▶ Run (DRY)** → **✔ Looks good — start run**, then cover the lens at once
-   - [ ] within about 3 s the run stops by itself: the status line turns red and reads `STOPPED: NO PICTURE in the baseline frame, nothing was measured (see Run log)`, and a box titled **Run stopped: no picture** opens
+   - [ ] within about 3 s the run stops by itself: the status line turns brown and reads `STOPPED: NO PICTURE in the baseline frame, nothing was measured (see Run log)`, and a box titled **Run stopped: no picture** opens
    - [ ] `run.log` holds, in this order: the pre-flight's `verdict OK` line, the `NO PICTURE ... STOPPING NOW.` line, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
    - [ ] the run's `frames/` folder holds exactly the warmup and the baseline frame (the warmup may still show the disc if the card came late; the baseline must be dark)
    - [ ] the run's `setup.txt` has no `Pre-flight override:` line
 8. The override. Webcam tab: flat frame, **Apply & Lock**. **▶ Run (DRY)** → **⚠ Start anyway (no picture)** → **Yes**
-   - [ ] the run does NOT stop: it runs to the end (about 50 s), the status line ends green `complete — 10 frames`, and no **Run stopped** box opens
+   - [ ] the run does NOT stop: it runs to the end (about 50 s), the status line ends blue `complete — 10 frames`, and no **Run stopped** box opens
    - [ ] `run.log` holds, in this order: `operator started the run ANYWAY on a flat pre-flight frame (no picture): the baseline picture stop is OFF for this run`, then `pre-flight override: no picture. The baseline picture check still runs and its verdict goes to this log, but it will NOT stop this run.`, then (after the baseline snap line) the `NO PICTURE ... so the run CARRIES ON. Review this run by hand.` line, and `run complete: 10/10 frames`; `STOPPING NOW` appears nowhere
    - [ ] `setup.txt` holds exactly one line `Pre-flight override: no picture (the operator started anyway at the camera pre-flight; the baseline picture stop is off for this run)`, on its own right after the `--- Snapshots ---` block
    - [ ] `frames/` holds all 10 frames
@@ -852,10 +852,10 @@ one does, when the pre-flight had a camera (S7).
 **S5. The settings warning appears when the Webcam entry differs from the lock** (rewritten 2026-10-06 for the #361 merge)
 
 14. Webcam tab: good frame, **Apply & Lock**. Then type a DIFFERENT exposure that still gives a good picture (the good value plus about a third) and do **NOT** press Apply & Lock. Go to the SLDEA tab
-    - [ ] the camera line reads `Camera for this run: exposure E, gain G, set on the Webcam tab` with your typed E, and under it, in amber, `⚠ The Webcam tab has LOCKED exposure N instead, so its live preview will NOT show what the run records (the pre-flight does). ...`
+    - [ ] the camera line reads `Camera for this run: exposure E, gain G, set on the Webcam tab` with your typed E, and under it, in brown, `⚠ The Webcam tab has LOCKED exposure N instead, so its live preview will NOT show what the run records (the pre-flight does). ...`
 15. **▶ Run (DRY)**
     - [ ] the pre-flight picture is taken at the typed exposure (a little brighter than the Webcam preview was) and the verdict reads `exposure OK`
-    - [ ] bold red text reads `⚠ The Webcam tab's fields differ from its lock: exposure E (locked: N). The Webcam preview uses the lock; this run uses the fields, as this picture does. ...`, and NO line says `This preview was NOT taken with the run's settings`
+    - [ ] bold brown text reads `⚠ The Webcam tab's fields differ from its lock: exposure E (locked: N). The Webcam preview uses the lock; this run uses the fields, as this picture does. ...`, and NO line says `This preview was NOT taken with the run's settings`
     - [ ] the button reads **⚠ Start anyway (the Webcam preview differs from the run)** and **Enter** does nothing
 16. Click **⚠ Start anyway (the Webcam preview differs from the run)** (one click, no second question)
     - [ ] the run starts and runs to the end; `run.log` holds the `⚠ camera pre-flight: The Webcam tab's fields differ from its lock ...` line and `operator pressed: ⚠ Start anyway (the Webcam preview differs from the run)` before the start line
@@ -881,7 +881,7 @@ holds the device and streams until Ctrl-C (`ffplay /dev/video0` does the
 same), or pull the camera's USB plug. Note which way was used.
 
 22. Good frame locked, DRY ticked. **▶ Run (DRY)**: the pre-flight shows the good picture. With the dialog still open, take the camera away. Then **✔ Looks good — start run**
-    - [ ] within about 3 s the run stops itself: the status line turns red and reads `STOPPED: NO BASELINE FRAME from the camera, nothing was measured (see Run log)`, and a box titled **Run stopped: no baseline frame** opens
+    - [ ] within about 3 s the run stops itself: the status line turns brown and reads `STOPPED: NO BASELINE FRAME from the camera, nothing was measured (see Run log)`, and a box titled **Run stopped: no baseline frame** opens
     - [ ] `run.log` holds, in this order: the two snap lines ending `→ NO FRAME (camera busy? close the Webcam preview)` (warmup and baseline; the warmup may still have a frame if the camera went away late), then `NO BASELINE FRAME: the camera gave the pre-flight a picture but gave this run none for its baseline ... STOPPING NOW.`, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
     - [ ] `data.csv` has two rows, `frame_file` empty on the baseline row; `frames/` holds at most the warmup
 23. Give the camera back (Ctrl-C, or plug it in). The "no camera at all" case keeps its old behaviour: take the camera away BEFORE pressing Run this time, then **▶ Run (DRY)**

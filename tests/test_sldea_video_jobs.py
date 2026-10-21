@@ -46,6 +46,7 @@ import tempfile
 import time
 
 import sldea_video as sv
+import ui_colors as uc
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -760,7 +761,7 @@ class _Root:
 
 class _Label:
     def __init__(self):
-        self.opts, self.packed = {'text': '', 'fg': '#555'}, None
+        self.opts, self.packed = {'text': '', 'fg': uc.TEXT_MUTED}, None
 
     def cget(self, k):
         return self.opts[k]
@@ -855,12 +856,12 @@ def test_the_job_line_follows_the_post_run_job_and_then_stops():
         _say(run, 'finalize', 'detect', done=120, total=438)
         app.tick()
         assert app.text().endswith('detecting edges 120/438'), app.text()
-        assert app.sldea_job_line.cget('fg') == '#555555'     # gui.MUTED
+        assert app.sldea_job_line.cget('fg') == uc.TEXT_MUTED   # gui.MUTED
         _say(run, 'finalize', 'done', text='ready in the run folder')
         proc.code = 0
         app.tick()
         assert app.text().endswith(': ready in the run folder'), app.text()
-        assert app.sldea_job_line.cget('fg') == '#117733'     # Tol muted
+        assert app.sldea_job_line.cget('fg') == uc.TEXT_OK
         assert app.root.pending() is None, "the poll outlived the job"
 
 
@@ -928,7 +929,7 @@ def test_the_job_line_says_when_the_post_run_job_ended_without_a_word():
         assert app.text() == ("⚠ video of R: the post-run job ended (exit "
                               "code 1) without its last word; see run.log"), \
             app.text()
-        assert app.sldea_job_line.cget('fg') == '#882255'     # Tol muted
+        assert app.sldea_job_line.cget('fg') == uc.TEXT_ALERT
         assert app.root.pending() is None
 
 
@@ -966,7 +967,7 @@ def test_the_job_line_waits_out_a_quiet_rerun_and_reads_its_last_word():
         app.tick()
         assert app.text() == ("video of R: edges re-run after Save, 438 "
                               "frames (2 flagged for review)"), app.text()
-        assert app.sldea_job_line.cget('fg') == '#117733'
+        assert app.sldea_job_line.cget('fg') == uc.TEXT_OK
         assert app.root.pending() is None
 
 

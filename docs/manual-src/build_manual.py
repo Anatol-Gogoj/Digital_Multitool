@@ -47,7 +47,7 @@ _sh["cautions"][1] = (
     "DC bias follows the profile's Bias ON state. Don't load one "
     "mid-measurement.")
 _sh["cautions"][4] = (
-    "On Windows the amber “Linux bench only” connection lines and "
+    "On Windows the brown “Linux bench only” connection lines and "
     "the greyed-out Update Software… are normal, not faults.")
 
 _lcr = content["lcr"]
@@ -456,7 +456,7 @@ body.append(f"""
       <ul>
         <li><b>Bench PC (Linux):</b> double-click the desktop icon, or run <code>.venv/bin/python gui.py</code>.</li>
         <li><b>Windows lab PC:</b> double-click <code>_software\\Launch_SCPI_Control_Windows.bat</code> on the ShareDrive. First run needs Python 3.10+ and internet.</li>
-        <li>On Windows the instrument tabs are <b>view/edit only</b> (amber note in each tab) — Battery Data and Webcam (snapshots and timelapse; not sig-gen-driven sweeps) are fully functional, and presets and bench profiles can be prepared and shared.</li>
+        <li>On Windows the instrument tabs are <b>view/edit only</b> (brown note in each tab) — Battery Data and Webcam (snapshots and timelapse; not sig-gen-driven sweeps) are fully functional, and presets and bench profiles can be prepared and shared.</li>
       </ul>
     </div>
   </div>

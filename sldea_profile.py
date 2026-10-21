@@ -1352,7 +1352,7 @@ def baseline_stop_words(reason, dry, drive_kv, video=False):
     """The words for a run that ends at its baseline frame.
 
     -> dict(stopped, status, title, box): the run.log line after the
-    check's own line, the red status line, and the operator's box. The
+    check's own line, the brown status line, and the operator's box. The
     drive sentence is flat_stop_words'. Never raises."""
     drive = flat_stop_words(dry, drive_kv)
     tail = "\n\nThe Run log has the numbers."

@@ -24,6 +24,7 @@ from matplotlib.backends.backend_tkagg import (                  # noqa: E402
 from matplotlib.figure import Figure                             # noqa: E402
 import pandas as pd                                              # noqa: E402
 
+import ui_colors as uc
 from battery_process import (STATUS_COLORS, TIME_COLUMNS, TIME_UNITS,
                              axis_label, load_and_process,
                              parse_cycle_selection)
@@ -47,7 +48,7 @@ class BatteryPane(ttk.Frame):
         ttk.Button(top, text="Load File…",
                    command=self._load_file).pack(side=tk.LEFT)
         self.lbl_file = ttk.Label(top, text="No file loaded",
-                                  foreground="gray")
+                                  foreground=uc.TEXT_MUTED)
         self.lbl_file.pack(side=tk.LEFT, padx=10)
         ttk.Button(top, text="Export Processed CSV…",
                    command=self._export_csv).pack(side=tk.RIGHT)
@@ -67,7 +68,7 @@ class BatteryPane(ttk.Frame):
         if not path:
             return
         fname = os.path.basename(path)
-        self.lbl_file.config(text=f"Loading {fname}…", foreground="blue")
+        self.lbl_file.config(text=f"Loading {fname}…", foreground=uc.TEXT_ACCENT)
         self.config(cursor="watch")
         self.update_idletasks()
 
@@ -96,7 +97,7 @@ class BatteryPane(ttk.Frame):
 
     def _on_load_error(self, error):
         self.config(cursor="")
-        self.lbl_file.config(text="Load failed", foreground="red")
+        self.lbl_file.config(text="Load failed", foreground=uc.TEXT_ALERT)
         messagebox.showerror("Load Error", str(error))
 
     def _export_csv(self):
@@ -142,7 +143,7 @@ class BatteryPane(ttk.Frame):
                                                      fill=tk.Y, padx=10)
         ttk.Button(ctrl, text="Generate All Cycle Plots",
                    command=self._run_batch_plot).pack(side=tk.LEFT)
-        self.batch_status = ttk.Label(ctrl, text="", foreground="gray")
+        self.batch_status = ttk.Label(ctrl, text="", foreground=uc.TEXT_MUTED)
         self.batch_status.pack(side=tk.LEFT, padx=10)
 
         self.batch_progress = ttk.Progressbar(self.batch_frame,

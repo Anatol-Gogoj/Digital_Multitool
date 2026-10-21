@@ -229,6 +229,7 @@ import sldea_trace as strc
 # then -- one decision, made once, with the split in front of us.
 import ui_widgets as uiw
 import tk_checkmarks
+import ui_colors as uc
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -257,7 +258,7 @@ SIDE_W = 330            # right panel width -- FIXED, propagation off (#179)
 RADIO_TEXT_PX = SIDE_W - 100   # text budget in a candidate radio row: the
                                # panel + LabelFrame padding, colour swatch
                                # and radio indicator eat ~100 px of the row
-PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
+PRIMARY_FG = uc.TEXT_ACCENT  # the app's accent text (ui_colors, #462) —
                         # reused for ▶ Detect Edges rather than introducing
                         # a colour, because #32 owns any real restyle
 # There is deliberately NO secondary foreground. The first `#216` version
@@ -743,7 +744,7 @@ class Tooltip:
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f'+{x}+{y}')
         tk.Label(tip, text=self.text, justify='left',
-                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 wraplength=self.wraplength, bg=uc.TOOLTIP_BG, fg='black',
                  relief='solid', borderwidth=1, padx=7, pady=5).pack()
         self._tip = tip
 
@@ -2732,11 +2733,11 @@ class EdgeReviewApp:
         clock_font = ('TkDefaultFont', 9)
         clocks = ttk.Frame(top)
         clocks.pack(side=tk.RIGHT, padx=(8, 6))
-        self.detect_lbl = tk.Label(clocks, text=detect_readout(), fg='#1f3a5f',
+        self.detect_lbl = tk.Label(clocks, text=detect_readout(), fg=PRIMARY_FG,
                                    anchor='e',
                                    font=clock_font + ('bold',))
         self.detect_lbl.pack(fill='x')
-        self.clock_lbl = tk.Label(clocks, text="", fg='#5a6b7d', anchor='e',
+        self.clock_lbl = tk.Label(clocks, text="", fg=uc.TEXT_MUTED, anchor='e',
                                   font=clock_font)
         self.clock_lbl.pack(fill='x')
         # Both dimensions measured from the widgets and the font rather
@@ -2881,7 +2882,7 @@ class EdgeReviewApp:
         self.unrev_btn = ttk.Button(nav, text="Next unreviewed",
                                     command=self._next_unreviewed)
         self.unrev_btn.pack(side=tk.LEFT)
-        self.queue_lbl = tk.Label(side, text="", fg='#8a5a00', anchor='w',
+        self.queue_lbl = tk.Label(side, text="", fg=uc.TEXT_ALERT, anchor='w',
                                   justify='left')
         self.queue_lbl.pack(fill='x', pady=(8, 0))
         self.status = tk.Label(host, text="idle", bd=1, relief=tk.SUNKEN,
@@ -2905,10 +2906,10 @@ class EdgeReviewApp:
         # 2026-10-03): every number in SLDEA_MEASUREMENT.md was measured
         # under the pin. Advisory only: no button, dialog or measurement
         # changes with it. The glyph carries the meaning beside the
-        # colour (the queue label's amber), never the colour alone. Empty
+        # colour (the queue label's brown), never the colour alone. Empty
         # text on the pinned version, so the row holds the button alone.
         self.cv_warn = se.opencv_version_warning()
-        self.cv_warn_lbl = tk.Label(foot, fg='#8a5a00', anchor='w',
+        self.cv_warn_lbl = tk.Label(foot, fg=uc.TEXT_ALERT, anchor='w',
                                     text=("⚠ " + self.cv_warn)
                                     if self.cv_warn else '')
         if self.cv_warn:
@@ -3083,7 +3084,7 @@ class EdgeReviewApp:
             return
         w, h = self._view_size()
         self.canvas.create_text(w // 2, h // 2, text=self._hint,
-                                fill='#d7dde5', justify='center',
+                                fill=uc.TEXT_ON_DARK, justify='center',
                                 width=max(220, w - 80), tags='hint',
                                 font=('TkDefaultFont', 13))
 
@@ -3437,7 +3438,7 @@ class EdgeReviewApp:
         if text:
             w, h = self._view_size()
             self.canvas.create_rectangle(0, h // 2 - 42, w, h // 2 + 42,
-                                         fill='#b36b00', outline='',
+                                         fill=uc.BANNER_ALERT, outline='',
                                          tags='banner')
             self.canvas.create_text(w // 2, h // 2, text=text, fill='white',
                                     font=('TkDefaultFont', 20, 'bold'),
@@ -4204,7 +4205,7 @@ class EdgeReviewApp:
                 head = 'FRAME UNREADABLE'
                 detail = '(missing / 0-byte / truncated on disk)'
             self.canvas.create_rectangle(0, vh // 2 - 46, vw, vh // 2 + 46,
-                                         fill='#7a1f1f', outline='')
+                                         fill=uc.BANNER_ERROR, outline='')
             self.canvas.create_text(
                 vw // 2, vh // 2, fill='white', justify='center',
                 font=('TkDefaultFont', 14, 'bold'),
@@ -8798,7 +8799,7 @@ class EdgeReviewApp:
             self._howto_win.lift()
             self._howto_win.focus_set()
             return
-        BG, FG, HEAD = '#ffffff', '#1a1a1a', '#1f3a5f'
+        BG, FG, HEAD = '#ffffff', uc.TEXT, PRIMARY_FG
         win = tk.Toplevel(self.root)
         try:
             win.title(HOWTO_TITLE)
@@ -8828,7 +8829,7 @@ class EdgeReviewApp:
                     fill='x', pady=((14 if si else 0), 4))
                 for p in paras:
                     if isinstance(p, tuple):     # the candidate-line example
-                        tk.Label(body, text=p[1], bg='#f2f4f7', fg=FG,
+                        tk.Label(body, text=p[1], bg=uc.PALE_CODE, fg=FG,
                                  anchor='w', justify='left', padx=8, pady=4,
                                  font='TkFixedFont').pack(
                             fill='x', pady=(2, 6))
@@ -8947,7 +8948,7 @@ class EdgeReviewApp:
             e = ttk.Entry(win, width=10)
             e.insert(0, f"{self.settings[key]:g}")
             e.grid(row=r, column=1, padx=6)
-            ttk.Label(win, text=tips.get(key, ''), foreground='#666',
+            ttk.Label(win, text=tips.get(key, ''), foreground=uc.TEXT_MUTED,
                       wraplength=380, justify='left').grid(
                 row=r, column=2, sticky='w', padx=6)
             entries[key] = e

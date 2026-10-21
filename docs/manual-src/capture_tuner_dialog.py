@@ -70,6 +70,8 @@ def finish():
         print("DIALOG OK: shown, captured, cancel path returned; "
               "no tuner process launched")
         root.destroy()
+        sys.stdout.flush()       # os._exit skips the flush of a redirected log
+        sys.stderr.flush()
         os._exit(0)
     root.after(200, finish)
 

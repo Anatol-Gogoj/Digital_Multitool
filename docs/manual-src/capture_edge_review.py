@@ -134,6 +134,8 @@ def main():
         json.dump(manifest, f, indent=1)
     print("captured 40_edge_review:", img.size, len(widgets), "widgets")
     root.destroy()
+    sys.stdout.flush()           # os._exit skips the flush of a redirected log
+    sys.stderr.flush()
     os._exit(0)
 
 

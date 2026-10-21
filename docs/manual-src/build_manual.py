@@ -603,7 +603,7 @@ body.append(f"""
 <footer class="foot">
   <p>Built from the live app ({esc(version_string())}) — every screenshot is a real capture, every
   callout is anchored to the actual control. Sources: <code>README.md</code>,
-  <code>SLDEA_HANDOFF.md</code>, <code>SLDEA_MEASUREMENT.md</code> and the code itself.</p>
+  <code>SLDEA_DECISIONS.md</code>, <code>SLDEA_MEASUREMENT.md</code> and the code itself.</p>
 </footer>""")
 
 CSS = """

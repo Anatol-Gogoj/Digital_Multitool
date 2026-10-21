@@ -43,7 +43,10 @@ Trek. What is pinned here:
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
-use the scope-lock suite's fakes (tests/test_scope_live_lock.py).
+use the scope-lock suite's fakes (tests/test_scope_live_lock.py). The
+stub app's Tk hand-offs (_sldea_log, _sldea_set_status, root.after) fail
+when a worker thread makes one while holding an SG I/O lock: window close
+waits for that lock on the Tk thread, so in the app that would deadlock.
 
 Run: .venv/bin/python tests/test_app_close_zeroes_sg.py
 """
@@ -156,17 +159,43 @@ class _SessionSG(_SG):
         self.closed = True
 
 
+def _holds_sg_lock(sg):
+    """True when the calling thread holds `sg`'s I/O lock: whichever lock
+    a test installed as its `_io_rlock`, or the RLock instruments._io_lock
+    makes. False with no SG or no lock yet."""
+    lock = sg.__dict__.get('_io_rlock') if sg is not None else None
+    if lock is None:
+        return False
+    if hasattr(lock, 'held_here'):
+        return lock.held_here()
+    owned = getattr(getattr(lock, 'inner', lock), '_is_owned', None)
+    return bool(owned()) if owned is not None else False
+
+
+# Every Tk hand-off a worker thread made while holding an SG I/O lock, in
+# every case of this suite (each stub app's _tk_guard adds to it)
+TK_UNDER_LOCK = []
+
+
 class _Root(L._Root):
     """The suite's Tk root, with what window close calls on it: update()
     plays the queued callbacks, as the real one does, and destroy() is
     only noted. `on_update()`, when set, runs at the start of each
-    update(): inside the close's wait."""
+    update(): inside the close's wait. after() first calls
+    `guard('root.after')`, which the app uses to fail a hand-off made
+    while holding the SG's lock."""
 
     def __init__(self):
         super().__init__()
         self.updates = 0
         self.destroyed = False
         self.on_update = None
+        self.guard = None
+
+    def after(self, ms, fn=None, *args):
+        if self.guard is not None:
+            self.guard('root.after')
+        return super().after(ms, fn, *args)
 
     def update(self):
         self.updates += 1
@@ -183,7 +212,16 @@ class _App(L._App):
     or DMM, and the recording SG above. `marks` notes, per run.log line,
     which channel the run had marked as set to DC at that moment;
     `statuses` notes the run's status lines, and `on_log(line)`, when set,
-    runs as each line is logged, on the thread that logs it."""
+    runs as each line is logged, on the thread that logs it.
+
+    The Tk hand-offs (_sldea_log, _sldea_set_status, root.after) fail when
+    a worker thread makes one while it holds an SG I/O lock, and note it in
+    `tk_under_lock` (and TK_UNDER_LOCK). In the app each one waits for the
+    Tk thread, and window close waits for that lock on the Tk thread, so
+    it would deadlock; these stubs never wait, so nothing else would show
+    it (#472, after #471's guard). On the Tk thread a Tk call cannot wait
+    for itself, so the close, which holds the lock there, is not checked.
+    The SGs checked are the app's and the one the run captured."""
     _on_app_close = G._on_app_close
 
     def __init__(self, tmp='.', sg=None, **kw):
@@ -196,14 +234,33 @@ class _App(L._App):
         self.marks = []
         self.statuses = []
         self.on_log = None
+        self.run_sg = None
+        self.tk_under_lock = []
+        self.root.guard = self._tk_guard
+
+    def _tk_guard(self, what):
+        if threading.current_thread() is threading.main_thread():
+            return
+        for sg in (self.__dict__.get('sg'), self.run_sg):
+            if _holds_sg_lock(sg):
+                self.tk_under_lock.append(what)
+                TK_UNDER_LOCK.append(what)
+                raise AssertionError(f"{what} called by a worker thread "
+                                     f"while it holds the SG's I/O lock")
+
+    def _sldea_worker(self, *args, **kw):
+        self.run_sg = self.sg           # the handle the run captures
+        super()._sldea_worker(*args, **kw)
 
     def _sldea_log(self, msg):
+        self._tk_guard('_sldea_log')
         self.lines.append(str(msg))
         self.marks.append(getattr(self, '_sldea_sg_dc_ch', None))
         if self.on_log is not None:
             self.on_log(str(msg))
 
     def _sldea_set_status(self, text, *a, **k):
+        self._tk_guard('_sldea_set_status')
         self.statuses.append(text)
 
 
@@ -706,14 +763,18 @@ class _OwnedLock:
 
 class _CloseLock(_OwnedLock):
     """_OwnedLock with the acquire() and release() window close calls on
-    the SG's I/O lock (#472). `main_waiting` is set as the main thread,
-    the Tk thread in the app, starts to wait for it there."""
+    the SG's I/O lock (#472), as the run's own zero calls them too.
+    `main_waiting` is set as the main thread, the Tk thread in the app,
+    starts to wait for it there; `acquires` lists the thread of every
+    acquire() call (a `with` block is not one)."""
 
     def __init__(self):
         super().__init__()
         self.main_waiting = threading.Event()
+        self.acquires = []
 
     def acquire(self):
+        self.acquires.append(threading.get_ident())
         if threading.current_thread() is threading.main_thread():
             self.main_waiting.set()
         self.__enter__()
@@ -774,6 +835,11 @@ class _FifoLock:
     def queued(self):
         with self._cond:
             return len(self._queue)
+
+    def held_here(self):
+        """True when the calling thread holds it: _owner changes only
+        under the holder's own hand, so for that thread it is exact."""
+        return self._owner == threading.get_ident()
 
 
 def test_every_level_is_written_under_the_lock_its_stop_check_took():
@@ -886,6 +952,7 @@ def _close_mid_ramp(app, before_close=None, after_close=None):
         done = app.worker_done.wait(30)
     assert done, app.lines
     assert app.worker_error is None, repr(app.worker_error)
+    assert app.tk_under_lock == [], app.tk_under_lock
     app.root.run_pending()              # shows a box the run queued
     return closing
 
@@ -1014,6 +1081,7 @@ def test_a_close_during_camera_start_up_is_logged_as_off_not_as_the_alarm():
             done = app.worker_done.wait(30)
         assert done, app.lines
         assert app.worker_error is None, repr(app.worker_error)
+        assert app.tk_under_lock == [], app.tk_under_lock
         app.root.run_pending()
         assert closing == OUTPUTS_OFF + SESSION_END, closing
         assert app.sg.writes[len(closing):] == [('set_offset', 1, 0.0)], \
@@ -1067,6 +1135,7 @@ def test_a_close_while_the_run_start_waits_for_the_sg_lock_is_logged_as_off():
         assert let_go.is_set()
         assert done, app.lines
         assert app.worker_error is None, repr(app.worker_error)
+        assert app.tk_under_lock == [], app.tk_under_lock
         app.root.run_pending()
         end = sg.writes.index(('close',)) + 1
         assert ('set_output', 1, True) not in sg.writes[:end], sg.writes
@@ -1149,6 +1218,7 @@ def test_a_failed_zero_with_no_close_keeps_the_alarm():
         app.sldea_run()
         assert app.worker_done.wait(30), app.lines
         assert app.worker_error is None, repr(app.worker_error)
+        assert app.tk_under_lock == [], app.tk_under_lock
         app.root.run_pending()
         assert hit, "the worker never read I_Out while ramping"
         assert _alarmed(app, mb) == (True, True, True), \
@@ -1159,11 +1229,13 @@ def test_a_failed_zero_with_no_close_keeps_the_alarm():
 def test_without_a_close_the_run_zero_is_made_as_before():
     """A run that ends by Abort, with no window close begun, zeroes as it
     did before #472: offset, then output off, neither under the SG's I/O
-    lock, and no record read."""
+    lock, and no record read. The lock has the acquire() the run's zero
+    would call, so a zero that took it here would be seen, not swallowed
+    as a failed acquire."""
     with tempfile.TemporaryDirectory() as tmp, \
             L._patched(L._MB(L.LIVE_OK)) as mb:
         app = _live_app(tmp, sg=_SessionSG())
-        gate = _OwnedLock()
+        gate = _CloseLock()
         app.sg.__dict__['_io_rlock'] = gate
         app._sldea_close_zeroed = (app.sg, 1, True)    # must not be read
         held = []
@@ -1182,9 +1254,11 @@ def test_without_a_close_the_run_zero_is_made_as_before():
         app.root.run_pending()
         assert held == [('set_offset', 0.0, False),
                         ('set_output', False, False)], held
+        assert gate.acquires == [], "the run's zero took the SG's lock"
         assert _alarmed(app, mb) == (False, False, False), \
             (app.lines, app.statuses, mb.calls)
         assert not _close_lines(app), app.lines
+        assert app.tk_under_lock == [], app.tk_under_lock
 
 
 def test_a_close_that_zeroes_after_the_run_zero_failed_keeps_the_alarm():
@@ -1224,6 +1298,7 @@ def test_a_close_that_zeroes_after_the_run_zero_failed_keeps_the_alarm():
             done = app.worker_done.wait(30)
         assert done, app.lines
         assert app.worker_error is None, repr(app.worker_error)
+        assert app.tk_under_lock == [], app.tk_under_lock
         app.root.run_pending()
         assert closing == ([('set_offset', 1, 0.0)] + OUTPUTS_OFF
                            + SESSION_END), closing
@@ -1276,6 +1351,7 @@ def _close_during_the_run_zero(app, fail):
         done = app.worker_done.wait(30)
     assert done, app.lines
     assert app.worker_error is None, repr(app.worker_error)
+    assert app.tk_under_lock == [], app.tk_under_lock
     assert held == [True], "the run's zero is not under the SG's lock"
     app.root.run_pending()
     return app.sg.writes[n:]

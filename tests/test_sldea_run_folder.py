@@ -900,21 +900,38 @@ def _line_threads():
 def test_a_share_that_hangs_never_freezes_the_window():
     """Every keystroke redraws at once while the check hangs; the line
     says the Output dir is not answering; a burst of typing sends one
-    check, and a burst while that one is stuck one more; the answer shows
-    once it comes."""
+    check, of the name it ends on, once the typing pauses, and a burst
+    while that one is stuck one more; the answer shows once it comes."""
     with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app), \
             _hanging_share() as gate:
         line = app.sldea_folder_line
         app.SLDEA_FOLDER_SLOW_S = 0.3
+        asked = []                  # (when its thread reached the share,
+                                    # run name) of every check sent
+        hang = sprof.holds_run
+
+        def noted(folder):
+            asked.append((time.monotonic(), os.path.basename(folder)))
+            return hang(folder)
+        sprof.holds_run = noted
         app.sldea_outdir.set(tmp)
+        # Draw the window before the first key (#453). Its first draw is
+        # Tk's own work, 239, 240 and 284 ms on Gogojster (Windows 11,
+        # 2026-10-19) against under 1 ms for every update after it; inside
+        # a burst that is a pause longer than the one before a check, and
+        # the line rightly answers it with a check of its own.
+        root.update()
+        pause = app.SLDEA_FOLDER_PAUSE_MS / 1000
         worst = 0.0
         out = []
         for burst in (('A', 'AB', 'ABC'), ('ABCD', 'ABCDE')):
+            keys, before = [], len(asked)
             for name in burst:
                 # The trace runs the redraw inside set(): a stat made there
                 # would hold it for the share's 30 s. Painting is timed
-                # apart. Keys come faster than the pause before a check.
+                # apart.
                 t0 = time.monotonic()
+                keys.append(t0)
                 app.sldea_runname_var.set(name)
                 worst = max(worst, time.monotonic() - t0)
                 root.update()
@@ -922,6 +939,10 @@ def test_a_share_that_hangs_never_freezes_the_window():
                 assert first == _saves_to(app, os.path.join(tmp, name)), \
                     first
                 _settle(root, lambda: False, timeout=0.1)
+            # Keys come faster than the pause before a check, or the burst
+            # was two bursts and the count below says nothing of the line.
+            gaps = [round(b - a, 3) for a, b in zip(keys, keys[1:])]
+            assert max(gaps) < pause, (burst, gaps, pause)
             # the last key of the burst: a check goes out, and hangs
             assert _settle(root, lambda: 'not answering' in
                            line.cget('text')), line.cget('text')
@@ -929,6 +950,17 @@ def test_a_share_that_hangs_never_freezes_the_window():
                 _saves_to(app, os.path.join(tmp, burst[-1]))), \
                 line.cget('text')
             assert line.cget('fg') == ALERT
+            # A check reads the boxes when it goes, so one sent before the
+            # typing paused checks the newest name too, and only its time
+            # gives it away. A Tk timer never fires early; 20 ms covers
+            # Tcl's clock against Python's. Only the first burst is timed:
+            # in the second, the stuck check's slow poll may look before
+            # the pause ends and send the newest name itself, by design
+            # (#402), so its time there says nothing of the pause.
+            sent = [(round(t - keys[-1], 3), n) for t, n in asked[before:]]
+            assert [n for _, n in sent] == [burst[-1]], sent
+            if not out:
+                assert sent[0][0] > pause - 0.02, (sent, pause)
             out.append(len(_line_threads()))
         assert worst < 0.5, worst
         assert out == [1, 2], out

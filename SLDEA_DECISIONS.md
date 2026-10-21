@@ -5020,8 +5020,10 @@ sent is unchanged.
   since. An attempt that began before the close's writes sees no record,
   whatever the close does after. The flag only decides whether an attempt
   reads the record at all: one that found it unset reads none and keeps
-  its alarm. The run's own mark is written only by the run's thread, so
-  its "never marked" check cannot race.
+  its alarm. The run's own mark is set only by the run's thread. The Tk
+  thread clears it, at a run's start (`sldea_run`) and in
+  `_sldea_finished`, but neither can run during that run's finally
+  block, so its "never marked" check cannot race.
 - No deadlock. A Tk call made from the worker waits for the Tk thread, and
   the close waits for this lock on the Tk thread, so the run logs only
   after it lets the lock go. No thread holds an SG I/O lock while it waits
@@ -5078,14 +5080,19 @@ extended; the lock-count case is untouched).
   - the wait running out mid-zero, both with the run's zero going through
     (offset and off together, then the close's) and with it timing out
     (alarm);
-  - with no close, the run's zero made unlocked as before.
+  - with no close, the run's zero made unlocked as before, under a lock
+    that records every `acquire()`, so a zero that took it would be seen.
+- The stub app's Tk hand-offs (`_sldea_log`, `_sldea_set_status`,
+  `root.after`) fail when a worker thread makes one while it holds an SG
+  I/O lock: in the app that would deadlock against the close. Across all
+  33 cases there were none.
 - The same 33 cases, `tests/test_sldea_start_under_lock.py` and
   `tests/test_sg_live_lock.py` pass on a trial merge with #471's branch.
   There the close-during-start case shows the run writing nothing at all,
   and on this branch alone its first start write landing and the second
   failing on the closed session.
 - Mutants, each in a scratch copy run with `python -B` and no
-  `__pycache__`: all 12 run on the final code fail at least one case.
+  `__pycache__`: all 12 run on `1be81ec` fail at least one case.
   They are: suppress whenever the close ran (no write, handle, channel or
   mark check), never suppress, the zeroed record without checking its
   writes, or without the output-off, the off record without checking
@@ -5093,18 +5100,30 @@ extended; the lock-count case is untouched).
   run's own mark check, the off record taken as zeroed, the record read
   when the run decides, the mark read before the lock, and the lock let
   go after the outputs-off writes. Main's own `gui.py` fails 14 of the
-  33 cases. Four more did not run on the final code, because the VM ran
-  low on memory and the run was stopped: no lock in the close, no lock in
-  the run's zero, the flag ignored, and the flag never set.
+  33 cases.
+- The adversarial review's mutants, re-run on `74c9328`, each fail
+  at least one case:
+  - no lock in the close: 14 cases fail, or 6 when it still records;
+  - no lock in the run's zero: 6, or 2 when it still reads the record;
+  - the flag ignored: 2;
+  - the flag never set: 6;
+  - the handle check made against `self.sg`: 1;
+  - the close taking the lock only after its writes: 6;
+  - the run logging its failed attempt while it still holds the lock: 9.
 
 **Not changed.** The SCPI sent by the close and by the run. ■ Abort stays
 the way to end a run, the close still cannot show an alarm once the window
 is gone, and a worker still going when the process exits may not write
-its line at all. One residual: `Resource.close()` leaves the session open
-when `visalib.close` raises, and a write queued behind the close could then
-land after it. Before #471 that write can be the run's output ON, at DC
-0 V; with #471 the run's start-up writes check the stop under the same
-lock and cannot. No bench line of its own: the path needs a run held past
+its line at all. One residual, on this branch without #471:
+`Resource.close()` leaves the session open when `before_close()` or
+`visalib.close` raises, and a write queued behind the close could then land
+after it. That write can be the run's output ON, at DC 0 V. If the run's
+own zero then also failed, the zeroed line would say "0 V and off" while
+the output is on at 0 V. The off line cannot be wrong that way: the run
+marks its channel before it sends ON, so a run whose ON could land has
+marked, and it keeps the alarm. With #471 the run's start-up writes check
+the stop under the same lock and cannot land after the close. No bench
+line of its own: the path needs a run held past
 the close's wait, which #460's line in #369 records as desk-tested only,
 with no bench way to hold one.
 

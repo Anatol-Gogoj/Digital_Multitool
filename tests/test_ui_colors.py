@@ -460,13 +460,53 @@ def test_on_the_built_app_every_colored_word_reads():
     assert not bad, "\n  ".join(['words that do not read:'] + bad)
 
 
+def _pending_afters(win):
+    """The after() callbacks `win` itself scheduled and Tk has not run
+    yet, as after ids."""
+    import tkinter as tk
+    own = {str(c) for c in (getattr(win, '_tclCommands', None) or ())}
+    out = []
+    for aid in win.tk.splitlist(win.tk.call('after', 'info')):
+        try:
+            script = win.tk.splitlist(win.tk.call('after', 'info', aid))[0]
+        except tk.TclError:
+            continue
+        if str(script) in own:
+            out.append(aid)
+    return out
+
+
+def _dangling_afters(root):
+    """Pending after() scripts whose command no longer exists. Each one
+    prints 'invalid command name' on stderr when its time comes: Tk
+    deletes a window's Python callbacks with the window, but not the
+    timers that would call them."""
+    import tkinter as tk
+    out = []
+    for aid in root.tk.splitlist(root.tk.call('after', 'info')):
+        try:
+            script = root.tk.splitlist(root.tk.call('after', 'info', aid))[0]
+            cmd = root.tk.splitlist(script)[0]
+        except (tk.TclError, IndexError):
+            continue
+        if not root.tk.call('info', 'commands', cmd):
+            out.append(str(script))
+    return out
+
+
 def test_the_arb_editor_and_its_export_dialogs_open_and_read():
     """The Waveform Editor and its two export dialogs are windows of their
     own, so the walk above never sees them. After #462 the editor did not
     open at all: its _build_ui named a local Combobox `uc`, which made the
     ui_colors alias local to the whole method, so the first uc.TEXT_MUTED
     raised. Each window here is built for real, and its colored words
-    reach the bar."""
+    reach the bar.
+
+    The editor fits its view 50 ms after it opens (after(50, _fit_all)).
+    Destroyed before that, it left the timer behind, and the next update
+    printed "invalid command name" (#476). So the fit is let run before
+    the windows close, and nothing they scheduled is left dangling."""
+    import time
     import arb_editor
     root, app = _app()
     bad, windows = [], []
@@ -487,12 +527,19 @@ def test_the_arb_editor_and_its_export_dialogs_open_and_read():
                     if r < need:
                         bad.append(f"{w} fg {fg} on {against}: {r:.2f}:1")
         assert _colored_words(ed), "the editor's walk found no colored word"
+        assert _pending_afters(ed), "the editor no longer defers its fit"
+        deadline = time.monotonic() + 5.0
+        while _pending_afters(ed) and time.monotonic() < deadline:
+            ed.after(20)
+            ed.update()
+        assert not _pending_afters(ed), "the editor's fit never ran"
     finally:
         for win in reversed(windows):
             try:
                 win.destroy()
             except Exception:
                 pass
+    assert not _dangling_afters(root), _dangling_afters(root)
     assert not bad, "\n  ".join(['words that do not read:'] + bad)
 
 

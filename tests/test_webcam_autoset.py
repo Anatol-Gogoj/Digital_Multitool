@@ -726,6 +726,66 @@ def test_auto_expose_puts_the_lock_back_only_when_it_found_nothing():
         WA._reap()
 
 
+def test_an_auto_expose_that_raises_puts_the_lock_back_too():
+    """#439 review: a search that raises after it has moved the camera
+    (here one candidate set, then the camera goes away) is a failure as
+    well. The lock goes back on the camera, the exposure box keeps its
+    value, and the error is reported as before: "auto-expose failed" on
+    the status line and one Auto-expose box."""
+    names = ('bayer_format', '_v4l2', 'parse_frame_sizes', 'choose_size',
+             'auto_exposure')
+    with WA._Patched() as p, _Camera() as cam:
+        saved = {n: getattr(webcam, n) for n in names}
+        root, app = _tab()
+        if root is None:
+            return
+        device = dict(STALE_LOCK)
+        stamp = webcam.apply_locked
+
+        def auto_exposure(dev, fourcc, width, height, **kw):
+            webcam.set_control(dev, 'exposure_time_absolute', 3200)
+            raise RuntimeError("the camera went away")
+
+        def set_control(dev, name, value):
+            device[name] = int(value)
+            return True
+
+        def apply_locked(dev, exclude=None):
+            device.update({k: v for k, v in
+                           webcam.LOCKED_CONTROLS.items()
+                           if k not in (exclude or ())})
+            return stamp(dev, exclude)
+
+        webcam.set_control = set_control
+        webcam.get_control = lambda dev, name: device.get(name)
+        webcam.apply_locked = apply_locked
+        webcam.bayer_format = lambda dev: 'RGGB'
+        webcam._v4l2 = lambda *a, **kw: ''
+        webcam.parse_frame_sizes = lambda text, fourcc: [(4, 4)]
+        webcam.choose_size = lambda sizes, max_width=1920: (4, 4)
+        webcam.auto_exposure = auto_exposure
+        try:
+            assert not app.cam_previewing
+            _press(root, app, app.cam_auto_expose)
+            assert app.cam_sensor_status.cget('text') == \
+                "auto-expose failed", app.cam_sensor_status.cget('text')
+            assert p.mb.calls == [
+                ('showerror', 'Auto-expose', 'the camera went away')], \
+                p.mb.calls
+            assert _box(app, 'exposure_time_absolute') == '20'
+            app.cam_refresh_devices()
+            got = (_box(app, 'exposure_time_absolute'), _box(app, 'gain'))
+            assert got == ('20', '44'), got
+            assert device['exposure_time_absolute'] == 20, device
+            assert cam.stamps == [STALE_LOCK], cam.stamps
+            assert webcam.LOCKED_CONTROLS == STALE_LOCK
+        finally:
+            for n, v in saved.items():
+                setattr(webcam, n, v)
+            WA._close(root, app)
+            WA._reap()
+
+
 def _preview_stopped_by_the_operator(root, app):
     """The Webcam tab on screen with its preview off: opened (the tab
     starts its preview, #375), then stopped with Start/Stop Preview."""

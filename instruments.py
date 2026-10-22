@@ -370,7 +370,7 @@ class BK894(VisaInstrument):
         buffer (which realigns the meter, see get_config) and asks once
         more; a reply that is still bad raises, quoting it. A desync whose
         stale reply happens to be another :FETC? answer cannot be told
-        apart by its format -- callers that need clean data drain first
+        apart by its format; callers that need clean data drain first
         (the sweep does)."""
         with _io_lock(self):
             for attempt in range(2):
@@ -381,8 +381,8 @@ class BK894(VisaInstrument):
                 if parsed is not None:
                     return parsed
         raise ValueError(
-            f"LCR :FETC? reply {result!r} is not primary,secondary,status "
-            "-- the meter's replies are out of step with its queries")
+            f"LCR :FETC? reply {result!r} is not primary,secondary,status: "
+            "the meter's replies are out of step with its queries")
 
     @staticmethod
     def parse_fetch(raw):

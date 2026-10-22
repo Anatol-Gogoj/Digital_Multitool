@@ -1973,7 +1973,7 @@ class InstrumentControlGUI:
         if self._bg_busy & {'lcr-io', 'lcr-corr'}:
             self.sw_status.config(
                 text="LCR still busy (a read, Apply, correction or the "
-                     "previous sweep) -- press Start Sweep again in a moment",
+                     "previous sweep). Press Start Sweep again in a moment.",
                 foreground=uc.TEXT_ALERT)
             return
         self._bg_busy.add('lcr-io')

@@ -9475,15 +9475,13 @@ class InstrumentControlGUI:
         self._new_folder_into(self.cam_dir_var, "Save to")
 
     def cam_refresh_devices(self):
-        if 'camera-ctrl' in self._bg_busy:
+        if self._cam_adjusting("Refresh"):
             # Refused while an adjustment runs, as Read camera is (#425):
             # cam_sync_controls below reads exposure and gain off the
             # camera, which is then shooting a trial, into the boxes a run
             # takes, and a search that failed left that trial there over
             # the unchanged lock. Nothing is re-listed either; the
             # adjustment has the selected camera until it finishes.
-            self._cam_status("another camera adjustment is still running; "
-                             "press Refresh when it has finished", 'warn')
             return
         idxs = webcam.list_cameras()
         vals = [str(i) for i in idxs]
@@ -9646,6 +9644,21 @@ class InstrumentControlGUI:
         except (AttributeError, tk.TclError):
             pass
 
+    def _cam_adjusting(self, press):
+        """True while a camera adjustment runs (the 'camera-ctrl' job:
+        Auto-set camera, Apply & Lock, Stabilize, Auto-WB once or
+        Auto-expose), with the refusal on the camera status line; `press`
+        names the button to press again once it has finished. Auto-set
+        camera and Read camera (#400) and Refresh (#425) refused this way
+        first; Start Preview, the captures and the single steps do too
+        (#439), and check it before they stop the preview or write a line
+        of their own."""
+        if 'camera-ctrl' not in getattr(self, '_bg_busy', ()):
+            return False
+        self._cam_status("another camera adjustment is still running; "
+                         f"press {press} when it has finished", 'warn')
+        return True
+
     def _cam_typed_hint(self):
         """Say on the status line when exposure or gain, as typed in the
         main view, differ from the lock (#400). A run takes these boxes and
@@ -9744,8 +9757,10 @@ class InstrumentControlGUI:
     def _cam_put_lock_back(device):
         """Stamp the lock back onto `device` once an adjustment's trials
         are over, for a worker thread: Stabilize and Auto-WB once (#425
-        review). Every trial stamps its own controls (webcam.oneshot_rgb),
-        and these two lock nothing, so the camera kept the last trial. A
+        review), and an Auto-expose that found nothing (#439). Every trial
+        stamps its own controls (webcam.oneshot_rgb; Auto-expose sets its
+        candidates with set_control), and these lock nothing, so the
+        camera kept the last trial. A
         preview restarted afterwards stamps the lock as it opens, but with
         the preview off nothing did, and Refresh then read that trial into
         the boxes a run takes (exposure 130, gain 0 after a failed
@@ -9799,14 +9814,11 @@ class InstrumentControlGUI:
         # (adversarial review 2026-09-23)
         if self._cam_owned_by_sldea():
             return
-        if 'camera-ctrl' in self._bg_busy:
+        if self._cam_adjusting("Read camera"):
             # ...and while an adjustment runs (#400 review): it would fill
             # the boxes a run takes with the trial values the camera is
             # shooting under, and put the saved lock back over the one Apply
             # & Lock or Auto-set is writing
-            self._cam_status("another camera adjustment is still running; "
-                             "press Read camera when it has finished",
-                             'warn')
             return
         self._cam_build_control_rows()
         device = self._cam_device() or '/dev/video0'
@@ -9877,11 +9889,8 @@ class InstrumentControlGUI:
         runs ('camera-ctrl', _sldea_start_conflicts)."""
         if self._cam_owned_by_sldea():
             return
-        if 'camera-ctrl' in self._bg_busy:
+        if self._cam_adjusting("Auto-set camera"):
             # checked before the preview is stopped for nothing
-            self._cam_status("another camera adjustment is still running; "
-                             "press Auto-set camera when it has finished",
-                             'warn')
             return
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
@@ -10005,6 +10014,11 @@ class InstrumentControlGUI:
         exposure for a mid-grey image -- the only combo that holds still."""
         if self._cam_owned_by_sldea():
             return
+        if self._cam_adjusting("Stabilize"):
+            # before the preview is stopped and the start line written
+            # over the running adjustment's (#439); _run_bg would refuse
+            # only after both
+            return
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -10063,6 +10077,8 @@ class InstrumentControlGUI:
         once its trials are over (#425)."""
         if self._cam_owned_by_sldea():
             return
+        if self._cam_adjusting("Auto-WB once"):
+            return                    # as Stabilize does (#439)
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -10111,6 +10127,8 @@ class InstrumentControlGUI:
         """Search for a usable exposure (the camera's own AE stays black)."""
         if self._cam_owned_by_sldea():
             return
+        if self._cam_adjusting("Auto-expose"):
+            return                    # as Stabilize does (#439)
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -10141,7 +10159,21 @@ class InstrumentControlGUI:
             size = webcam.choose_size(webcam.parse_frame_sizes(
                 webcam._v4l2('--list-formats-ext', device=device), fourcc))
             w, h = size or (640, 480)
-            return webcam.auto_exposure(device, fourcc, w, h)
+            # A search that found nothing (or raised) puts the lock back
+            # on the camera, as Stabilize and Auto-WB once do (#425): it
+            # left the last candidate there (3200), and with the preview
+            # off Refresh read that into the exposure box (#439). A search
+            # that found one leaves the camera at it, because done() reads
+            # it back with cam_sync_controls, and a put-back would make
+            # that read the lock instead of the exposure just found.
+            found = False
+            try:
+                result = webcam.auto_exposure(device, fourcc, w, h)
+                found = result[0] is not None
+                return result
+            finally:
+                if not found:
+                    self._cam_put_lock_back(device)
 
         def done(result, error):
             try:
@@ -10179,6 +10211,14 @@ class InstrumentControlGUI:
         in a dialog; the tab-click start is _cam_start_preview_quiet."""
         if self._cam_owned_by_sldea():
             self._cam_refresh_splash()
+            return
+        if self._cam_adjusting("Start Preview"):
+            # Refused while an adjustment runs (#439): opening the camera
+            # stamps the lock onto it (webcam.V4L2BayerCamera.open) and
+            # holds the device, so the adjustment's trial grabs failed or
+            # were shot under the lock. Its own restart comes after its
+            # busy key is cleared (_run_bg), and the quiet start that is
+            # owed still runs once it has finished.
             return
         # this try settles any quiet start that was owed (#393): a failed
         # open is shown in the dialog below and not tried again quietly
@@ -10615,6 +10655,10 @@ class InstrumentControlGUI:
     def _cam_start_interval(self):
         if self._cam_owned_by_sldea():
             return
+        if self._cam_adjusting("Start interval"):
+            # it saves preview frames and starts the preview it needs,
+            # which is refused while an adjustment runs (#439)
+            return
         try:
             interval = float(self.cam_interval_var.get())
             count = int(self.cam_count_var.get())
@@ -10640,6 +10684,10 @@ class InstrumentControlGUI:
 
     def _cam_start_timed(self):
         if self._cam_owned_by_sldea():
+            return
+        if self._cam_adjusting("Start timed capture"):
+            # its one-shot grabs stamp the lock and need the device the
+            # adjustment's trials are using (#439)
             return
         if self.cam_seq_running:
             messagebox.showinfo("Timed capture",
@@ -10825,6 +10873,8 @@ class InstrumentControlGUI:
     def _cam_start_sequence(self):
         if self._cam_owned_by_sldea():
             return
+        if self._cam_adjusting("Run sweep"):
+            return                    # as the timed capture is (#439)
         if not self.sg:
             messagebox.showerror("Stepped capture", "Signal generator not connected")
             return

@@ -810,25 +810,35 @@ def test_a_resume_that_fails_is_tried_once_not_in_a_loop():
 def test_a_start_preview_that_fails_is_not_tried_again_quietly():
     """Start Preview, pressed while the tab-click start is held off, is
     that start's try. When its open fails, its dialog says so, and the
-    watch does not try again when the hold-off clears (#393)."""
+    watch does not try again when the hold-off clears (#393). The hold-off
+    is a dialog's grab: an adjustment's busy key, which this test used
+    before #439, now refuses Start Preview itself."""
+    import tkinter as tk
     with _Patched() as p:
         _FakeCam.fail = "could not open camera index 0"
         root, app = _app()
         if root is None:
             return
+        dialog = None
         try:
-            app._bg_busy.add('camera-ctrl')           # held off on arrival
+            dialog = tk.Toplevel(root)                # held off on arrival
+            dialog.grab_set()
             _select_webcam(app)
             _pump(root, WATCH)
             assert _opens() == [], _FakeCam.log
+            assert app.cam_splash[1] == gui.CAM_OFF_DIALOG, app.cam_splash
             app.cam_toggle_preview()                  # Start Preview
             assert [c[0] for c in p.mb.calls] == ['showerror'], p.mb.calls
-            app._bg_busy.discard('camera-ctrl')
+            dialog.grab_release()
+            dialog.destroy()
+            dialog = None
             _pump(root, 2 * WATCH)
             assert len(_opens()) == 1, _FakeCam.log
             assert not app.cam_previewing
             assert len(p.mb.calls) == 1, p.mb.calls
         finally:
+            if dialog is not None:
+                dialog.destroy()
             _close(root, app)
 
 
@@ -1238,6 +1248,94 @@ def test_every_stop_path_gets_the_splash():
                 assert _pump_in_mainloop(root, lambda: not (
                     'camera-ctrl' in app._bg_busy or app.cam_seq_running
                     or app._cam_worker_alive())), name
+            finally:
+                work.release()
+                _close(root, app)
+
+
+def test_what_needs_the_camera_is_refused_while_an_adjustment_runs():
+    """#439. A camera adjustment holds the 'camera-ctrl' busy key while its
+    worker has the camera. Start Preview and the interval, timed and
+    stepped captures never checked it: opening the camera stamps the lock
+    onto it and holds the device, so the adjustment's trial grabs failed
+    or were shot under the lock. A second Stabilize, Auto-WB once or
+    Auto-expose stopped the preview and wrote its own start line on the
+    camera status line, and only then did _run_bg refuse it, with a
+    status-bar note alone. Each is now refused first, as Read camera and
+    Refresh are: it starts nothing, opens nothing, leaves the preview as
+    it was and the status bar alone, and says so on the camera status
+    line. The adjustment running is the real Stabilize with the preview
+    off, or the real Apply & Lock, which keeps a live preview running."""
+    presses = (
+        ('Start Preview', G.cam_toggle_preview),
+        ('Start interval', G.cam_toggle_interval),
+        ('Start timed capture', G.cam_toggle_timed),
+        ('Run sweep', G.cam_toggle_sequence),
+        ('Stabilize', G.cam_stabilize),
+        ('Auto-WB once', G.cam_grey_world),
+        ('Auto-expose', G.cam_auto_expose),
+    )
+    cases = [('Stabilize', G.cam_stabilize, n, f) for n, f in presses]
+    # Start Preview on a live preview is its Stop, so not pressed there
+    cases += [('Apply & Lock', G.cam_apply_controls, n, f)
+              for n, f in presses if n != 'Start Preview']
+    for running, start, name, press in cases:
+        root = app = None
+        case = (running, name)
+        _reap()                 # the last case's Tk objects, on this thread
+        with _Patched() as p, _CameraWork() as work:
+            # one control, so Apply & Lock has something to lock (#400)
+            webcam.list_controls = lambda device: [{
+                'name': 'exposure_time_absolute', 'type': 'int', 'min': 1,
+                'max': 40000, 'default': 3, 'value': 20, 'menu': {}}]
+            root, app = _app()
+            if root is None:
+                return
+            try:
+                app._cam_device = lambda: '/dev/video0'
+                app._cam_save_frame = lambda *a, **kw: None   # no files
+                app.sg = types.SimpleNamespace(
+                    set_basic_wave=lambda *a, **kw: None,
+                    burst_trigger=lambda *a, **kw: None)
+                app.cam_tm_delays.set('0')
+                app.cam_tm_focus.set(False)
+                app.cam_step_levels.set('1')
+                app.cam_step_dwell.set('0')
+                app.cam_seq_focus.set(False)
+                _select_webcam(app)
+                assert _pump_until(root, lambda: app.cam_previewing), case
+                start(app)                       # its camera work is held
+                _pump(root, 0.2)
+                assert 'camera-ctrl' in app._bg_busy, case
+                live = app.cam_previewing
+                assert live == (running == 'Apply & Lock'), case
+                opens = list(_opens())
+                line = app.cam_sensor_status.cget('text')
+                app.status_bar.config(text="(before the press)")
+                press(app)
+                _pump(root, 0.2)
+                assert p.mb.calls == [], (case, p.mb.calls)
+                assert _opens() == opens, (case, _FakeCam.log)
+                assert app.cam_previewing == live, case
+                assert app.cam_interval_job is None, case
+                assert not app.cam_seq_running, case
+                assert app.cam_seq_thread is None, case
+                assert app.status_bar.cget('text') == "(before the press)", \
+                    (case, app.status_bar.cget('text'))
+                said = app.cam_sensor_status.cget('text')
+                assert said != line, (case, said)
+                assert said == ("another camera adjustment is still "
+                                f"running; press {name} when it has "
+                                "finished"), (case, said)
+                assert str(app.cam_sensor_status.cget('foreground')) == \
+                    gui.CAM_STATUS_WARN, case
+                # the adjustment ends and the tab is as it would have been
+                work.release()
+                assert _pump_in_mainloop(root, lambda: not (
+                    'camera-ctrl' in app._bg_busy or app.cam_seq_running
+                    or app._cam_worker_alive())), case
+                assert _pump_until(root, lambda: app.cam_previewing,
+                                   secs=3.0), (case, app.cam_splash)
             finally:
                 work.release()
                 _close(root, app)

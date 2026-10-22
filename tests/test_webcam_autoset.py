@@ -644,6 +644,88 @@ def test_stabilize_and_auto_wb_once_put_the_lock_back_on_the_camera():
         WA._reap()
 
 
+def test_auto_expose_puts_the_lock_back_only_when_it_found_nothing():
+    """#439 part 3: Auto-expose (webcam.auto_exposure) sets each candidate
+    exposure on the camera and grabs a raw frame at it. When every grab
+    failed while the camera still took the settings, it left the last
+    candidate (3200) on the camera, and with the preview off Refresh then
+    read 3200 into the exposure box a run takes, over a lock of 20. A
+    search that finds nothing now stamps the lock back, as Stabilize and
+    Auto-WB once do (#425). One that finds an exposure still leaves the
+    camera at it and fills the box with it: its done() reads the camera
+    back (cam_sync_controls), so a put-back there would fill in the lock's
+    20 instead of the exposure just found. The real auto_exposure runs
+    here, on a modeled device: v4l2-ctl and the raw grab are stubbed."""
+    names = ('bayer_format', '_v4l2', 'parse_frame_sizes', 'choose_size',
+             'grab_raw')
+    for fails in (True, False):
+        WA._reap()
+        with WA._Patched(), _Camera() as cam:
+            saved = {n: getattr(webcam, n) for n in names}
+            root, app = _tab()
+            if root is None:
+                return
+            device = dict(STALE_LOCK)
+            stamp = webcam.apply_locked
+
+            def set_control(dev, name, value):
+                device[name] = int(value)
+                return True
+
+            def grab_raw(dev, fourcc, width, height, count=3):
+                # a picture whose level is half the exposure: 200 gives
+                # 100, the candidate nearest the target of 128
+                if fails:
+                    return None
+                level = min(255, device['exposure_time_absolute'] // 2)
+                return bytes([level]) * (width * height)
+
+            def apply_locked(dev, exclude=None):
+                device.update({k: v for k, v in
+                               webcam.LOCKED_CONTROLS.items()
+                               if k not in (exclude or ())})
+                return stamp(dev, exclude)
+
+            webcam.set_control = set_control
+            webcam.get_control = lambda dev, name: device.get(name)
+            webcam.apply_locked = apply_locked
+            webcam.bayer_format = lambda dev: 'RGGB'
+            webcam._v4l2 = lambda *a, **kw: ''
+            webcam.parse_frame_sizes = lambda text, fourcc: [(4, 4)]
+            webcam.choose_size = lambda sizes, max_width=1920: (4, 4)
+            webcam.grab_raw = grab_raw
+            case = 'fails' if fails else 'finds'
+            try:
+                assert not app.cam_previewing
+                assert _box(app, 'exposure_time_absolute') == '20'
+                _press(root, app, app.cam_auto_expose)
+                assert webcam.LOCKED_CONTROLS == STALE_LOCK, \
+                    (case, webcam.LOCKED_CONTROLS)
+                status = app.cam_sensor_status.cget('text')
+                if fails:
+                    assert 'could not settle' in status, status
+                    assert _box(app, 'exposure_time_absolute') == '20'
+                    # the operator presses Refresh a second later
+                    app.cam_refresh_devices()
+                    got = (_box(app, 'exposure_time_absolute'),
+                           _box(app, 'gain'))
+                    assert got == ('20', '44'), got
+                    assert device['exposure_time_absolute'] == 20, device
+                    assert cam.stamps == [STALE_LOCK], cam.stamps
+                else:
+                    assert status.startswith('exposure 200 '), status
+                    assert cam.stamps == [], cam.stamps
+                    assert device['exposure_time_absolute'] == 200, device
+                    got = (_box(app, 'exposure_time_absolute'),
+                           _box(app, 'gain'))
+                    assert got == ('200', '44'), got
+            finally:
+                for n, v in saved.items():
+                    setattr(webcam, n, v)
+                WA._close(root, app)
+        WA._reap()
+
+
 def _preview_stopped_by_the_operator(root, app):
     """The Webcam tab on screen with its preview off: opened (the tab
     starts its preview, #375), then stopped with Start/Stop Preview."""

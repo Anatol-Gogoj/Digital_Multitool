@@ -52,8 +52,8 @@ _sh["cautions"][4] = (
 
 _lcr = content["lcr"]
 _lcr["cautions"][0] = (
-    "The app enforces the meter's limits — voltage 0.01–2.0 V, frequency "
-    "100 Hz–500 kHz; out-of-range entries are rejected with a Configuration "
+    "The app enforces these limits — voltage 0.01–2.0 V, frequency "
+    "20 Hz–500 kHz; out-of-range entries are rejected with a Configuration "
     "Error on Apply.")
 _lcr["cautions"][4] = (
     "Open/Short corrections belong to the current fixture and leads — redo "

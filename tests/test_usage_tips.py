@@ -173,14 +173,20 @@ def test_the_lcr_voltage_line_says_what_apply_does():
     assert 'clamp' not in lcr.lower()
     assert '0.01 to 2.0 V' in lcr and 'Configuration Error' in lcr
     drv = _read('instruments.py')
+    check = drv[drv.index('    def check_voltage(voltage):'):]
+    check = check[:check.index('\n    @')]
+    assert 'if not 0.01 <= voltage <= 2.0:' in check
+    assert 'raise ValueError' in check
     setter = drv[drv.index('    def set_voltage(self, voltage):'):]
     setter = setter[:setter.index('\n    def ')]
-    assert 'if not 0.01 <= voltage <= 2.0:' in setter
-    assert 'raise ValueError' in setter
+    assert 'self.check_voltage(voltage)' in setter
     src = _read('gui.py')
     apply = src[src.index('def apply_lcr_config'):]
     apply = apply[:apply.index('\n    def ')]
     assert 'self.lcr.set_voltage(volt)' in apply
+    # and Apply runs the same check before it sends anything (#483)
+    assert apply.index('self.lcr.validate_config(') < apply.index(
+        'self.lcr.set_mode(mode)')
     assert 'messagebox.showerror("Configuration Error", str(error))' in apply
     # nor do the Voltage tooltip or the manual's LCR entry say it clamps
     tab = src[src.index('def create_lcr_tab'):]

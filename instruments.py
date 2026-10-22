@@ -300,11 +300,43 @@ class BK894(VisaInstrument):
         'ZTR':  'Impedance + Phase (radians)',
     }
 
+    # Range checks. Each setter runs its own before it writes, and
+    # validate_config runs all of Apply's at once so a refused Apply sends
+    # nothing (#483). One copy of each range, so the GUI and the driver
+    # cannot disagree. Each returns the value in the form its setter sends.
+
+    @classmethod
+    def check_mode(cls, mode):
+        if mode.upper() not in cls.MODES:
+            raise ValueError(f"Invalid mode. Choose from: {list(cls.MODES.keys())}")
+        return mode.upper()
+
+    @staticmethod
+    def check_frequency(freq_hz):
+        if not 20 <= freq_hz <= 500000:
+            raise ValueError("Frequency must be 20 Hz to 500 kHz")
+        return freq_hz
+
+    @staticmethod
+    def check_voltage(voltage):
+        if not 0.01 <= voltage <= 2.0:
+            raise ValueError("Voltage must be 0.01 to 2.0 V")
+        return voltage
+
+    @classmethod
+    def validate_config(cls, mode, freq_hz, voltage, speed, avg, bias_volts):
+        """Run every check Apply's setters run, in the order Apply sends
+        them, without touching the meter. Raises the first one's
+        ValueError, the same message the setter would have raised."""
+        cls.check_mode(mode)
+        cls.check_frequency(freq_hz)
+        cls.check_voltage(voltage)
+        cls.check_aperture(speed, avg)
+        cls.check_bias_voltage(bias_volts)
+
     def set_mode(self, mode):
         """Set measurement mode (e.g. 'CPD', 'LSRS'). See MODES dict."""
-        if mode.upper() not in self.MODES:
-            raise ValueError(f"Invalid mode. Choose from: {list(self.MODES.keys())}")
-        self.write(f':FUNC:IMP {mode.upper()}')
+        self.write(f':FUNC:IMP {self.check_mode(mode)}')
 
     def set_frequency(self, freq_hz):
         """Set test frequency (20 Hz to 500 kHz).
@@ -313,8 +345,7 @@ class BK894(VisaInstrument):
         500 kHz on the 894). The app used to stop at 100 Hz; the owner
         asked for the full range on 2026-10-22 (#495). Below 100 Hz is not
         bench-checked yet (#369)."""
-        if not 20 <= freq_hz <= 500000:
-            raise ValueError("Frequency must be 20 Hz to 500 kHz")
+        self.check_frequency(freq_hz)
         self.write(f':FREQ {freq_hz}')
 
     def set_voltage(self, voltage):
@@ -325,8 +356,7 @@ class BK894(VisaInstrument):
         ``:VOLT:LEV``; both are silently rejected on this unit. The meter
         clamps the level at 2.0 V, so higher values are out of range.
         """
-        if not 0.01 <= voltage <= 2.0:
-            raise ValueError("Voltage must be 0.01 to 2.0 V")
+        self.check_voltage(voltage)
         self.write(f':VOLT {voltage}')
 
     def measure(self):
@@ -408,9 +438,14 @@ class BK894(VisaInstrument):
         The 894 clamps to its supported bias range; read get_bias() back to
         see what it accepted (same approach as the AC level).
         """
+        self.check_bias_voltage(volts)
+        self.write(f':BIAS:VOLT {volts}')
+
+    @staticmethod
+    def check_bias_voltage(volts):
         if not -5.0 <= volts <= 5.0:
             raise ValueError("Bias must be within +/-5 V")
-        self.write(f':BIAS:VOLT {volts}')
+        return volts
 
     def set_bias_enabled(self, on):
         """Switch the internal DC bias source on/off."""
@@ -431,12 +466,18 @@ class BK894(VisaInstrument):
 
     def set_aperture(self, speed, avg=1):
         """Measurement speed SLOW/MED/FAST + averaging count (1..256)."""
+        speed, avg = self.check_aperture(speed, avg)
+        self.write(f':APER {speed},{avg}')
+
+    @classmethod
+    def check_aperture(cls, speed, avg=1):
+        """-> (speed, avg) as set_aperture sends them: ('SLOW', 16)."""
         speed = speed.upper()
-        if speed not in self.APERTURE_SPEEDS:
-            raise ValueError(f"Speed must be one of {self.APERTURE_SPEEDS}")
+        if speed not in cls.APERTURE_SPEEDS:
+            raise ValueError(f"Speed must be one of {cls.APERTURE_SPEEDS}")
         if not 1 <= int(avg) <= 256:
             raise ValueError("Averaging count must be 1 to 256")
-        self.write(f':APER {speed},{int(avg)}')
+        return speed, int(avg)
 
     def get_aperture(self):
         """-> ('MED', 1)-style (speed, averaging count) tuple."""

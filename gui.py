@@ -7650,10 +7650,14 @@ class InstrumentControlGUI:
             volt = float(self.lcr_volt.get())
             bias_v = float(self.lcr_bias_volt.get())
             avg = int(self.lcr_avg.get())
+            speed = self.lcr_speed.get() or 'MED'
+            # Every range the setters below check, before any of them
+            # sends: a bad voltage used to be refused only after the mode
+            # and frequency had gone to the meter (#483).
+            self.lcr.validate_config(mode, freq, volt, speed, avg, bias_v)
         except (TypeError, ValueError) as e:
             messagebox.showerror("Configuration Error", str(e))
             return
-        speed = self.lcr_speed.get() or 'MED'
         bias_on = self.lcr_bias_on.get()
         autorange = self.lcr_autorange.get()
 

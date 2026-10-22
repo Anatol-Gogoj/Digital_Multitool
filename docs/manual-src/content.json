@@ -209,7 +209,7 @@
    "7. For curves: set the sweep axes and click Start Sweep — results go to CSV."
   ],
   "cautions": [
-   "Apply stops with a Configuration Error at an AC level outside 0.01 to 2.0 V or a frequency outside 100 Hz to 500 kHz. What it sent before the bad value (the mode, and for a bad level the frequency) has already reached the meter, so fix the value and Apply again.",
+   "Apply checks every field before it sends any: an AC level outside 0.01 to 2.0 V, a frequency outside 20 Hz to 500 kHz, a DC bias beyond +/-5 V or an Avg outside 1 to 256 stops it with a Configuration Error, and nothing reaches the meter. Fix the value and Apply again.",
    "Nothing reaches the meter until Apply Configuration; the Primary/Secondary readouts are labeled by the last APPLIED mode, not whatever the dropdown currently shows.",
    "A sweep switches the meter to the dropdown's mode and leaves frequency/voltage at the last sweep point — re-Apply your configuration before trusting spot readings afterwards.",
    "DC bias stays on until you untick Bias ON and click Apply — do not leave bias across a bias-sensitive part.",

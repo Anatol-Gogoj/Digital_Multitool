@@ -813,16 +813,17 @@ def test_the_focus_score_is_on_by_default_and_its_label_is_twice_as_tall():
     img = Image.new('RGB', (640, 480), (128, 128, 128))
     height = gui.draw_focus_overlay(img, 1234)
     assert height >= 2 * old_h - 1, (height, old_h)
-    # Tol cyan over a black under-stroke, on the circle and in the label
+    # the reticles' white on a black halo, on the circle and in the label
+    # (#482; tests/test_sldea_tol_colors.py pins the strokes)
     cx, cy = 320, 240
     r = int(webcam.FOCUS_AOI_RADIUS_FRAC * 480)
-    cyan = tuple(int(gui.sldea_liveview.TOL_CYAN[i:i + 2], 16)
-                 for i in (1, 3, 5))
-    assert img.getpixel((cx + r - 1, cy)) == cyan, img.getpixel((cx + r - 1,
-                                                                 cy))
+    white = tuple(int(gui.sldea_liveview.RETICLE_INK[i:i + 2], 16)
+                  for i in (1, 3, 5))
+    assert img.getpixel((cx + r - 1, cy)) == white, img.getpixel((cx + r - 1,
+                                                                  cy))
     label = [img.getpixel((x, y)) for x in range(6, 300)
              for y in range(4, 4 + height)]
-    assert cyan in label and (0, 0, 0) in label
+    assert white in label and (0, 0, 0) in label
     # a picture too narrow for the label shrinks it instead of cutting it
     small = Image.new('RGB', (200, 150))
     assert 0 < gui.draw_focus_overlay(small, 1234) < height

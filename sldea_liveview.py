@@ -313,17 +313,31 @@ def draw_reticle(img):
     RETICLE_INK on a RETICLE_HALO 1 px wider on each side (#454; it was
     the Material green #00e676 alone, 1.84:1 on the gray membrane), which
     reads on the dark rim, the membrane and the bright foil it crosses.
-    Both halos go down before either ink line. PIL draws an ellipse's
-    width inward, so the halo's box is 1 px larger to center it."""
+    draw_haloed strokes it, every halo before any ink."""
     from PIL import ImageDraw
-    dr = ImageDraw.Draw(img)
     cx, cy = img.width / 2, img.height / 2
-    r = img.height * 0.32
+    draw_haloed(ImageDraw.Draw(img),
+                lines=(((cx, 0), (cx, img.height), 1),
+                       ((0, cy), (img.width, cy), 1)),
+                circles=(((cx, cy), img.height * 0.32, 2),))
+
+
+def draw_haloed(dr, lines=(), circles=()):
+    """Stroke `lines` ((start, end, width) each) and `circles` ((centre,
+    radius, width) each) with the ImageDraw `dr` in the reticle's colors:
+    RETICLE_INK on a RETICLE_HALO 1 px wider on each side. The reticle
+    and the Webcam tab's focus circle (gui.draw_focus_overlay, #482) both
+    draw through here, each with its own geometry.
+
+    Every halo goes down before any ink, so one stroke's halo never cuts
+    another's ink where they cross. PIL draws an ellipse's width inward,
+    so a circle's halo box is 1 px larger to center the halo on the ink."""
     for col, pad in ((RETICLE_HALO, 1), (RETICLE_INK, 0)):
-        dr.line([(cx, 0), (cx, img.height)], fill=col, width=1 + 2 * pad)
-        dr.line([(0, cy), (img.width, cy)], fill=col, width=1 + 2 * pad)
-        dr.ellipse([cx - r - pad, cy - r - pad, cx + r + pad, cy + r + pad],
-                   outline=col, width=2 + 2 * pad)
+        for start, end, width in lines:
+            dr.line([start, end], fill=col, width=width + 2 * pad)
+        for (cx, cy), r, width in circles:
+            dr.ellipse([cx - r - pad, cy - r - pad, cx + r + pad,
+                        cy + r + pad], outline=col, width=width + 2 * pad)
 
 
 def render(thumb, kind, size=None):

@@ -624,9 +624,13 @@ def draw_focus_overlay(img, score):
     its label on `img` (an RGB PIL image, changed in place); return the
     label's height in pixels, 0 with no label (#400).
 
-    Tol cyan over a black under-stroke, so it reads on a bright picture
-    and on a dark one (the live view's reticle wore these colors until
-    #476 made it the pre-flight's white on black).
+    The camera reticles' white on a black halo (#482), drawn through
+    sldea_liveview.draw_haloed with this circle's own geometry: it marks
+    where the score is weighted, not where to center the disc. It was Tol
+    cyan, which is also Edge Review's candidate A and stands off the
+    membrane by only 1.5 to 1.8:1 (white 2.8 to 3.3:1, measured for the
+    reticle beside RETICLE_INK). Display only: the caller takes the score
+    from the frame before this draws on its copy.
     The label is CAM_FOCUS_LABEL_PX type, about twice its old height, and
     shrinks only when the picture is too narrow for it. `score` None draws
     the circle alone."""
@@ -635,12 +639,11 @@ def draw_focus_overlay(img, score):
     tw, th = img.size
     cx, cy = tw // 2, th // 2
     r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
-    for fill, cw, lw in (('#000000', 5, 3),
-                         (sldea_liveview.TOL_CYAN, 3, 1)):
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=fill,
-                     width=cw)
-        draw.line([cx - 6, cy, cx + 6, cy], fill=fill, width=lw)
-        draw.line([cx, cy - 6, cx, cy + 6], fill=fill, width=lw)
+    sldea_liveview.draw_haloed(
+        draw,
+        lines=(((cx - 6, cy), (cx + 6, cy), 1),
+               ((cx, cy - 6), (cx, cy + 6), 1)),
+        circles=(((cx, cy), r, 3),))
     if score is None:
         return 0
     label = f"focus {score:.0f}  (higher = sharper)"
@@ -649,8 +652,8 @@ def draw_focus_overlay(img, score):
     while px > 10 and draw.textlength(label, font=font) > tw - 12:
         px -= 2
         font = _splash_font(px)
-    draw.text((6, 4), label, font=font, fill=sldea_liveview.TOL_CYAN,
-              stroke_width=2, stroke_fill='#000000')
+    draw.text((6, 4), label, font=font, fill=sldea_liveview.RETICLE_INK,
+              stroke_width=2, stroke_fill=sldea_liveview.RETICLE_HALO)
     box = draw.textbbox((6, 4), label, font=font)
     return box[3] - box[1]
 

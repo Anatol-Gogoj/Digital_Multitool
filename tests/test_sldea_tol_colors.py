@@ -23,7 +23,10 @@ matplotlib's default cycle (#454, 2026-10-19):
   * drawings no test had looked at (#476): the contact sheet's foil
     outline, the two-point calibration's chord, and the pre-flight
     dialog's own call of the reticle, which is now one reticle with the
-    live view's, white on a black halo.
+    live view's, white on a black halo;
+  * the Webcam tab's focus circle (#482), which was still Tol cyan: it
+    now wears the reticle's white on a black halo, drawn by the same
+    code, and the focus score is still taken before it is drawn.
 
 The cases that open a Tk window are skipped, and counted as skipped, when
 there is no display.
@@ -656,6 +659,110 @@ def test_the_live_view_draws_the_preflights_reticle():
     assert (a[band:] != 147).any(), "no reticle was drawn"
     diff = np.argwhere((a[band:] != b[band:]).any(axis=2))
     assert not len(diff), f"{len(diff)} pixels differ, first {diff[:3]}"
+
+
+def test_the_webcam_focus_circle_is_the_reticles_white_on_a_black_halo():
+    """#482: the Webcam tab's focus circle, its center cross and its score
+    label drew in Tol cyan (Edge Review's candidate A, 1.67:1 on the
+    membrane's gray 147) over a black under-stroke that lay all inside
+    the ring. They now wear the reticle's RETICLE_INK on RETICLE_HALO,
+    the halo 1 px wider on each side, with the circle's own geometry: a
+    3 px ring of FOCUS_AOI_RADIUS_FRAC x the shorter side, a 13 px cross.
+
+    Across the ring at the right, on the centre row, the pixels read
+    frame, black, 3 white, black, frame. Every pixel of the picture is a
+    gray (r = g = b), so no cyan is left anywhere, label included."""
+    import re
+    from PIL import Image
+    import gui
+    import sldea_liveview as lv
+    import webcam
+    img = Image.new('RGB', (640, 480), (147, 147, 147))
+    height = gui.draw_focus_overlay(img, 1234)
+    a = np.asarray(img).astype(int)
+    cx, cy = 320, 240
+    r = int(webcam.FOCUS_AOI_RADIUS_FRAC * 480)
+    ink = tuple(int(lv.RETICLE_INK[i:i + 2], 16) for i in (1, 3, 5))
+    halo = tuple(int(lv.RETICLE_HALO[i:i + 2], 16) for i in (1, 3, 5))
+    assert (ink, halo) == ((255, 255, 255), (0, 0, 0))
+
+    def kind(px):
+        px = tuple(px)
+        return 'W' if px == ink else 'K' if px == halo else \
+            'F' if px == (147, 147, 147) else '?'
+    for x0, step in ((cx + r - 10, 1), (cx - r + 10, -1)):
+        row = ''.join(kind(a[cy, x0 + step * k]) for k in range(16))
+        assert re.fullmatch(r'F+KWWWKF+', row), (step, row)
+    col = ''.join(kind(a[yy, cx]) for yy in range(cy + r - 10, cy + r + 6))
+    assert re.fullmatch(r'F+KWWWKF+', col), col
+    # the cross: white through the centre, black beside it, frame beyond
+    assert all(kind(a[cy + d, cx]) == 'W' for d in range(-5, 6))
+    assert all(kind(a[cy, cx + d]) == 'W' for d in range(-5, 6))
+    assert kind(a[cy - 3, cx - 1]) == kind(a[cy - 3, cx + 1]) == 'K'
+    assert kind(a[cy - 3, cx - 3]) == 'F'
+    # below the label (its type is antialiased), only the frame, the
+    # halo and the ink
+    top = cy - r - 4
+    assert 4 + 2 * height < top, (height, top)
+    below = {tuple(px) for px in a[top:].reshape(-1, 3)}
+    assert below <= {(147, 147, 147), halo, ink}, below
+    # the label: white type on a black stroke
+    label = {tuple(px) for px in a[:top, :300].reshape(-1, 3)}
+    assert ink in label and halo in label, label
+    assert (a[..., 0] == a[..., 1]).all() and (a[..., 1] == a[..., 2]).all(), \
+        "a colored pixel is left"
+
+
+def test_the_focus_score_is_taken_before_the_focus_circle_is_drawn():
+    """The Webcam preview (_cam_show) scores the camera's frame, then
+    draws the circle on its own thumbnail of it: the score is the
+    undrawn frame's, the frame itself is untouched, and the picture
+    shown carries the circle's white (#482). Headless: the label and
+    the PhotoImage are stand-ins."""
+    import types
+    from PIL import ImageTk
+    import gui
+    import sldea_liveview as lv
+    import webcam
+    rng = np.random.default_rng(482)
+    # under 200, so the only white in the picture shown is the circle's
+    rgb = rng.integers(0, 200, (480, 640, 3), dtype=np.uint8)
+    before = rgb.copy()
+    want = webcam.focus_score(before)
+    order, seen = [], {}
+    real_score, real_draw = webcam.focus_score, gui.draw_focus_overlay
+    real_photo = ImageTk.PhotoImage
+
+    def score(frame):
+        order.append('score')
+        seen['scored'] = np.array(frame, copy=True)
+        return real_score(frame)
+
+    def draw(img, s):
+        order.append('draw')
+        seen['score'] = s
+        return real_draw(img, s)
+
+    def photo(img):
+        seen['shown'] = np.asarray(img).copy()
+        return object()
+    view = types.SimpleNamespace(winfo_width=lambda: 644,
+                                 config=lambda **kw: None)
+    app = types.SimpleNamespace(
+        cam_view=view, cam_focus_var=types.SimpleNamespace(get=lambda: True))
+    webcam.focus_score, gui.draw_focus_overlay = score, draw
+    ImageTk.PhotoImage = photo
+    try:
+        gui.InstrumentControlGUI._cam_show(app, rgb)
+    finally:
+        webcam.focus_score, gui.draw_focus_overlay = real_score, real_draw
+        ImageTk.PhotoImage = real_photo
+    assert order == ['score', 'draw'], order
+    assert np.array_equal(seen['scored'], before), "scored a drawn frame"
+    assert seen['score'] == want, (seen['score'], want)
+    assert np.array_equal(rgb, before), "the overlay drew on the frame"
+    white = tuple(int(lv.RETICLE_INK[i:i + 2], 16) for i in (1, 3, 5))
+    assert (seen['shown'] == white).all(axis=2).any(), "no circle shown"
 
 
 # ------------------------------------------------------------- needs Tk

@@ -1064,7 +1064,12 @@ class InstrumentControlGUI:
             for _ in range(30):                     # up to ~3 s
                 if not self._sldea_running:
                     break
-                self.root.update()
+                try:
+                    self.root.update()
+                except Exception:
+                    # a TclError here must not skip the zero and the
+                    # outputs-off below: stop waiting and go on to them
+                    break
                 time.sleep(0.1)
         # A run still flagged now may not have zeroed its channel: the flag
         # clears only in _sldea_finished, which the worker queues at the

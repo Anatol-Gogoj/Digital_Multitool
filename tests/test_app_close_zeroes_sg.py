@@ -43,7 +43,8 @@ Trek. What is pinned here:
 * no launch-check box and no held box opens inside the close (#481):
   the launch looks and the held boxes are stood down before the wait, a
   stand-down that fails cannot skip the outputs-off, and with nothing
-  pending the close is as before.
+  pending the close is as before; nor can an update() in the wait that
+  raises skip the zero and the outputs-off.
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
@@ -847,6 +848,36 @@ def test_a_close_with_nothing_pending_is_unchanged():
         # launch in the close's wait still binds <Destroy>
         assert '_sldea_launch_watches' not in vars(app), live
         assert app._sldea_held_boxes == [], live
+
+
+def test_an_update_that_raises_in_the_wait_still_zeroes_and_switches_off():
+    """#481 review. root.update() in the close's wait can raise (a
+    TclError once Tk is torn). On origin/main that raised out of
+    _on_app_close and skipped the zero and the outputs-off. Now the wait
+    stops at once and the close goes on as for a run still flagged: a
+    LIVE run's channel zeroed, then both outputs off, the session handed
+    back, the window gone. A DRY run gets the outputs-off only."""
+    import tkinter
+
+    def torn():
+        raise tkinter.TclError('can\'t invoke "update" command: '
+                               'application has been destroyed')
+    for live, want in (
+            (True, [('set_offset', 2, 0.0)] + OUTPUTS_OFF + SESSION_END),
+            (False, OUTPUTS_OFF + SESSION_END)):
+        app = _App(sg=_SessionSG())
+        _stuck_run(app, ch=2, live=live)
+        app.root.on_update = torn
+        with _fast_clock() as clock:
+            app._on_app_close()
+        assert app.sg.writes == want, (live, app.sg.writes)
+        assert app.root.updates == 1 and clock.sleeps == [], \
+            (live, app.root.updates, clock.sleeps)
+        assert app.root.destroyed, live
+        if live:
+            rec = app._sldea_close_zeroed
+            assert (rec is not None and rec[0] is app.sg
+                    and rec[1:] == (2, True)), rec
 
 
 # --------------------------------------------------------------------------

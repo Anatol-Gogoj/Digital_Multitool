@@ -186,6 +186,9 @@ class _App:
     _cam_start_timed = G._cam_start_timed
     _cam_seq_worker = G._cam_seq_worker
     _cam_timed_worker = G._cam_timed_worker
+    # the captures' refusal while a camera adjustment runs (#439)
+    _cam_adjusting = G._cam_adjusting
+    _cam_status = G._cam_status
     # claude/sldea-video-capture (unmerged 2026-09-23) calls these from the
     # paths driven here. Bound when present, so this suite survives that
     # merge as it stands; on main they do not exist and nothing calls them.

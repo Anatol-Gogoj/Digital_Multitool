@@ -631,6 +631,9 @@ def draw_focus_overlay(img, score):
     membrane by only 1.5 to 1.8:1 (white 2.8 to 3.3:1, measured for the
     reticle beside RETICLE_INK). Display only: the caller takes the score
     from the frame before this draws on its copy.
+    Across the ring it is now 1 px black, 3 px white, 1 px black. Before
+    #482 the black was a 5 px stroke on the same box as the 3 px ink, so
+    it showed as 2 px inside the ring and none outside.
     The label is CAM_FOCUS_LABEL_PX type, about twice its old height, and
     shrinks only when the picture is too narrow for it. `score` None draws
     the circle alone."""
@@ -639,6 +642,8 @@ def draw_focus_overlay(img, score):
     tw, th = img.size
     cx, cy = tw // 2, th // 2
     r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
+    # ring: 1 px black inside, 3 px white, 1 px black outside (was 2 px
+    # black inside only); cross: 1 px white with 1 px black either side
     sldea_liveview.draw_haloed(
         draw,
         lines=(((cx - 6, cy), (cx + 6, cy), 1),

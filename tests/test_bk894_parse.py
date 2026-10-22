@@ -158,9 +158,11 @@ def test_validate_config_refuses_what_each_setter_refuses_sending_nothing():
     for field, values in probes.items():
         for v in values:
             lcr = FakeLCR()
-            msg = _raises(lambda: BK894.validate_config(**dict(good,
-                                                               **{field: v})))
-            assert lcr.sent == []
+            # Through the instance, so a validate_config that ever called
+            # a setter (and so wrote) would show up here.
+            msg = _raises(lambda: lcr.validate_config(**dict(good,
+                                                             **{field: v})))
+            assert lcr.sent == [], (field, v, lcr.sent)
             want = _raises(setter_of[field], lcr, v)
             assert msg == want, (field, v, msg, want)
             # A refused setter writes nothing; an accepted one writes once.

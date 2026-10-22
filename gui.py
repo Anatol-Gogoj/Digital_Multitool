@@ -363,8 +363,12 @@ def sldea_box_after_run(app, title, text):
     before its wait for a run pumps Tk. Once the close has begun
     (_app_closing) no box opens at all, held or not: a box there would
     stand in the close's way before the SG outputs go off, and the window
-    is going anyway. The program's log keeps what the box would have
-    said."""
+    is going anyway. What survives a box stood down this way: for a
+    program that started and then stopped (launch_check.report's box),
+    its output stays in its launch_check log file, unless no log could be
+    made, when it went to this app's own output; the exit code is not
+    kept. A "Could not launch" box (Popen itself failed) has no log at
+    all, so one stood down by a close is not recorded anywhere."""
     hold = {'job': None, 'done': False}
 
     def show():

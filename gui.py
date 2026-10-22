@@ -1936,8 +1936,11 @@ class InstrumentControlGUI:
         # interleaved write/read pairs on one wire (audit 2026-07-25).
         self.lcr_stop_continuous()
         try:
-            freqs = self._parse_sweep_axis('freq', 20, 500000, 'Frequency')
-            volts = self._parse_sweep_axis('volt', 0.01, 2.0, 'Voltage')
+            # The driver's own limits, so the sweep and Apply agree (#483)
+            freqs = self._parse_sweep_axis('freq', BK894.FREQ_MIN_HZ,
+                                           BK894.FREQ_MAX_HZ, 'Frequency')
+            volts = self._parse_sweep_axis('volt', BK894.VOLT_MIN,
+                                           BK894.VOLT_MAX, 'Voltage')
             dwell = float(self.sw_dwell.get())
             n_samples = int(self.sw_samples.get())
             isd = float(self.sw_isd.get())

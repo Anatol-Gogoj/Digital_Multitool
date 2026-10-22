@@ -188,6 +188,10 @@ def test_set_frequency_takes_the_894s_full_range():
 
 
 def test_sweep_axis_takes_20_hz():
+    # The sweep's axis limits are the driver's constants, which the
+    # setters check against, so the two cannot drift apart (#483).
+    assert (BK894.FREQ_MIN_HZ, BK894.FREQ_MAX_HZ) == (20, 500000)
+    assert (BK894.VOLT_MIN, BK894.VOLT_MAX) == (0.01, 2.0)
     meter = FakeMeter()
     app, out = _sweep(meter, freqs=(20, 40), volts=(0.1,))
     seen = {}
@@ -199,7 +203,21 @@ def test_sweep_axis_takes_20_hz():
     app._parse_sweep_axis = spy
     with _Boxes() as boxes:
         app.run()
-    assert seen['freq'] == (20, 500000), seen
+    assert seen['freq'] == (BK894.FREQ_MIN_HZ, BK894.FREQ_MAX_HZ), seen
+    assert seen['volt'] == (BK894.VOLT_MIN, BK894.VOLT_MAX), seen
+    # and the limits are the ones set_frequency and set_voltage enforce
+    for setter, lo, hi in ((BK894.check_frequency, BK894.FREQ_MIN_HZ,
+                            BK894.FREQ_MAX_HZ),
+                           (BK894.check_voltage, BK894.VOLT_MIN,
+                            BK894.VOLT_MAX)):
+        assert setter(lo) == lo and setter(hi) == hi
+        for bad in (lo * 0.999, hi * 1.001):
+            try:
+                setter(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{bad} was accepted")
     assert not boxes.calls, boxes.calls
     assert [r['Frequency (Hz)'] for r in _rows(out)] == ['20', '20', '40',
                                                          '40']

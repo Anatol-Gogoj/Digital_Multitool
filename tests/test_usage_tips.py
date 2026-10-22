@@ -173,10 +173,12 @@ def test_the_lcr_voltage_line_says_what_apply_does():
     assert 'clamp' not in lcr.lower()
     assert '0.01 to 2.0 V' in lcr and 'Configuration Error' in lcr
     drv = _read('instruments.py')
-    check = drv[drv.index('    def check_voltage(voltage):'):]
+    from instruments import BK894
+    assert BK894.VOLT_MIN == 0.01 and BK894.VOLT_MAX == 2.0
+    check = drv[drv.index('    def check_voltage(cls, voltage):'):]
     check = check[:check.index('\n    @')]
-    assert 'if not 0.01 <= voltage <= 2.0:' in check
-    assert 'raise ValueError' in check
+    assert 'if not cls.VOLT_MIN <= voltage <= cls.VOLT_MAX:' in check
+    assert 'raise ValueError("Voltage must be 0.01 to 2.0 V")' in check
     setter = drv[drv.index('    def set_voltage(self, voltage):'):]
     setter = setter[:setter.index('\n    def ')]
     assert 'self.check_voltage(voltage)' in setter

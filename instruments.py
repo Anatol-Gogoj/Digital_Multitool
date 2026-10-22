@@ -304,6 +304,12 @@ class BK894(VisaInstrument):
     # validate_config runs all of Apply's at once so a refused Apply sends
     # nothing (#483). One copy of each range, so the GUI and the driver
     # cannot disagree. Each returns the value in the form its setter sends.
+    # The sweep reads its axis limits from these constants too; the
+    # messages spell them out, so change both together.
+    FREQ_MIN_HZ = 20
+    FREQ_MAX_HZ = 500000
+    VOLT_MIN = 0.01
+    VOLT_MAX = 2.0
 
     @classmethod
     def check_mode(cls, mode):
@@ -311,15 +317,15 @@ class BK894(VisaInstrument):
             raise ValueError(f"Invalid mode. Choose from: {list(cls.MODES.keys())}")
         return mode.upper()
 
-    @staticmethod
-    def check_frequency(freq_hz):
-        if not 20 <= freq_hz <= 500000:
+    @classmethod
+    def check_frequency(cls, freq_hz):
+        if not cls.FREQ_MIN_HZ <= freq_hz <= cls.FREQ_MAX_HZ:
             raise ValueError("Frequency must be 20 Hz to 500 kHz")
         return freq_hz
 
-    @staticmethod
-    def check_voltage(voltage):
-        if not 0.01 <= voltage <= 2.0:
+    @classmethod
+    def check_voltage(cls, voltage):
+        if not cls.VOLT_MIN <= voltage <= cls.VOLT_MAX:
             raise ValueError("Voltage must be 0.01 to 2.0 V")
         return voltage
 

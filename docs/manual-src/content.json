@@ -148,7 +148,7 @@
    },
    {
     "label": "Frequency (Hz)",
-    "what": "AC test frequency, 100 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics. Use 10 kHz and up for high-frequency parts."
+    "what": "AC test frequency, 20 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics. Use 10 kHz and up for high-frequency parts."
    },
    {
     "label": "Voltage (V)",

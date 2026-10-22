@@ -840,6 +840,7 @@ class InstrumentControlGUI:
 
         # LCR sweep state (worker thread + thread-safe UI queue)
         self.sweeping = False
+        self._sweep_holds_lcr = False   # sweep owns 'lcr-io' (#495)
         self.sweep_thread = None
         self.sweep_queue = queue.Queue()
 
@@ -1607,7 +1608,7 @@ class InstrumentControlGUI:
         self.lcr_freq.grid(row=1, column=1, padx=10, pady=5)
         self.lcr_freq.insert(0, "1000")
         add_tooltip(self.lcr_freq,
-                    "AC test frequency, 100 Hz to 500 kHz. 1 kHz is the "
+                    "AC test frequency, 20 Hz to 500 kHz. 1 kHz is the "
                     "standard capacitor test; use 100 Hz for electrolytics.")
         
         # Voltage
@@ -1935,7 +1936,7 @@ class InstrumentControlGUI:
         # interleaved write/read pairs on one wire (audit 2026-07-25).
         self.lcr_stop_continuous()
         try:
-            freqs = self._parse_sweep_axis('freq', 100, 500000, 'Frequency')
+            freqs = self._parse_sweep_axis('freq', 20, 500000, 'Frequency')
             volts = self._parse_sweep_axis('volt', 0.01, 2.0, 'Voltage')
             dwell = float(self.sw_dwell.get())
             n_samples = int(self.sw_samples.get())
@@ -1963,6 +1964,20 @@ class InstrumentControlGUI:
                                        f"({total_samples} samples). Continue?"):
                 return
 
+        # The sweep holds the LCR's busy key for its whole run, so Apply,
+        # Single and the config sync are refused instead of talking to the
+        # meter between its samples (#495). The key is let go only when the
+        # worker's last event is drained, so a Start right after Stop waits
+        # for the old worker to finish its sample. Claimed after the dialog
+        # above, which a config sync could otherwise slip in behind.
+        if self._bg_busy & {'lcr-io', 'lcr-corr'}:
+            self.sw_status.config(
+                text="LCR still busy (a read, Apply, correction or the "
+                     "previous sweep) -- press Start Sweep again in a moment",
+                foreground=uc.TEXT_ALERT)
+            return
+        self._bg_busy.add('lcr-io')
+        self._sweep_holds_lcr = True
         self.sweeping = True
         # generation token: Stop→Start used to revive the old sweep worker
         self._sweep_gen = object()
@@ -2021,6 +2036,10 @@ class InstrumentControlGUI:
             if tok is not None else (lambda: self.sweeping)
         sample_count = 0
         try:
+            # Realign first: a reply left over from earlier traffic (a
+            # timed-out query) would put every sample one reading behind,
+            # silently once the stale reply is itself a :FETC? answer (#495).
+            self.lcr._drain()
             self.lcr.set_mode(mode)
             if order == 'Freq outer, V inner':
                 outer_vals, inner_vals = freqs, volts
@@ -2100,8 +2119,15 @@ class InstrumentControlGUI:
         if not final:
             self.root.after(50, self._drain_sweep_queue)
 
+    def _sweep_release_lcr(self):
+        """Let go of the LCR busy key the sweep took at Start (#495)."""
+        if getattr(self, '_sweep_holds_lcr', False):
+            self._bg_busy.discard('lcr-io')
+            self._sweep_holds_lcr = False
+
     def _sweep_finished_ui(self, out_path, samples_written, total_samples, cancelled):
         self.sweeping = False
+        self._sweep_release_lcr()
         self._set_sweep_ui_state(running=False)
         if cancelled:
             msg = (f"Sweep cancelled after {samples_written}/{total_samples} samples. "
@@ -2114,6 +2140,7 @@ class InstrumentControlGUI:
 
     def _sweep_failed_ui(self, err, out_path, samples_written):
         self.sweeping = False
+        self._sweep_release_lcr()
         self._set_sweep_ui_state(running=False)
         self.sw_status.config(text=f"Sweep failed after {samples_written} samples: {err}",
                               foreground=uc.TEXT_ALERT)
@@ -7572,6 +7599,14 @@ class InstrumentControlGUI:
         tens of seconds -- runs off the UI thread (issues #44/#40)."""
         if not self.lcr:
             messagebox.showerror("Error", "LCR meter not connected")
+            return
+        if getattr(self, '_sweep_holds_lcr', False):
+            # Its own busy key would not stop it interleaving with the
+            # sweep's samples (#495).
+            messagebox.showerror(
+                "LCR busy",
+                "A sweep is using the meter. Stop it, and let it finish its "
+                "sample, before running a correction.")
             return
         prep = {
             'open': "Remove the DUT so the fixture is OPEN "

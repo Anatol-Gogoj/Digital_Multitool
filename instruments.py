@@ -307,9 +307,14 @@ class BK894(VisaInstrument):
         self.write(f':FUNC:IMP {mode.upper()}')
 
     def set_frequency(self, freq_hz):
-        """Set test frequency (100 Hz to 500 kHz)."""
-        if not 100 <= freq_hz <= 500000:
-            raise ValueError("Frequency must be 100 Hz to 500 kHz")
+        """Set test frequency (20 Hz to 500 kHz).
+
+        20 Hz is the 894's specified floor (B&K's 894/895 spec: 20 Hz to
+        500 kHz on the 894). The app used to stop at 100 Hz; the owner
+        asked for the full range on 2026-10-22 (#495). Below 100 Hz is not
+        bench-checked yet (#369)."""
+        if not 20 <= freq_hz <= 500000:
+            raise ValueError("Frequency must be 20 Hz to 500 kHz")
         self.write(f':FREQ {freq_hz}')
 
     def set_voltage(self, voltage):
@@ -325,11 +330,41 @@ class BK894(VisaInstrument):
         self.write(f':VOLT {voltage}')
 
     def measure(self):
-        """Return (primary, secondary, status). status 0 = good."""
+        """Return (primary, secondary, status). status 0 = good.
+
+        A reply that is not three fields is a desynced one: this meter can
+        fall one reply behind, so every query returns the previous query's
+        answer (4c86b00). The config sync ends with the correction-state
+        queries, whose bare '1' then landed in an LCR sweep's first sample
+        as "expected 3, got 1" (#495). On a bad reply it DRAINS the input
+        buffer (which realigns the meter, see get_config) and asks once
+        more; a reply that is still bad raises, quoting it. A desync whose
+        stale reply happens to be another :FETC? answer cannot be told
+        apart by its format -- callers that need clean data drain first
+        (the sweep does)."""
         with _io_lock(self):
-            result = self.ask(':FETC?')
-        primary, secondary, status = result.split(',')
-        return float(primary), float(secondary), int(status)
+            for attempt in range(2):
+                if attempt:
+                    self._drain()
+                result = self.ask(':FETC?')
+                parsed = self.parse_fetch(result)
+                if parsed is not None:
+                    return parsed
+        raise ValueError(
+            f"LCR :FETC? reply {result!r} is not primary,secondary,status "
+            "-- the meter's replies are out of step with its queries")
+
+    @staticmethod
+    def parse_fetch(raw):
+        """':FETC?' response '+1.2e-10,+2.0e-03,0' -> (1.2e-10, 0.002, 0),
+        or None for anything that is not exactly three numeric fields."""
+        parts = (raw or '').split(',')
+        if len(parts) != 3:
+            return None
+        try:
+            return float(parts[0]), float(parts[1]), int(parts[2])
+        except ValueError:
+            return None
 
     def get_config(self):
         """Read mode/frequency/voltage, resilient to a stale/desynced reply

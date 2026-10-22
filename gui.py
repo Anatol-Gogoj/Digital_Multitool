@@ -356,16 +356,68 @@ def sldea_box_after_run(app, title, text):
     alarm. Meanwhile the caller's status line says what happened, and this
     looks again every SLDEA_LAUNCH_HOLD_MS with after(). The box comes in
     a callback of its own, so the run's end path (_sldea_finished) is
-    never held up by it."""
+    never held up by it.
+
+    Window close (#481): a held box is kept on `app` while it waits
+    (sldea_held_keep), so the close can stand it down (sldea_held_stop)
+    before its wait for a run pumps Tk. Once the close has begun
+    (_app_closing) no box opens at all, held or not: a box there would
+    stand in the close's way before the SG outputs go off, and the window
+    is going anyway. The program's log keeps what the box would have
+    said."""
+    hold = {'job': None, 'done': False}
+
     def show():
+        hold['job'] = None
+        if hold['done']:
+            return              # stood down by the window's close
         try:
+            if getattr(app, '_app_closing', False):
+                hold['done'] = True
+                return          # inside the window's close: no box (#481)
             if sldea_run_going(app) or getattr(app, '_sldea_alarms_open', 0):
-                app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
+                hold['job'] = app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
+                sldea_held_keep(app, hold)
                 return
         except Exception:
+            hold['done'] = True
             return              # the window is gone: nobody left to tell
+        hold['done'] = True
         messagebox.showerror(title, text)
     show()
+
+
+def sldea_held_keep(app, hold):
+    """Keep a held box's state (see sldea_box_after_run: its pending
+    after() id `job`, and `done`) on `app` while it waits, so the window's
+    close can stand it down (#481). Boxes no longer waiting are dropped.
+    Never raises."""
+    try:
+        held = getattr(app, '_sldea_held_boxes', None) or []
+        app._sldea_held_boxes = [h for h in held
+                                 if h is not hold and not h['done']] + [hold]
+    except Exception:
+        pass
+
+
+def sldea_held_stop(app):
+    """Window close: stand every held box down (#481), as sldea_launch_stop
+    does the launch looks. Each is marked done before its timer is
+    cancelled, so one whose cancel fails still never opens. No waits, and
+    never raises."""
+    try:
+        held = getattr(app, '_sldea_held_boxes', None) or []
+        app._sldea_held_boxes = []
+    except Exception:
+        return
+    for hold in held:
+        try:
+            hold['done'] = True
+            job, hold['job'] = hold['job'], None
+            if job is not None:
+                app.root.after_cancel(job)
+        except Exception:
+            pass
 
 
 def sldea_launch(app, program, cmd, target, title=None):
@@ -463,15 +515,23 @@ def sldea_launch_keep(app, watch):
 
 
 def sldea_launch_stop(app):
-    """<Destroy> of the status bar: the window is closing. Cancel every
-    launch look still going (#473), so none fires into a window that is
-    gone and none keeps its program's handle, as _sldea_folder_stop does
-    for the run folder line. The programs themselves are not touched:
-    they outlive the app."""
-    watches = getattr(app, '_sldea_launch_watches', None) or []
+    """The window is closing: _on_app_close, before its wait for a run
+    (#481), and <Destroy> of the status bar. Cancel every launch look
+    still going (#473), so none fires into the close or into a window that
+    is gone and none keeps its program's handle, as _sldea_folder_stop
+    does for the run folder line. The programs themselves are not touched:
+    they outlive the app. A look that cannot be cancelled does not keep
+    the others going. With no look ever kept, nothing is set, so a launch
+    made during the close's wait still binds <Destroy> (sldea_launch_keep)."""
+    watches = getattr(app, '_sldea_launch_watches', None)
+    if watches is None:
+        return
     app._sldea_launch_watches = []
     for w in watches:
-        w.cancel()
+        try:
+            w.cancel()
+        except Exception:
+            pass
 
 
 def sldea_video_after_run(app, runlog):
@@ -988,6 +1048,17 @@ class InstrumentControlGUI:
         # From here a run's own zero takes the SG's I/O lock and reads this
         # close's record under it (#472, see the zero below).
         self._app_closing = True
+        # No launch-check box or held box may open inside this close
+        # (#481): the wait below pumps Tk, and a look or a held box falling
+        # due there, right after the run's end clears its flag, would open
+        # one before the SG outputs go off. Stand them down first (no
+        # waits); a failure here must not skip the outputs-off below, and
+        # from here sldea_box_after_run opens no box either.
+        for stand_down in (sldea_launch_stop, sldea_held_stop):
+            try:
+                stand_down(self)
+            except Exception:
+                pass
         if getattr(self, '_sldea_running', False):
             self._sldea_stop = True
             for _ in range(30):                     # up to ~3 s

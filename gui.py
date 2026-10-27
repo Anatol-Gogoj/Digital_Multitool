@@ -178,6 +178,18 @@ SG_STATE_KEYS = {'freq': 'freq_hz', 'amp': 'amp_vpp', 'offset': 'offset_v',
                  'duty': 'duty_pct', 'sym': 'sym_pct', 'phase': 'phase_deg',
                  'rise': 'rise_s', 'fall': 'fall_s', 'delay': 'delay_s'}
 
+# Signal Gen stepped sweep (#65): the waveforms it offers, the 4055B's
+# output limit into High-Z that every point is checked against before the
+# start (+/-10 V, i.e. 20 Vpp: the cap the Waveform Editor enforces), and
+# the columns of its CSV, one row per point.
+SG_SWEEP_WAVES = ('SINE', 'SQUARE')
+SG_MAX_V_HIGHZ = 10.0
+SG_SWEEP_CSV_HEADER = (
+    'Timestamp', 'Point', 'Channel', 'Waveform', 'Duty (%)',
+    'Frequency (Hz)', 'Amplitude (Vpp)', 'Offset (V)', 'Min (V)', 'Max (V)',
+    'Read-back Frequency (Hz)', 'Read-back Amplitude (Vpp)',
+    'Read-back Offset (V)', 'Read-back matches')
+
 # Arbitrary waveforms are back on: the editor exports a flash-drive .bin
 # that the 4055B recalls from its FRONT USB port, so no waveform data has to
 # cross the USB wire. The driver still refuses upload_arb over USB (the
@@ -843,6 +855,16 @@ class InstrumentControlGUI:
         self._sweep_holds_lcr = False   # sweep owns 'lcr-io' (#495)
         self.sweep_thread = None
         self.sweep_queue = queue.Queue()
+
+        # Signal Gen stepped sweep (#65): its own worker and queue, like the
+        # LCR sweep's. `_sg_sweep_ch` is the channel it owns, from Start
+        # until its last event is drained -- after Stop too, while the
+        # worker finishes its write and switches the output off.
+        self.sg_sweeping = False
+        self._sg_sweep_gen = None
+        self._sg_sweep_ch = None
+        self.sg_sweep_thread = None
+        self.sg_sweep_queue = queue.Queue()
 
         # Signal-generator state
         self.sg_channel_widgets = {}
@@ -2554,6 +2576,9 @@ class InstrumentControlGUI:
             ch_frame = ttk.Frame(config_notebook)
             config_notebook.add(ch_frame, text=f"Channel {ch}")
             self._sg_build_channel_panel(ch_frame, ch)
+
+        # Stepped sweep (#65)
+        self._create_sg_sweep_section(sg_frame)
 
         # Presets
         preset_frame = ttk.LabelFrame(sg_frame, text="Presets", padding=10)

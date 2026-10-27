@@ -585,6 +585,37 @@ def sldea_share_mount():
     return output_folder.share_mount(InstrumentControlGUI.SLDEA_SHARE_DIR)
 
 
+def new_csv_path(folder, prefix):
+    """A sweep's CSV path when its Output CSV field is blank: a new
+    `<prefix>_<YYYYMMDD_HHMMSS>.csv` in `folder` (made if missing) that
+    does not exist yet, so two Starts in the same second still write two
+    files (`_2`, `_3`, ... after the second one). The caller never writes
+    it back into the field, so the next Start makes a new one again."""
+    os.makedirs(folder, exist_ok=True)
+    stem = os.path.join(
+        folder, f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    path, n = f"{stem}.csv", 2
+    while os.path.exists(path):
+        path, n = f"{stem}_{n}.csv", n + 1
+    return path
+
+
+CSV_OVERWRITE_Q = "Overwrite CSV"
+
+
+def csv_overwrite_ok(path):
+    """True when a sweep may write the CSV path typed in its field: the
+    path does not exist yet, or the operator answers Yes to overwriting
+    it (Enter = No). Asked on the Tk thread before anything is claimed.
+    Browse... needs none of this: its save dialog asks by itself."""
+    if not os.path.exists(path):
+        return True
+    return messagebox.askyesno(
+        CSV_OVERWRITE_Q,
+        f"This file already exists:\n{path}\n\nOverwrite it with this "
+        f"sweep's rows?", default='no')
+
+
 def _lan_reachable(resource, timeout=2.0):
     """Quick TCP liveness probe of a TCPIP VISA resource's host, so a missing
     box/cable falls back to USB fast instead of waiting out a long VISA open
@@ -1927,8 +1958,7 @@ class InstrumentControlGUI:
 
     def _default_sweep_path(self):
         log_dir = self.log_dir.get() if hasattr(self, 'log_dir') else './logs'
-        os.makedirs(log_dir, exist_ok=True)
-        return os.path.join(log_dir, f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        return new_csv_path(log_dir, 'sweep')
 
     def _parse_sweep_axis(self, axis, vmin, vmax, name):
         """Return a list[float] for the given axis, validated against [vmin, vmax].
@@ -1971,6 +2001,13 @@ class InstrumentControlGUI:
             return
         if self.sweeping:
             return
+        # A typed file that exists is asked about first, so a No changes
+        # nothing (not even the continuous poll). A blank field gets a new
+        # file at each Start, made just before the claim and never written
+        # back into the field.
+        typed = self.sw_output.get().strip()
+        if typed and not csv_overwrite_ok(typed):
+            return
         # The 200 ms continuous poller shares the LCR session; running both
         # interleaved write/read pairs on one wire (audit 2026-07-25).
         self.lcr_stop_continuous()
@@ -1988,8 +2025,6 @@ class InstrumentControlGUI:
             messagebox.showerror("Invalid sweep parameters", str(e))
             return
 
-        out_path = self.sw_output.get().strip() or self._default_sweep_path()
-        self.sw_output.set(out_path)
         mode = self.lcr_mode.get()
         order = self.sw_order.get()
 
@@ -2014,6 +2049,12 @@ class InstrumentControlGUI:
                 text="LCR still busy (a read, Apply, correction or the "
                      "previous sweep) -- press Start Sweep again in a moment",
                 foreground=uc.TEXT_ALERT)
+            return
+        try:
+            out_path = typed or self._default_sweep_path()
+        except OSError as e:
+            messagebox.showerror("Sweep error", f"Could not make the log "
+                                                f"folder for the CSV: {e}")
             return
         self._bg_busy.add('lcr-io')
         self._sweep_holds_lcr = True
@@ -8664,10 +8705,7 @@ class InstrumentControlGUI:
 
     def _default_sg_sweep_path(self):
         log_dir = self.log_dir.get() if hasattr(self, 'log_dir') else './logs'
-        os.makedirs(log_dir, exist_ok=True)
-        return os.path.join(
-            log_dir,
-            f"sg_sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        return new_csv_path(log_dir, 'sg_sweep')
 
     def _sg_sweep_read_plan(self):
         """Read and check the sweep's fields -> a plan dict. Raises
@@ -8789,8 +8827,9 @@ class InstrumentControlGUI:
         return False
 
     def sg_start_sweep(self):
-        """Start Sweep: check, ask once (default No), claim the channel,
-        and hand the points to the worker."""
+        """Start Sweep: check, ask about a typed CSV that exists, ask once
+        (default No), claim the channel, and hand the points to the
+        worker."""
         if getattr(self, '_sg_sweep_ch', None) is not None:
             return
         try:
@@ -8800,6 +8839,12 @@ class InstrumentControlGUI:
             return
         ch = plan['ch']
         if self._sg_sweep_start_refused(ch):
+            return
+        # A typed file that exists is asked about before the HV question; a
+        # blank field gets a new file at each Start, made just before the
+        # claim and never written back into the field
+        typed = self.sgsw_output.get().strip()
+        if typed and not csv_overwrite_ok(typed):
             return
         n = len(plan['points'])
         est = n * (plan['dwell'] + 0.5)   # ~0.5 s of writes + read-back each
@@ -8828,13 +8873,11 @@ class InstrumentControlGUI:
         if self._sg_sweep_start_refused(ch):
             return
         try:
-            out_path = self.sgsw_output.get().strip() or \
-                self._default_sg_sweep_path()
+            out_path = typed or self._default_sg_sweep_path()
         except OSError as e:
             messagebox.showerror("SG sweep", f"Could not make the log "
                                              f"folder for the CSV: {e}")
             return
-        self.sgsw_output.set(out_path)
 
         self._sg_sweep_ch = ch
         self.sg_sweeping = True

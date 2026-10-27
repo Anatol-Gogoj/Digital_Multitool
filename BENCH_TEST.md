@@ -965,9 +965,9 @@ Polarity **NOR**. ~20 min.
    - [ ] the trough sits on 0 V at every point **and through every change**, in particular when the amplitude steps up and the frequency drops from 100 Hz back to 1 Hz (points 5→6, 10→11, ...). Peak Detect keeps a short dip visible at this timebase; a dip below 0 V is a fail, whatever its size
    - [ ] at the end the front panel shows CH1 off, the scope is flat at 0 V, the Output button reads OFF, and the CH1 panel holds the last point (100 Hz, 2.5 Vpp, offset 1.25)
    - [ ] the CSV named in the status line has 25 rows, its read-back columns match the asked ones, and its last column is `yes` throughout
-3. **The read drain over USB, back to back.** Step 2's settings with dwell `0`, so each drain follows the last write as fast as the app allows. Clear the **Output CSV** field before each start (a filled-in path is reused and overwritten, as in the LCR sweep), then Start → Yes, and start the next sweep as soon as the last one ends: **three sweeps in a row**
+3. **The read drain over USB, back to back.** Step 2's settings with dwell `0`, so each drain follows the last write as fast as the app allows, and the **Output CSV** field blank. Start → Yes, and start the next sweep as soon as the last one ends: **three sweeps in a row**
    - [ ] every sweep runs all 25 points and ends with CH1 off and the Output button OFF. No sweep stops with a time-out (`VI_ERROR_TMO`) or `got a reply that is not its own`, and the status bar shows no run of time-out errors afterwards
-   - [ ] each CSV has 25 rows with `yes` throughout
+   - [ ] the Output CSV field is still blank after each sweep, and the log folder holds three new `sg_sweep_*.csv` files (step 2's makes four), each named in its sweep's status line, each with 25 rows and `yes` throughout
    - [ ] the front-panel display follows every point (frequency and amplitude change on it) and never freezes
    - [ ] then, on the Channel 1 tab, **Read Instrument**: the panel fills without a time-out and matches the front panel (100 Hz, 2.5 Vpp, offset 1.25, output OFF)
    - [ ] then Amplitude `1` → **Set to Vpp/2** → **Apply CH1 Settings**: the front panel shows 1 Vpp at offset 0.5 V and the gray readouts match. Output stays OFF

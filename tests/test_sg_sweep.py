@@ -53,6 +53,9 @@ write it:
   fields), its one confirmation (default No) and the re-check after it,
   what a start hands the worker, and the claim given back when the start
   fails;
+* the CSV path: a blank field gets a new file at every Start and stays
+  blank; a typed file that exists is asked about (default No) after the
+  refusals and before the HV question, and No claims and writes nothing;
 * the running sweep's inputs locked (the Range/List radios and the 0 V to
   Vpp box included) and given back;
 * _sg_sweep_blocks, which holds off Restart now and Update Software.
@@ -98,6 +101,7 @@ G = gui.InstrumentControlGUI
 SWEEP_LOCK = 'Channel in use — SG sweep'
 LIVE_LOCK = 'Channel in use — LIVE HV run'
 START_Q = 'Start SG sweep'
+CSV_Q = gui.CSV_OVERWRITE_Q
 BAD = 'Invalid sweep parameters'
 # Four points, 0 V to Vpp, amplitude outer:
 # (1, 1, 0.5), (10, 1, 0.5), (1, 2, 1), (10, 2, 1)
@@ -2084,12 +2088,114 @@ def test_a_blank_output_path_goes_to_the_log_folder():
         app = _App(tmp)
         app.sgsw_output.set('  ')
         threads = _start(app, _MB({START_Q: True}))
-        path = app.sgsw_output.get()
+        [t] = threads.made
+        path = t.args[7]
         assert _os.path.dirname(path) == tmp, path
         assert _re.match(r'^sg_sweep_\d{8}_\d{6}\.csv$',
                          _os.path.basename(path)), path
-        [t] = threads.made
-        assert t.args[7] == path, t.args
+        # the status line names it; the field is left as it was
+        assert path in app.sgsw_status.text, app.sgsw_status.text
+        assert app.sgsw_output.get() == '  ', app.sgsw_output.get()
+
+
+def _start_and_run(app, answers):
+    """Start (questions answered from `answers`), then run the worker it
+    started and the drain it scheduled -> the CSV path it was handed."""
+    threads = _start(app, _MB(answers))
+    [t] = threads.made
+    with _patched(_MB()):
+        t.target(*t.args)
+        app._drain_sg_sweep_queue()
+    assert app._sg_sweep_ch is None and not app.sg_sweeping
+    return t.args[7]
+
+
+def test_two_starts_with_a_blank_field_write_two_files():
+    """The made-up name is never written back into the field, so the next
+    Start makes a new file instead of overwriting the last one. Both run
+    in the same second here, so the second name gets _2."""
+    with _tmpdir() as tmp:
+        app = _App(tmp)
+        app.sgsw_output.set('')
+        first = _start_and_run(app, {START_Q: True})
+        assert app.sgsw_output.get() == '', app.sgsw_output.get()
+        assert f"CSV: {first}" in app.sgsw_status.text, app.sgsw_status.text
+        second = _start_and_run(app, {START_Q: True})
+        assert app.sgsw_output.get() == '', app.sgsw_output.get()
+        assert f"CSV: {second}" in app.sgsw_status.text
+        assert second != first, first
+        for path in (first, second):
+            assert _os.path.dirname(path) == tmp, path
+            assert _re.match(r'^sg_sweep_\d{8}_\d{6}(_\d+)?\.csv$',
+                             _os.path.basename(path)), path
+            assert len(_rows(path)) == 5, (path, _rows(path))
+        assert sorted(_os.listdir(tmp)) == sorted(
+            _os.path.basename(p) for p in (first, second))
+
+
+def _typed_file(app):
+    """The typed Output CSV, made to exist with one line in it."""
+    path = app.sgsw_output.get()
+    with open(path, 'w') as f:
+        f.write('keep\n')
+    return path
+
+
+def _kept(path):
+    with open(path) as f:
+        return f.read() == 'keep\n'
+
+
+def test_an_existing_typed_csv_is_asked_about_first_and_no_claims_nothing():
+    with _tmpdir() as tmp:
+        app = _App(tmp)
+        path = _typed_file(app)
+        mb = _MB({CSV_Q: False})
+        threads = _start(app, mb)
+        # asked before the HV question, which never comes
+        [(kind, title, msg, kw)] = mb.calls
+        assert (kind, title, kw) == ('askyesno', CSV_Q, {'default': 'no'})
+        assert path in msg and 'already exists' in msg, msg
+        _not_started(app, threads)
+        assert _kept(path), "the CSV was touched"
+        assert app.sgsw_status.text is None, app.sgsw_status.text
+
+
+def test_yes_to_overwrite_then_no_to_the_sweep_writes_nothing():
+    with _tmpdir() as tmp:
+        app = _App(tmp)
+        path = _typed_file(app)
+        mb = _MB({CSV_Q: True, START_Q: False})
+        threads = _start(app, mb)
+        assert mb.kinds_titles() == [('askyesno', CSV_Q),
+                                     ('askyesno', START_Q)], mb.calls
+        _not_started(app, threads)
+        assert _kept(path), "the CSV was touched"
+
+
+def test_yes_to_both_overwrites_the_typed_csv():
+    with _tmpdir() as tmp:
+        app = _App(tmp)
+        path = _typed_file(app)
+        assert _start_and_run(app, {CSV_Q: True, START_Q: True}) == path
+        rows = _rows(path)
+        assert len(rows) == 5 and rows[0] == list(gui.SG_SWEEP_CSV_HEADER), \
+            rows
+        assert app.sgsw_output.get() == path
+
+
+def test_a_refused_start_asks_nothing_about_the_csv():
+    """The refusals come before the overwrite question: no point asking
+    about a file the sweep will not write."""
+    with _tmpdir() as tmp:
+        app = _App(tmp)
+        path = _typed_file(app)
+        app._bg_busy.add('sg-io')
+        mb = _MB()
+        threads = _start(app, mb)
+        assert mb.kinds_titles() == [('showinfo', 'SG sweep')], mb.calls
+        _not_started(app, threads)
+        assert _kept(path)
 
 
 # --------------------------------------------------------------------------

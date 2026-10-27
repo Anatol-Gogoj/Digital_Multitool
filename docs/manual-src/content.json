@@ -192,7 +192,7 @@
    },
    {
     "label": "Output CSV / Browse...",
-    "what": "Where the sweep file goes; left blank it lands in the log directory as sweep_<timestamp>.csv."
+    "what": "Where the sweep file goes. Left blank, every Start writes a new sweep_<timestamp>.csv in the log directory and the field stays blank; the status line names the file. A typed file that already exists is asked about first (Enter = No)."
    },
    {
     "label": "Start Sweep / Stop / progress bar",
@@ -476,7 +476,7 @@
    },
    {
     "label": "Output CSV",
-    "what": "One row per point: the time, the asked frequency, amplitude and offset, the lowest and highest volts, what the generator read back, and whether that matches. Blank writes <log dir>/sg_sweep_<timestamp>.csv. A read-back that differs is marked no and the sweep goes on, unless its levels leave the lowest-to-highest band the question named (by more than 10 mV), which stops the sweep. A read-back that cannot be read, or answers for another query, stops it too."
+    "what": "One row per point: the time, the asked frequency, amplitude and offset, the lowest and highest volts, what the generator read back, and whether that matches. Left blank, every Start writes a new <log dir>/sg_sweep_<timestamp>.csv and the field stays blank; the status line names the file. A typed file that already exists is asked about before the sweep's question (Enter = No). A read-back that differs is marked no and the sweep goes on, unless its levels leave the lowest-to-highest band the question named (by more than 10 mV), which stops the sweep. A read-back that cannot be read, or answers for another query, stops it too."
    },
    {
     "label": "Start Sweep / Stop Sweep",

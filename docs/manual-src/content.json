@@ -423,6 +423,10 @@
     "what": "Type values; the gray text beside each field shows what the instrument actually accepted after Apply."
    },
    {
+    "label": "Set to Vpp/2",
+    "what": "Beside DC Offset (not shown for DC). Fills the offset with half the amplitude, so the waveform runs from 0 V to Vpp and never goes below 0 V, as a DEA drive should. It only fills the field; Apply sends it."
+   },
+   {
     "label": "Waveform Editor...",
     "what": "Shown only when Waveform = ARB — opens the arbitrary-waveform designer window; the label beside it names the chosen arb."
    },

@@ -64,7 +64,7 @@ from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
                         show_tips)
 from tk_checkmarks import install_check_marks, mark_classic_checkbutton
 from arb_editor import ArbWaveformEditor
-from waveform_render import unit_waveform, scale_waveform
+from waveform_render import unit_waveform, scale_waveform, unipolar_offset
 from version import version_string
 import webcam
 import threading
@@ -7902,6 +7902,17 @@ class InstrumentControlGUI:
                 w.pack(side=tk.LEFT, padx=4)
             applied = tk.Label(row, text='--', fg=MUTED, width=14, anchor='w')
             applied.pack(side=tk.LEFT, padx=4)
+            if key == 'offset':
+                # Offset = Vpp/2 (#498): packed before the readout, and
+                # shown or hidden with the waveform by _sg_update_visibility
+                half = add_tooltip(
+                    ttk.Button(row, text="Set to Vpp/2",
+                               command=lambda c=ch: self.sg_offset_half_vpp(c)),
+                    "Set DC Offset to half the Amplitude, so the waveform "
+                    "runs from 0 V to Vpp and never goes below 0 V. Fills "
+                    "the field only: Apply sends it.")
+                half.pack(side=tk.LEFT, padx=4, before=applied)
+                widgets['offset_half'] = half
             if key in SG_FIELD_TOOLTIPS:
                 add_tooltip(w, SG_FIELD_TOOLTIPS[key])
             widgets[key] = w
@@ -8007,6 +8018,37 @@ class InstrumentControlGUI:
             if key in SG_ADVANCED_FIELDS and not advanced:
                 continue
             widgets['rows'][key].pack(fill='x', pady=2)
+        # Set to Vpp/2 needs an amplitude: shown wherever Amplitude is, so
+        # not for DC (its offset row shows alone)
+        half = widgets.get('offset_half')
+        if half is not None:
+            if wave in SG_FIELD_WAVEFORMS['amp']:
+                half.pack(side=tk.LEFT, padx=4,
+                          before=widgets['applied']['offset'])
+            else:
+                half.pack_forget()
+
+    def sg_offset_half_vpp(self, ch):
+        """Set to Vpp/2 (#498): fill DC Offset with half the Amplitude, so
+        the waveform runs from 0 V to Vpp. It edits the field only and
+        sends nothing; Apply sends it like a typed value, so the LIVE-run
+        lock and the Apply-then-Output rule are untouched."""
+        widgets = self.sg_channel_widgets[ch]
+        text = widgets['amp'].get()
+        try:
+            offset = unipolar_offset(text)
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Set to Vpp/2",
+                f"CH{ch} Amplitude must be a number of volts, 0 or more, to "
+                f"halve. It reads {str(text).strip() or '(blank)'!r}.")
+            return
+        self._set_entry(widgets['offset'], f'{offset:.12g}')
+        self._sg_redraw_preview(ch)
+        self.status_bar.config(
+            text=f"CH{ch} DC Offset set to {offset:.12g} V: the waveform "
+                 f"runs 0 V to {2 * offset:.12g} V. Press Apply CH{ch} "
+                 f"Settings to send it.")
 
     def _sg_get_float(self, ch, key, default):
         """Float value of a channel entry, or default if unparsable."""

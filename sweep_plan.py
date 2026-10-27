@@ -160,6 +160,33 @@ def sg_extremes(points):
             max(o + a / 2.0 for _f, a, o in points))
 
 
+def readback_band(got):
+    """(trough, peak) in volts of a read-back ``got`` (a BSWV dict, as
+    BK4055B.get_basic_wave_dict returns it): OFST -/+ AMP / 2. None when
+    either field is missing, not a number, or not finite."""
+    try:
+        amp, off = float(got['AMP']), float(got['OFST'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(amp) and math.isfinite(off)):
+        return None
+    return (off - amp / 2.0, off + amp / 2.0)
+
+
+def readback_shape_matches(wave, duty, got):
+    """True when a read-back ``got`` holds waveform ``wave`` and, when
+    ``duty`` is not None (SQUARE), that duty cycle within 0.1 percentage
+    point. A missing or non-numeric field fails it."""
+    if str(got.get('WVTP', '')).strip().upper() != wave.upper():
+        return False
+    if duty is None:
+        return True
+    try:
+        return math.isclose(float(got['DUTY']), duty, abs_tol=0.1)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def readback_matches(asked, got):
     """True when the instrument's read-back ``got`` (a BSWV dict with FRQ,
     AMP and OFST as floats, as BK4055B.get_basic_wave_dict returns them)

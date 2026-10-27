@@ -173,9 +173,13 @@ class _App:
     _reconnect = G._reconnect
     _bg_simple = G._bg_simple
     _sldea_finished = G._sldea_finished
+    _sg_sweep_locked = G._sg_sweep_locked     # #65: no sweep in these cases
+    sg_stop_sweep = G.sg_stop_sweep
 
     def __init__(self, live=None):
         self.sg = _FakeSG()
+        self._sg_sweep_ch = None
+        self.sg_sweeping = False
         self._sldea_live_ch = live       # None = no run, or a DRY run
         # what _sldea_finished tidies up when a run ends
         self._sldea_running = live is not None
@@ -455,9 +459,10 @@ def test_editor_upload_with_no_live_run_is_unchanged():
 # scan below must find exactly this. A write in a function not listed, or a
 # new write in one that is, fails the suite: decide whether a LIVE run's
 # channel lock applies to it, guard it and test it above if it does, then
-# update this table. A 'locked' writer must also ask _sg_live_locked in a
-# top-level `if ...: return` before the statement that holds its first
-# write -- checked below, not taken on trust.
+# update this table. A 'locked' writer must also ask _sg_live_locked, and
+# the Signal Gen sweep's _sg_sweep_locked (#65), each in a top-level
+# `if ...: return` before the statement that holds its first write --
+# checked below, not taken on trust.
 SG_WRITERS = {
     'gui.InstrumentControlGUI._sldea_worker': (
         'owner', 'the LIVE run itself: it owns the channel',
@@ -489,6 +494,14 @@ SG_WRITERS = {
     'gui.InstrumentControlGUI._cam_timed_worker': (
         'worker', 'Webcam timed capture: its burst trigger',
         {'burst_trigger': 1}),
+    # #65: reads _sldea_live_ch before every write and under the SG's I/O
+    # lock; on a LIVE claim it writes nothing more, its output-off included
+    # (tests/test_sg_sweep.py)
+    'gui.InstrumentControlGUI._sg_sweep_worker': (
+        'worker', 'Signal Gen stepped sweep: OFF, set-up, point 1, ON, the '
+                  'level writes, OFF at the end',
+        {'set_output': 3, 'set_load_polarity': 1, 'set_burst': 1,
+         'set_basic_wave': 3}),
 }
 
 # Driver calls that change the instrument: every setter, upload, select,
@@ -553,15 +566,16 @@ def _sg_write_sites(modules):
     return counts, {k: v for k, v in defs.items() if k in counts}
 
 
-def _asks_the_lock_first(fn):
-    """True when `fn` has a top-level `if <x>._sg_live_locked(...): ...
-    return` BEFORE the first top-level statement that holds an SG write. A
-    check nested in a branch, one that does not return, or one placed after
-    the write does not count."""
+def _asks_the_lock_first(fn, lock='_sg_live_locked'):
+    """True when `fn` has a top-level `if <x>.<lock>(...): ... return`
+    BEFORE the first top-level statement that holds an SG write. A check
+    nested in a branch, one that does not return, or one placed after the
+    write does not count. `lock` is _sg_live_locked, or the Signal Gen
+    sweep's _sg_sweep_locked (#65)."""
     for stmt in fn.body:
         if (isinstance(stmt, _ast.If) and isinstance(stmt.test, _ast.Call)
                 and isinstance(stmt.test.func, _ast.Attribute)
-                and stmt.test.func.attr == '_sg_live_locked'
+                and stmt.test.func.attr == lock
                 and isinstance(stmt.body[-1], _ast.Return)):
             return True
         if _sg_writes(stmt):
@@ -605,10 +619,12 @@ def test_every_locked_writer_asks_the_lock_before_its_first_write():
     _, defs = _sg_write_sites(_app_modules())
     for name, (kind, _, _) in SG_WRITERS.items():
         if kind == 'locked':
-            assert name in defs and _asks_the_lock_first(defs[name]), (
-                f"{name} is listed as locked but does not ask "
-                f"_sg_live_locked in a top-level `if ...: return` before "
-                f"its first SG write")
+            for lock in ('_sg_live_locked', '_sg_sweep_locked'):
+                assert name in defs and _asks_the_lock_first(
+                    defs[name], lock), (
+                    f"{name} is listed as locked but does not ask {lock} "
+                    f"in a top-level `if ...: return` before its first SG "
+                    f"write")
 
 
 def test_the_inventory_sees_the_spellings_it_claims():

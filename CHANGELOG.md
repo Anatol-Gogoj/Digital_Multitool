@@ -102,9 +102,12 @@ BENCH_TEST §T step 3 must pass before anyone sweeps with the Trek connected.
 Rebuilt for this release, the first rebuild since v1.4.6, so it also
 carries v1.4.7's Usage Tips text, area plot and diagnostic figures and the
 page-flow fixes of #491. The Signal Gen chapter covers the sweep and Set to
-Vpp/2, the LCR chapter says 20 Hz, and the LCR caution on a bad value says
-what Apply had already sent (#490's wording, hidden until now by an older
-override).
+Vpp/2, the LCR chapter says 20 Hz (below 100 Hz not bench-checked yet), and
+the LCR caution on a bad value says what Apply had already sent (#490's
+wording, hidden until now by an older override). Part II no longer says the
+watchdog reads the current at exactly 2 Hz: 0.5 s is a gate, and LIVE runs
+record a 0.56 s median tick (#424, corrected in `SLDEA_DECISIONS.md` on
+2026-10-08 but not in the manual).
 
 ### Tests
 

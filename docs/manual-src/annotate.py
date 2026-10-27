@@ -206,7 +206,10 @@ S["tab_siggen"] = {
          "label": "Stepped sweep — one channel through frequency × amplitude"},
         {"match": "0 V to Vpp (offset = Vpp/2)", "label": "Every point runs 0 V to its Vpp (the default)"},
         {"match": "Start Sweep", "label": "Asks once; OFF at the end, on Stop and on any error"},
-        {"match": "Presets", "label": "Named presets store both channels; files travel by USB"},
+        # Inside the frame, right of Delete Preset: placed automatically it
+        # fell on the status bar's text below the frame (v1.4.8 build).
+        {"match": "Presets", "badge_at": [600, 876],
+         "label": "Named presets store both channels; files travel by USB"},
         {"match": "Advanced mode", "label": "Reveals phase, pulse edges, load and polarity"},
     ],
 }

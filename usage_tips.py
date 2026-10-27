@@ -124,24 +124,24 @@ SIGGEN = Page(
             "A LIVE SLDEA run locks the channel driving the Trek. End the "
             "run with ■ Abort on the SLDEA tab, never by closing the "
             "window.",
+            "Start Sweep asks first, then switches its channel ON; Stop "
+            "Sweep, that channel's Output button, or the sweep's end "
+            "switches it OFF.",
         ), ALERT),
         ("Apply, then Output", (
             "Apply CH1 Settings never switches the output.",
             "Gray values are what the instrument accepted; believe them, "
             "not the preview.",
             "Read Instrument copies the box's settings into the fields.",
-        )),
-        ("Amplitude and Load", (
-            "Amplitude is Vpp for the Load in Advanced mode; 50 Ω into a "
-            "High-Z input gives about twice the voltage.",
-            "Set to Vpp/2 makes DC Offset half the Amplitude: 0 V to Vpp, "
-            "never below 0 V. Apply sends it.",
-            "For a steady level, pick DC and set DC Offset.",
+            "Amplitude is Vpp for the Load (Advanced mode); 50 Ω into "
+            "High-Z gives about twice the voltage.",
+            "Set to Vpp/2 sets DC Offset to half the Amplitude (0 V to "
+            "Vpp); Apply sends it.",
         )),
         ("Burst", (
-            "Burst sends Cycles periods per trigger, then idles: tick "
-            "Burst, Apply, Output ON, then Fire (Trigger MAN). INT repeats "
-            "every Interval; EXT uses the rear Aux In.",
+            "Burst sends Cycles periods per trigger: tick Burst, Apply, "
+            "Output ON, Fire (Trigger MAN). INT repeats every Interval; EXT "
+            "uses rear Aux In.",
         )),
         ("ARB and presets", (
             "USB cannot carry waveform data. Draw it in Waveform Editor... "
@@ -251,7 +251,8 @@ NAMED_CONTROLS = {
               "Capture CH1 Waveform"),
     'siggen': ("Output: OFF", "Apply CH1 Settings", "Read Instrument",
                "Advanced mode", "Set to Vpp/2", "Burst", "Fire",
-               "Waveform Editor...", "Load Preset", "■ Abort"),
+               "Waveform Editor...", "Load Preset", "■ Abort",
+               "Start Sweep", "Stop Sweep"),
     'psu': ("Output: OFF", "Set Protection", "Apply V / I limit",
             "Live readout"),
     'dmm': ("Reconnect", "Read once", "Live reading", "Start Logging"),

@@ -13,7 +13,11 @@ landing. What is pinned here:
 * Run refuses beside a stepped sweep on its own SG channel, a timed
   capture, a capture that is still stopping, a camera adjustment, and (LIVE
   only) a Signal Gen tab command in flight. It ASKS (Enter = No) beside a
-  sweep on the other channel.
+  sweep on the other channel. The Signal Gen tab's own stepped sweep (#65)
+  refuses a LIVE or DRY run on its channel, running or still stopping,
+  and leaves the other channel free. The other order: a DRY run names
+  its channel in _sldea_dry_ch until _sldea_finished, which is what the
+  sweep's start refuses (tests/test_sg_sweep.py).
 * The check comes before any HV question and before the camera is
   touched, and again at the commit point. The commit check never asks, so
   nothing can yield to Tk between it and the channel claim.
@@ -186,6 +190,8 @@ class _App:
     _cam_start_timed = G._cam_start_timed
     _cam_seq_worker = G._cam_seq_worker
     _cam_timed_worker = G._cam_timed_worker
+    _sg_sweep_locked = G._sg_sweep_locked   # #65: no SG sweep unless set
+    sg_stop_sweep = G.sg_stop_sweep
     # claude/sldea-video-capture (unmerged 2026-09-23) calls these from the
     # paths driven here. Bound when present, so this suite survives that
     # merge as it stands; on main they do not exist and nothing calls them.
@@ -610,6 +616,86 @@ def test_a_signal_gen_command_in_flight_holds_off_a_live_run_only():
         app._bg_busy.add('sg-io')
         app.sldea_run()
         assert app.worker_done.wait(5) and mb.calls == [], mb.calls
+
+
+SG_SWEEP = "Signal Gen tab's stepped sweep"
+
+
+def test_the_signal_gen_sweep_on_the_runs_channel_refuses_live_and_dry():
+    """The Signal Gen tab's sweep (#65) energizes its channel, so a run on
+    that channel is refused, DRY included, with the sweep named and Stop
+    Sweep as the way out; while it is still stopping (Stop pressed, its
+    last event not yet drained) the reason says so."""
+    for sweeping, says in ((True, 'Press Stop Sweep on the Signal Gen tab'),
+                           (False, 'is still stopping')):
+        for dry in (False, True):
+            app = _App('.', dry=dry, sgch=1)
+            app._sg_sweep_ch, app.sg_sweeping = 1, sweeping
+            reasons, ask, job = app._sldea_start_conflicts(1, dry)
+            assert ask is None and job is None, (ask, job)
+            [(short, full)] = reasons
+            assert 'SG CH1' in short and "Signal Gen tab's sweep" in short, \
+                short
+            assert SG_SWEEP in full and says in full, full
+            if sweeping:
+                assert ('would not be dry' in full) == dry, full
+            # end to end through ▶ Run: refused at the top, no question
+            mb = _MB()
+            with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+                app = _App(tmp, dry=dry, sgch=1)
+                app._sg_sweep_ch, app.sg_sweeping = 1, sweeping
+                app.sldea_run()
+                _assert_refused(app, mb)
+                assert SG_SWEEP in mb.message(BUSY), mb.message(BUSY)
+                assert any(l.startswith('run refused')
+                           and "Signal Gen tab's sweep" in l
+                           for l in app.lines), app.lines
+            assert app._sg_sweep_ch == 1 and app.sg_sweeping is sweeping
+
+
+def test_the_signal_gen_sweep_on_the_other_channel_lets_a_run_start():
+    for sweeping in (True, False):
+        for dry in (False, True):
+            app = _App('.', dry=dry, sgch=2)
+            app._sg_sweep_ch, app.sg_sweeping = 1, sweeping
+            assert app._sldea_start_conflicts(2, dry) == ([], None, None)
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=True, sgch=2)
+        app._sg_sweep_ch, app.sg_sweeping = 1, True
+        app.sldea_run()
+        assert app.worker_done.wait(5) and mb.calls == [], mb.calls
+        assert app._sldea_running and app.worker_args[3] == 2
+
+
+def test_a_dry_run_claims_its_channel_for_the_sg_sweep_until_it_finishes():
+    """The other order (owner 2026-10-27): the Signal Gen tab's sweep is
+    refused on the channel a DRY run is set to, and reads that channel
+    from _sldea_dry_ch. sldea_run sets it beside _sldea_live_ch -- the
+    DRY run's channel, and None for LIVE -- and _sldea_finished clears
+    it, on the real worker's own path too."""
+    for dry in (True, False):
+        mb = _MB(LIVE_OK)
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=dry, sgch=2)
+            app._sldea_dry_ch = 1            # stale: must not survive
+            app.sldea_run()
+            assert app.worker_done.wait(5), app.lines
+            assert app._sldea_running
+            assert app._sldea_dry_ch == (2 if dry else None), dry
+            assert app._sldea_live_ch == (None if dry else 2), dry
+            app._sldea_finished()
+            assert app._sldea_dry_ch is None and app._sldea_live_ch is None
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=True, sgch=1, real_worker=True)
+        app.sldea_run()
+        assert app._sldea_dry_ch == 1
+        assert app.worker_done.wait(30), app.lines
+        _assert_clean_run(app)
+        assert app._sldea_dry_ch == 1, "released before the Tk side ran"
+        app.root.run_pending()               # the worker's _sldea_finished
+        assert app._sldea_dry_ch is None and not app._sldea_running
 
 
 def test_nothing_running_starts_exactly_as_before():

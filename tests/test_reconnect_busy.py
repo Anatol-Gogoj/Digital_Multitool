@@ -116,6 +116,7 @@ class _App:
     `started` records each _run_bg call as (busy key, did a job start?)."""
     _reconnect = G._reconnect
     _sg_live_locked = G._sg_live_locked
+    _sg_sweep_locked = G._sg_sweep_locked   # #65: no SG sweep here
     _transport = staticmethod(G._transport)
 
     def __init__(self, live=None):

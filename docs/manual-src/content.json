@@ -192,7 +192,7 @@
    },
    {
     "label": "Output CSV / Browse...",
-    "what": "Where the sweep file goes; left blank it lands in the log directory as sweep_<timestamp>.csv."
+    "what": "Where the sweep file goes. Left blank, every Start writes a new sweep_<timestamp>.csv in the log directory and the field stays blank; the status line names the file. A typed file that already exists is asked about first (Enter = No)."
    },
    {
     "label": "Start Sweep / Stop / progress bar",
@@ -457,6 +457,30 @@
    {
     "label": "Sync out",
     "what": "Puts a trigger edge on the rear Sync BNC every period — feed it to the scope for stable triggering."
+   },
+   {
+    "label": "Stepped sweep: Channel / Waveform / Duty (%)",
+    "what": "The channel the sweep steps, SINE or SQUARE, and the duty cycle (SQUARE only). The sweep runs only with that channel's Load at High-Z and Polarity at NOR (Advanced mode); any other setting is refused, because the volts it checks and states assume them. Through the Trek, 1 V = 1 kV at the DEA."
+   },
+   {
+    "label": "Frequency axis / Amplitude axis",
+    "what": "Each is a Range (start, stop, points, linear or log) or a List, as on the LCR sweep. Frequencies must be above 0 Hz and amplitudes above 0 Vpp."
+   },
+   {
+    "label": "0 V to Vpp (offset = Vpp/2) / Offset (V)",
+    "what": "Ticked (the default), every point's offset is half its amplitude, so the output runs from 0 V to that point's Vpp. Unticked, every point uses the fixed Offset. A sweep that would pass ±10 V (the 4055B's High-Z limit) is refused. On the SLDEA bench the Trek inverts (V_Out reads opposite to the control), so there the HV runs from 0 to minus Vpp kV."
+   },
+   {
+    "label": "Order / Dwell (s)",
+    "what": "Vpp outer, Freq inner (the default) holds each amplitude across every frequency; with the amplitudes in rising order (the default range) the levels only rise and the highest comes last. Dwell is how long each point is held, counted from its writes. Between points the generator changes the frequency first, then the amplitude and offset in the order that keeps the waveform inside the band of the two points, so a 0 V to Vpp sweep never dips below 0 V."
+   },
+   {
+    "label": "Output CSV",
+    "what": "One row per point: the time, the asked frequency, amplitude and offset, the lowest and highest volts, what the generator read back, and whether that matches. Left blank, every Start writes a new <log dir>/sg_sweep_<timestamp>.csv and the field stays blank; the status line names the file. A typed file that already exists is asked about before the sweep's question (Enter = No). A read-back that differs is marked no and the sweep goes on, unless its levels leave the lowest-to-highest band the question named (by more than 10 mV), which stops the sweep. A read-back that cannot be read, or answers for another query, stops it too."
+   },
+   {
+    "label": "Start Sweep / Stop Sweep",
+    "what": "Start Sweep asks once (Enter = No) and names the channel, the lowest and highest volts, the load and the polarity. The sweep switches the channel OFF, sets point 1 and reads it back, switches it ON only if the read-back matches, steps through every point, and switches it OFF at the end, on Stop Sweep, on that channel's Output button, or on any error. It then reads the output back; if it cannot confirm OFF it says so in a box: switch the output off on the front panel. While it runs, that channel's Apply, Output, Fire and arb upload, the generator's Reconnect, Restart now and Update Software are refused, and an SLDEA run on that channel will not start, DRY or LIVE. The other way round, a sweep will not start on the channel a running SLDEA run is set to, DRY or LIVE. The other channel stays usable."
    },
    {
     "label": "Save Preset / Load Preset / Delete Preset",

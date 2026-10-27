@@ -86,6 +86,70 @@ def test_output_dict():
     assert d == {'state': False, 'load': '50', 'polarity': 'INVT'}
 
 
+def test_check_echo_passes_a_reply_that_is_its_own():
+    """The Signal Gen sweep (#65) reads back with check_echo=True: a reply
+    whose head is this query's own echo parses as before."""
+    sg = FakeSG(bswv='C2:BSWV WVTP,SINE,FRQ,100HZ,AMP,2V,OFST,1V')
+    d = sg.get_basic_wave_dict(2, check_echo=True)
+    assert (d['FRQ'], d['AMP'], d['OFST']) == (100.0, 2.0, 1.0), d
+    sg = FakeSG(bswv='c1:bswv WVTP,SINE,FRQ,5HZ')    # case does not matter
+    assert sg.get_basic_wave_dict(1, check_echo=True)['FRQ'] == 5.0
+    sg = FakeSG(outp='C1:OUTP OFF,LOAD,HZ,PLRT,NOR')
+    assert sg.get_output_dict(1, check_echo=True) == {
+        'state': False, 'load': 'HZ', 'polarity': 'NOR'}
+    sg = FakeSG(outp='C2:OUTP ON')
+    assert sg.get_output_dict(2, check_echo=True)['state'] is True
+    assert BK4055B._check_echo('C1:BSWV WVTP,SINE', 1, 'BSWV') is None
+    assert BK4055B._check_echo('C2:OUTP OFF', 2, 'OUTP') is None
+
+
+def _refused(call, *args):
+    try:
+        got = call(*args, check_echo=True)
+    except ValueError as e:
+        assert 'not its own' in str(e), e
+        return str(e)
+    raise AssertionError(f"accepted a reply that is not its own: {got}")
+
+
+def test_check_echo_refuses_another_channel_another_query_or_no_header():
+    """A reply left over from an earlier query (another channel's, or an
+    OUTP? answer to a BSWV?) must not be parsed as this one's."""
+    for raw in ('C1:BSWV WVTP,SINE,FRQ,100HZ',       # another channel
+                'C12:BSWV WVTP,SINE',                # not channel 2 either
+                'C2:OUTP ON,LOAD,HZ,PLRT,NOR',       # another query
+                'C2:BSWVX WVTP,SINE',
+                'WVTP,RAMP,FRQ,50HZ,AMP,1V',         # no header at all
+                ''):
+        msg = _refused(FakeSG(bswv=raw).get_basic_wave_dict, 2)
+        assert 'C2:BSWV?' in msg, msg
+    for raw in ('C2:OUTP ON,LOAD,HZ', 'C1:BSWV WVTP,SINE,FRQ,100HZ',
+                'ON,LOAD,HZ,PLRT,NOR', 'ON', ''):
+        msg = _refused(FakeSG(outp=raw).get_output_dict, 1)
+        assert 'C1:OUTP?' in msg, msg
+    for raw, ch, kind in (('C2:BSWV X', 1, 'BSWV'), ('C1:OUTP ON', 1, 'BSWV'),
+                          ('OFF', 1, 'OUTP')):
+        try:
+            BK4055B._check_echo(raw, ch, kind)
+        except ValueError:
+            continue
+        raise AssertionError(f"_check_echo passed {raw!r} for C{ch}:{kind}")
+
+
+def test_without_check_echo_the_parse_stays_tolerant():
+    """Every other caller keeps the old parse, header or not."""
+    for kw in ({}, {'check_echo': False}):
+        sg = FakeSG(bswv='C1:BSWV WVTP,SINE,FRQ,100HZ,AMP,2V')
+        assert sg.get_basic_wave_dict(2, **kw)['FRQ'] == 100.0
+        sg = FakeSG(bswv='WVTP,RAMP,FRQ,50HZ,AMP,1V,SYM,50')
+        assert sg.get_basic_wave_dict(1, **kw)['SYM'] == 50.0
+        sg = FakeSG(outp='C2:OUTP ON,LOAD,50,PLRT,INVT')
+        assert sg.get_output_dict(1, **kw) == {
+            'state': True, 'load': '50', 'polarity': 'INVT'}
+        sg = FakeSG(outp='OFF')
+        assert sg.get_output_dict(1, **kw)['state'] is False
+
+
 def test_set_basic_wave_number_formatting():
     # Bench-found bug (2026-06-11): 'DUTY,50.0' lands as 5% duty on the
     # 4055B. Floats must be sent without a trailing '.0' and without
@@ -165,6 +229,66 @@ def test_upload_arb_defaults_to_short_buffer():
     sg.upload_arb(1, 'short', [0.0, 1.0, 0.0, -1.0] * 1000)
     payload = sg.sent_raw[0].split(b'WAVEDATA,', 1)[1]
     assert len(payload) == BK4055B.ARB_DEFAULT_POINTS * 2
+
+
+class _TimeoutInst:
+    """The VISA session's timeout, logged as (op, value, lock held?): the
+    upload must save, raise and restore it holding the SG's I/O lock,
+    which _drain() holds while it has the timeout at 60 ms."""
+
+    def __init__(self, sg, timeout):
+        self._sg, self._timeout, self.log = sg, timeout, []
+
+    def _owned(self):
+        lock = self._sg.__dict__.get('_io_rlock')
+        return lock is not None and lock._is_owned()
+
+    @property
+    def timeout(self):
+        self.log.append(('get', self._timeout, self._owned()))
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        self.log.append(('set', value, self._owned()))
+        self._timeout = value
+
+
+class _UploadSG(FakeSG):
+    """FakeSG whose write_raw notes the timeout and the lock, and can
+    fail the way a dropped LAN link does."""
+
+    def __init__(self, timeout=2000, fail=False):
+        super().__init__()
+        self.inst = _TimeoutInst(self, timeout)
+        self.fail = fail
+        self.during = None
+
+    def write_raw(self, data):
+        self.during = (self.inst._timeout, self.inst._owned())
+        if self.fail:
+            raise OSError('VI_ERROR_CONN_LOST')
+        self.sent_raw.append(data)
+
+
+def test_upload_arb_restores_the_timeout_under_the_lock():
+    for fail in (False, True):
+        sg = _UploadSG(timeout=2000, fail=fail)
+        try:
+            sg.upload_arb(1, 'w', [0.0, 1.0, 0.0, -1.0] * 8, points=32)
+        except OSError:
+            assert fail, "raised without a failure"
+        else:
+            assert not fail, "a failed write_raw was swallowed"
+        assert sg.during == (20000, True), sg.during
+        assert sg.inst._timeout == 2000, sg.inst.log
+        assert sg.inst.log == [('get', 2000, True), ('set', 20000, True),
+                               ('set', 2000, True)], sg.inst.log
+        assert not sg.inst._owned(), "the upload left the lock held"
+    # a longer timeout is kept, not shortened
+    sg = _UploadSG(timeout=30000)
+    sg.upload_arb(1, 'w', [0.0, 1.0] * 16, points=32)
+    assert sg.during == (30000, True) and sg.inst._timeout == 30000
 
 
 def test_select_arb_and_arwv_parse():

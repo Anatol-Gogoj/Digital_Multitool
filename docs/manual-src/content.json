@@ -50,7 +50,7 @@
    },
    {
     "label": "Tools > Update Software…",
-    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only), which reopens the app on the new version. The first start after an update takes about half a minute while this PC's copy is refreshed. Neither starts while an SLDEA run is going."
+    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only), which reopens the app on the new version. The first start after an update takes about half a minute while this PC's copy is refreshed. Neither starts while an SLDEA run is going or a Signal Gen sweep owns a channel."
    },
    {
     "label": "Shared preset storage",
@@ -75,7 +75,7 @@
    "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
-   "Update Software… and its Restart now both refuse while an SLDEA run is going — LIVE, DRY, or still stopping after ■ Abort. A restart replaces the app at once, so it would end a LIVE run before the run could set the signal generator back to 0 V, leaving the Trek energized. ■ Abort the run, or let it finish, then update.",
+   "Update Software… and its Restart now both refuse while an SLDEA run is going — LIVE, DRY, or still stopping after ■ Abort — and while a Signal Gen sweep owns a channel. A restart replaces the app at once, so it would end a LIVE run before the run could set the signal generator back to 0 V, leaving the Trek energized, and a sweep before it switched its channel OFF. ■ Abort the run or stop the sweep, or let it finish, then update.",
    "Restart now is not a shutdown: unlike closing the window, it leaves signal-generator outputs and LCR bias exactly as they are.",
    "After an update, Restart now closes the app for about half a minute while this PC's copy is refreshed from the shared drive. Outputs left on stay on meanwhile, and if the new version fails to start the app does not come back by itself — switch outputs off first if they must not be left unattended. Close any Edge Review, tuner or plot window before restarting: the refresh replaces the files they run from.",
    "On Windows the connection lines show 'Linux bench only — view/edit (presets OK)' and Update Software… is greyed out — this is normal; presets and bench profiles can still be prepared and shared."
@@ -148,7 +148,7 @@
    },
    {
     "label": "Frequency (Hz)",
-    "what": "AC test frequency, 100 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics. Use 10 kHz and up for high-frequency parts."
+    "what": "AC test frequency, 20 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics. Use 10 kHz and up for high-frequency parts."
    },
    {
     "label": "Voltage (V)",
@@ -196,7 +196,7 @@
    },
    {
     "label": "Start Sweep / Stop / progress bar",
-    "what": "Runs the sweep in the background with live progress; Stop finishes the current sample and keeps everything written so far."
+    "what": "Runs the sweep in the background with live progress; Stop finishes the current sample and keeps everything written so far. While it runs, Apply Configuration, Single Measurement and the corrections are refused. A reading that is not three numbers is asked for once more; a second bad one stops the sweep and quotes the meter's reply."
    }
   ],
   "workflow": [
@@ -209,7 +209,7 @@
    "7. For curves: set the sweep axes and click Start Sweep — results go to CSV."
   ],
   "cautions": [
-   "Apply stops with a Configuration Error at an AC level outside 0.01 to 2.0 V or a frequency outside 100 Hz to 500 kHz. What it sent before the bad value (the mode, and for a bad level the frequency) has already reached the meter, so fix the value and Apply again.",
+   "Apply stops with a Configuration Error at an AC level outside 0.01 to 2.0 V or a frequency outside 20 Hz to 500 kHz. What it sent before the bad value (the mode, and for a bad level the frequency) has already reached the meter, so fix the value and Apply again.",
    "Nothing reaches the meter until Apply Configuration; the Primary/Secondary readouts are labeled by the last APPLIED mode, not whatever the dropdown currently shows.",
    "A sweep switches the meter to the dropdown's mode and leaves frequency/voltage at the last sweep point — re-Apply your configuration before trusting spot readings afterwards.",
    "DC bias stays on until you untick Bias ON and click Apply — do not leave bias across a bias-sensitive part.",
@@ -480,7 +480,7 @@
    },
    {
     "label": "Start Sweep / Stop Sweep",
-    "what": "Start Sweep asks once (Enter = No) and names the channel, the lowest and highest volts, the load and the polarity. The sweep switches the channel OFF, sets point 1 and reads it back, switches it ON only if the read-back matches, steps through every point, and switches it OFF at the end, on Stop Sweep, on that channel's Output button, or on any error. It then reads the output back; if it cannot confirm OFF it says so in a box: switch the output off on the front panel. While it runs, that channel's Apply, Output, Fire and arb upload, the generator's Reconnect, Restart now and Update Software are refused, and an SLDEA run on that channel will not start, DRY or LIVE. The other way round, a sweep will not start on the channel a running SLDEA run is set to, DRY or LIVE. The other channel stays usable."
+    "what": "Start Sweep asks once (Enter = No) and names the channel, the lowest and highest volts, the load and the polarity. The sweep switches the channel OFF, sets point 1 and reads it back, switches it ON only if the read-back matches, steps through every point, and switches it OFF at the end, on Stop Sweep, on that channel's Output button, or on any error. It then reads the output back; if it cannot confirm OFF it says so in a box: switch the output off on the front panel. While it runs, that channel's Apply, Fire and arb upload and a Webcam stepped capture or timed-capture trigger on it are refused, as are the generator's Reconnect, Restart now and Update Software, and an SLDEA run on that channel will not start, DRY or LIVE. The other way round, a sweep will not start on the channel a running SLDEA run is set to, DRY or LIVE. The other channel stays usable."
    },
    {
     "label": "Save Preset / Load Preset / Delete Preset",

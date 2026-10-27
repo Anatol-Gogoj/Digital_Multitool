@@ -6,6 +6,121 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.8 (2026-10-27, pre-release)
+
+**TL;DR:** The Signal Gen tab can step one channel through a frequency ×
+amplitude sweep, 0 V to Vpp by default, with every point read back into a
+CSV, and a new Set to Vpp/2 button fills DC Offset for a 0 V to Vpp drive.
+The LCR sweep checks every reading and realigns the meter before it starts,
+the LCR takes 20 Hz, and neither sweep overwrites an earlier CSV any more.
+None of this is bench-checked (the checks are in #369), and the Signal Gen
+sweep sends the 4055B a read drain it has never had from this app, so
+BENCH_TEST §T step 3 must pass before anyone sweeps with the Trek connected.
+
+### Signal Gen tab
+
+- **Stepped sweep, frequency × amplitude** (#500). A new section between
+  the channel tabs and Presets steps one channel, SINE or SQUARE, through a
+  frequency axis and an amplitude axis (each a range or a list, as on the
+  LCR sweep), with a dwell per point. "0 V to Vpp (offset = Vpp/2)" is
+  ticked by default, so every point's offset is half its amplitude;
+  unticked, a fixed Offset is used. Each CSV row holds what was asked and
+  what the generator read back, and whether they match.
+- **What a sweep refuses and checks.** It runs only with the channel's Load
+  at High-Z and Polarity at NOR, refuses any point beyond ±10 V (the
+  4055B's High-Z limit), and asks once (default No), naming the channel,
+  the lowest and highest volts and "1 V = 1 kV". It switches the channel
+  OFF, sets point 1 and reads it back, and switches it ON only on a match.
+  Between points the frequency changes first, then the amplitude and offset
+  in the order that keeps a 0 V to Vpp drive from dipping below 0 V. A
+  read-back that differs is marked `no` (there is no frequency cap, so a
+  generator clamp shows there); one more than 10 mV outside the band the
+  question named, or one that cannot be read or answers for another query,
+  stops the sweep. On the SLDEA bench the Trek inverts, so the HV there runs
+  from 0 to minus Vpp kV.
+- **OFF is believed only when the generator reads it back.** The sweep
+  switches the channel OFF at the end, on Stop Sweep, on that channel's
+  Output button and on any error, then reads the output state. If it cannot
+  confirm OFF, an "SG CHn NOT SWITCHED OFF" box says to switch it off on
+  the front panel, and the Output button stays red.
+- **The swept channel is locked while the sweep owns it.** Apply, Fire,
+  the Waveform Editor's upload, preset and profile loads, the Webcam
+  stepped capture and the timed capture's trigger are refused on it; its
+  Output button means Stop. Reconnect, Restart now and Update Software are
+  refused while any sweep runs. An SLDEA run, DRY or LIVE, will not start
+  on the swept channel, and a sweep will not start on the channel a running
+  SLDEA run is set to. The other channel stays usable.
+- **An arb upload to the other channel stretches a point's dwell.** The
+  upload holds the generator's I/O lock for its whole transfer (as before
+  this release), so the sweep's next point waits for it and that point is
+  held longer than its dwell.
+- **The read drain is bench-unverified instrument I/O.** At its start,
+  before every point's read-back, before the final output read and before
+  the panel read-back at the end, the sweep drains stale replies from the
+  4055B (`VisaInstrument._drain`: up to 20 reads with a 60 ms timeout, until
+  nothing comes). This app had only ever
+  done that to the LCR meter, and the 4055B has wedged over USB on unusual
+  traffic before (a wedged box takes writes into the void until a front
+  panel power cycle). BENCH_TEST §T step 3 checks it over USB with three
+  back-to-back sweeps, and must pass before anyone sweeps with the Trek
+  connected.
+- **A new CSV at every Start** (#500). With Output CSV blank, every Start
+  writes a new `sg_sweep_<timestamp>.csv` in the log folder, names it in the
+  status line and leaves the field blank. A typed file that already exists
+  is asked about (default No) before the sweep's question.
+- **Set to Vpp/2** (#499), beside DC Offset wherever Amplitude shows (not
+  for DC), fills DC Offset with half the amplitude, so the waveform runs
+  from 0 V to Vpp. It sends nothing; Apply sends it like a typed value. The
+  Signal Gen Usage Tips were tightened to fit it, with every safety line
+  unchanged.
+
+### LCR tab
+
+- **The sweep checks every reading** (#497). A reply to `:FETC?` that is
+  not three numbers is now drained and asked for once more, and a second
+  bad one stops the sweep with the meter's reply quoted. Before, a sweep
+  stopped on its first sample with "not enough values to unpack (expected 3,
+  got 1)", and when the meter had fallen one reply behind with a reading as
+  the stale reply, every later sample was the previous one's reading,
+  silently.
+- **The sweep realigns before it starts and holds the meter** (#497). It
+  drains the meter's input once before its first sample, and from Start to
+  its last sample Apply Configuration, Single Measurement, the config sync
+  and the corrections are refused. A Start while the meter is busy starts
+  nothing. No new SCPI: the LCR meter already had this drain.
+- **20 Hz to 500 kHz** (#497), the 894's specified range, for Apply and the
+  sweep's frequency axis; the floor was 100 Hz.
+- **A new CSV at every Start** (#500). The sweep wrote its made-up file name
+  back into Output CSV, so the next Start overwrote the first sweep's file.
+  A blank field now gets a new `sweep_<timestamp>.csv` at every Start and
+  stays blank, and a typed file that already exists is asked about first
+  (default No), before the live readout is stopped, so No changes nothing.
+  A log folder that cannot be made is now said in a box.
+
+### Manual
+
+Rebuilt for this release, the first rebuild since v1.4.6, so it also
+carries v1.4.7's Usage Tips text, area plot and diagnostic figures and the
+page-flow fixes of #491. The Signal Gen chapter covers the sweep and Set to
+Vpp/2, the LCR chapter says 20 Hz (below 100 Hz not bench-checked yet), and
+the LCR caution on a bad value says what Apply had already sent (#490's
+wording, hidden until now by an older override). Part II no longer says the
+watchdog reads the current at exactly 2 Hz: 0.5 s is a gate, and LIVE runs
+record a 0.56 s median tick (#424, corrected in `SLDEA_DECISIONS.md` on
+2026-10-08 but not in the manual).
+
+### Tests
+
+New suites for the Signal Gen sweep (69 tests), the LCR reply check,
+realign and CSV path (17) and Set to Vpp/2 (6).
+
+### Not bench-checked
+
+The lines are in #369, section 2: BENCH_TEST §T for the Signal Gen sweep
+and Set to Vpp/2, starting with the read drain in step 3 (Trek HV off);
+the LCR sweep after a desync-prone step and the 20 Hz floor (#497); and
+the LCR sweep's new CSV at every Start.
+
 ## v1.4.7 (2026-10-21, pre-release)
 
 **TL;DR:** A window close during a LIVE run can no longer let the run's own

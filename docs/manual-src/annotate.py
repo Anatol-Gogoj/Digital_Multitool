@@ -158,7 +158,7 @@ S["tab_lcr"] = {
     "callouts": [
         {"match": "Mode:", "with_field": True, "label": "Measurement pair — CPD = capacitance + dissipation"},
         {"union": ["Frequency (Hz):", "Voltage (V):"], "extend_right": 160,
-         "label": "AC test signal — meter clamps at 2.0 V and 500 kHz"},
+         "label": "AC test signal — 20 Hz–500 kHz, 0.01–2.0 V; outside, Apply stops"},
         {"union": ["Open Correction...", "Short Correction..."],
          "label": "Fixture zeroing — redo both after changing fixture or leads"},
         {"match": "Apply Configuration", "label": "Nothing reaches the meter until you click this"},
@@ -192,12 +192,24 @@ S["tab_siggen"] = {
     "callouts": [
         {"match": "Waveform:", "extend_right": 150, "badge_side": "right",
          "label": "Waveform type — the fields below adapt to it"},
+        {"match": "Set to Vpp/2", "label": "Offset = half the amplitude: the drive runs 0 V to Vpp"},
         {"match": "Preview (~3 periods)", "label": "Drawing of your typed settings — not a measurement"},
         {"match": "Apply CH1 Settings", "label": "Pushes settings; never switches the output"},
         {"match": "Read Instrument", "label": "Pull the front-panel state back into the fields"},
         {"match": "Output: OFF", "label": "The real output switch — asks first, red while ON"},
         {"union": ["Burst", "Fire"], "label": "Burst mode — exactly N cycles per trigger; Fire sends one"},
-        {"match": "Presets", "label": "Named presets store both channels; files travel by USB"},
+        # v1.4.8 (#65): the tab is 52 px taller than the 1000 px capture
+        # window, so capture.py also takes tab_siggen_bottom; it adds only
+        # Show Usage Tips, so the manual does not show it and every
+        # callout is here.
+        {"match": "Stepped sweep (frequency × amplitude)",
+         "label": "Stepped sweep — one channel through frequency × amplitude"},
+        {"match": "0 V to Vpp (offset = Vpp/2)", "label": "Every point runs 0 V to its Vpp (the default)"},
+        {"match": "Start Sweep", "label": "Asks once; OFF at the end, on Stop and on any error"},
+        # Inside the frame, right of Delete Preset: placed automatically it
+        # fell on the status bar's text below the frame (v1.4.8 build).
+        {"match": "Presets", "badge_at": [600, 876],
+         "label": "Named presets store both channels; files travel by USB"},
         {"match": "Advanced mode", "label": "Reveals phase, pulse edges, load and polarity"},
     ],
 }

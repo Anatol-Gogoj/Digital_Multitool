@@ -3,6 +3,9 @@ venv/
 __pycache__/
 *.pyc
 logs/
+# The Signal Gen tab's stepped sweep (#65) writes one CSV per sweep, into
+# logs/ by default but anywhere the operator browses to: bench data.
+sg_sweep_*.csv
 presets/
 *.code-workspace
 # run_tests.py drops each failing suite's full output here, overwritten

@@ -788,7 +788,7 @@ class BK4055B(VisaInstrument):
         """Raw query of the current basic-wave settings on a channel."""
         return self.ask(f'C{channel}:BSWV?')
 
-    def get_basic_wave_dict(self, channel):
+    def get_basic_wave_dict(self, channel, check_echo=False):
         """Parse the current basic-wave settings into a dict.
 
         The instrument echoes e.g.
@@ -797,8 +797,12 @@ class BK4055B(VisaInstrument):
         KEY,VALUE pairs; numeric values (see _BSWV_NUMERIC) are converted to
         float with their unit suffix removed. WVTP and unknown keys are kept as
         raw strings. Tolerant of the variable, wave-type-dependent key list.
+        check_echo: raise unless the reply is this channel's BSWV echo (see
+        _check_echo).
         """
         raw = self.get_basic_wave(channel)
+        if check_echo:
+            self._check_echo(raw, channel, 'BSWV')
         body = raw.split(' ', 1)[1] if ' ' in raw else raw
         tokens = [t for t in body.split(',') if t != '']
         out = {}
@@ -807,13 +811,29 @@ class BK4055B(VisaInstrument):
             out[key] = self._strip_unit(value) if key in self._BSWV_NUMERIC else value
         return out
 
-    def get_output_dict(self, channel):
+    @staticmethod
+    def _check_echo(raw, channel, kind):
+        """Raise ValueError unless `raw` starts with this query's own echo,
+        'C<channel>:<kind> '. A reply left over from an earlier query that
+        timed out (another channel's, or an OUTP? answer to a BSWV?) would
+        otherwise be parsed as this one's, and every later read would be
+        one reply behind (the #495 class on the LCR). The Signal Gen sweep
+        asks for it (#65); other callers keep the tolerant parse."""
+        head = raw.split(' ', 1)[0].strip().upper()
+        if head != f'C{channel}:{kind}':
+            raise ValueError(f"C{channel}:{kind}? got a reply that is not "
+                             f"its own: {raw[:48]!r}")
+
+    def get_output_dict(self, channel, check_echo=False):
         """Parse output state into {'state': bool, 'load': str, 'polarity': str}.
 
         The instrument echoes e.g. 'C1:OUTP ON,LOAD,HZ,PLRT,NOR'. Load is kept
-        as a string ('HZ' or a numeric ohm value like '50').
+        as a string ('HZ' or a numeric ohm value like '50'). check_echo: see
+        _check_echo.
         """
         raw = self.ask(f'C{channel}:OUTP?')
+        if check_echo:
+            self._check_echo(raw, channel, 'OUTP')
         body = raw.split(' ', 1)[1] if ' ' in raw else raw
         tokens = [t for t in body.split(',') if t != '']
         state = tokens[0].upper() == 'ON' if tokens else False
@@ -1009,12 +1029,17 @@ class BK4055B(VisaInstrument):
                                       freq_hz=freq_hz, amp_vpp=amp_vpp,
                                       offset_v=offset_v, phase_deg=phase_deg)
         # Give the box headroom to finish storing before the next command.
-        old_to = self.inst.timeout
-        self.inst.timeout = max(old_to or 0, 20000)
-        try:
-            self.write_raw(blob)
-        finally:
-            self.inst.timeout = old_to
+        # Saved, set and restored under the I/O lock: _drain() sets the
+        # session timeout to 60 ms while it holds the lock, and an upload
+        # that saved that value would restore it and leave every later
+        # query on the session failing (review of #65, 2026-10-27).
+        with _io_lock(self):
+            old_to = self.inst.timeout
+            self.inst.timeout = max(old_to or 0, 20000)
+            try:
+                self.write_raw(blob)
+            finally:
+                self.inst.timeout = old_to
         return clean
 
     def set_sample_rate(self, channel, mode=None, value=None):

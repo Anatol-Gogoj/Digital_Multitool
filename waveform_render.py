@@ -112,3 +112,22 @@ def scale_waveform(unit_samples, amp_vpp, offset_v):
     """Map unit samples to volts: y * (Vpp / 2) + offset."""
     half = amp_vpp / 2.0
     return [y * half + offset_v for y in unit_samples]
+
+
+def unipolar_offset(amp_vpp):
+    """DC offset (V) that keeps a waveform of `amp_vpp` peak to peak at or
+    above 0 V: half the amplitude, so it runs from 0 V to amp_vpp (#498).
+
+    Every periodic waveform spans offset +/- amp_vpp / 2 (the mapping
+    scale_waveform draws; an ARB uses at most that span), so one number
+    serves SINE, SQUARE, RAMP, PULSE and ARB alike. A DEA wants it: a drive
+    that crosses 0 V squeezes the film on both half-cycles, so it actuates
+    at twice the drive frequency.
+
+    Raises ValueError for an amplitude that is negative or not finite.
+    """
+    amp = float(amp_vpp)
+    if not math.isfinite(amp) or amp < 0:
+        raise ValueError(f"amplitude must be a finite number of volts >= 0, "
+                         f"got {amp_vpp!r}")
+    return amp / 2.0

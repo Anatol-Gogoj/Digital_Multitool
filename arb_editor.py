@@ -811,6 +811,9 @@ class ArbWaveformEditor(tk.Toplevel):
         # is ramping waits for it (SLDEA_HANDOFF.md, 2026-09-24).
         if app._sg_live_locked(ch, parent=self):
             return
+        # The Signal Gen tab's sweep owns its channel the same way (#65)
+        if app._sg_sweep_locked(ch, parent=self):
+            return
         if not app.sg:
             messagebox.showerror("Upload", "Signal generator not connected", parent=self)
             return

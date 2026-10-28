@@ -29,6 +29,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from tkinter import font as tkfont
 import csv
+import math
 import os
 import queue
 import re
@@ -64,7 +65,7 @@ from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
                         show_tips)
 from tk_checkmarks import install_check_marks, mark_classic_checkbutton
 from arb_editor import ArbWaveformEditor
-from waveform_render import unit_waveform, scale_waveform
+from waveform_render import unit_waveform, scale_waveform, unipolar_offset
 from version import version_string
 import webcam
 import threading
@@ -177,6 +178,23 @@ SG_STATE_KEYS = {'freq': 'freq_hz', 'amp': 'amp_vpp', 'offset': 'offset_v',
                  'stdev': 'stdev_v', 'mean': 'mean_v',
                  'duty': 'duty_pct', 'sym': 'sym_pct', 'phase': 'phase_deg',
                  'rise': 'rise_s', 'fall': 'fall_s', 'delay': 'delay_s'}
+
+# Signal Gen stepped sweep (#65): the waveforms it offers, the 4055B's
+# output limit into High-Z that every point is checked against before the
+# start (+/-10 V, i.e. 20 Vpp: the cap the Waveform Editor enforces), and
+# the columns of its CSV, one row per point.
+SG_SWEEP_WAVES = ('SINE', 'SQUARE')
+SG_MAX_V_HIGHZ = 10.0
+SG_SWEEP_MAX_POINTS = 10000     # per axis and in all: a sanity cap only
+# A read-back whose band leaves the approved lowest..highest by more than
+# this stops the sweep (10 mV here is 10 V at the DEA through the Trek). It
+# covers the box's own rounding of what it echoes, not a different level.
+SG_SWEEP_BAND_SLACK_V = 0.01
+SG_SWEEP_CSV_HEADER = (
+    'Timestamp', 'Point', 'Channel', 'Waveform', 'Duty (%)',
+    'Frequency (Hz)', 'Amplitude (Vpp)', 'Offset (V)', 'Min (V)', 'Max (V)',
+    'Read-back Frequency (Hz)', 'Read-back Amplitude (Vpp)',
+    'Read-back Offset (V)', 'Read-back matches')
 
 # Arbitrary waveforms are back on: the editor exports a flash-drive .bin
 # that the 4055B recalls from its FRONT USB port, so no waveform data has to
@@ -631,6 +649,37 @@ def sldea_share_mount():
     return output_folder.share_mount(InstrumentControlGUI.SLDEA_SHARE_DIR)
 
 
+def new_csv_path(folder, prefix):
+    """A sweep's CSV path when its Output CSV field is blank: a new
+    `<prefix>_<YYYYMMDD_HHMMSS>.csv` in `folder` (made if missing) that
+    does not exist yet, so two Starts in the same second still write two
+    files (`_2`, `_3`, ... after the second one). The caller never writes
+    it back into the field, so the next Start makes a new one again."""
+    os.makedirs(folder, exist_ok=True)
+    stem = os.path.join(
+        folder, f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    path, n = f"{stem}.csv", 2
+    while os.path.exists(path):
+        path, n = f"{stem}_{n}.csv", n + 1
+    return path
+
+
+CSV_OVERWRITE_Q = "Overwrite CSV"
+
+
+def csv_overwrite_ok(path):
+    """True when a sweep may write the CSV path typed in its field: the
+    path does not exist yet, or the operator answers Yes to overwriting
+    it (Enter = No). Asked on the Tk thread before anything is claimed.
+    Browse... needs none of this: its save dialog asks by itself."""
+    if not os.path.exists(path):
+        return True
+    return messagebox.askyesno(
+        CSV_OVERWRITE_Q,
+        f"This file already exists:\n{path}\n\nOverwrite it with this "
+        f"sweep's rows?", default='no')
+
+
 def _lan_reachable(resource, timeout=2.0):
     """Quick TCP liveness probe of a TCPIP VISA resource's host, so a missing
     box/cable falls back to USB fast instead of waiting out a long VISA open
@@ -908,6 +957,16 @@ class InstrumentControlGUI:
         self.sweep_thread = None
         self.sweep_queue = queue.Queue()
 
+        # Signal Gen stepped sweep (#65): its own worker and queue, like the
+        # LCR sweep's. `_sg_sweep_ch` is the channel it owns, from Start
+        # until its last event is drained -- after Stop too, while the
+        # worker finishes its write and switches the output off.
+        self.sg_sweeping = False
+        self._sg_sweep_gen = None
+        self._sg_sweep_ch = None
+        self.sg_sweep_thread = None
+        self.sg_sweep_queue = queue.Queue()
+
         # Signal-generator state
         self.sg_channel_widgets = {}
         self.sg_presets = SignalGenPresetStore()
@@ -1063,6 +1122,10 @@ class InstrumentControlGUI:
                 stand_down(self)
             except Exception:
                 pass
+        # The Signal Gen tab's sweep (#65) stops at its next check. No wait
+        # is needed: its writes are made holding the SG's I/O lock, which
+        # the outputs-off below takes too, so the OFF lands after any ON.
+        self.sg_sweeping = False
         if getattr(self, '_sldea_running', False):
             self._sldea_stop = True
             for _ in range(30):                     # up to ~3 s
@@ -1537,6 +1600,10 @@ class InstrumentControlGUI:
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
+        # ...and so does the Signal Gen tab's sweep: its worker holds the
+        # handle, and only it switches its channel OFF at the end (#65)
+        if key == 'sg' and self._sg_sweep_locked():
+            return
         # One connect at a time, refused BEFORE the handle or the label is
         # touched. _run_bg's own check comes after the lines below, and it
         # was the only one until review 2026-09-24: with another tab's
@@ -1904,10 +1971,12 @@ class InstrumentControlGUI:
         # it changes (radio click, programmatic set, future load-config, etc.).
         mode_var.trace_add('write', lambda *_a, ax=axis: self._update_sweep_mode_state(ax))
 
-        ttk.Radiobutton(box, text="Range", variable=mode_var, value='range'
-                        ).grid(row=0, column=0, sticky='w')
-        ttk.Radiobutton(box, text="List", variable=mode_var, value='list'
-                        ).grid(row=0, column=1, sticky='w')
+        radios = [ttk.Radiobutton(box, text="Range", variable=mode_var,
+                                  value='range'),
+                  ttk.Radiobutton(box, text="List", variable=mode_var,
+                                  value='list')]
+        radios[0].grid(row=0, column=0, sticky='w')
+        radios[1].grid(row=0, column=1, sticky='w')
 
         ttk.Label(box, text=f"Start ({unit}):").grid(row=1, column=0, sticky='w', pady=2)
         start_entry = ttk.Entry(box, width=12)
@@ -1939,6 +2008,7 @@ class InstrumentControlGUI:
         setattr(self, f'sw_{axis}_list_var', list_var)
         setattr(self, f'sw_{axis}_range_widgets', [start_entry, stop_entry, points_entry, scale_combo])
         setattr(self, f'sw_{axis}_list_widget', list_entry)
+        setattr(self, f'sw_{axis}_radios', radios)
         setattr(self, f'sw_{axis}_start_entry', start_entry)
         setattr(self, f'sw_{axis}_stop_entry', stop_entry)
         setattr(self, f'sw_{axis}_points_entry', points_entry)
@@ -1968,8 +2038,7 @@ class InstrumentControlGUI:
 
     def _default_sweep_path(self):
         log_dir = self.log_dir.get() if hasattr(self, 'log_dir') else './logs'
-        os.makedirs(log_dir, exist_ok=True)
-        return os.path.join(log_dir, f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        return new_csv_path(log_dir, 'sweep')
 
     def _parse_sweep_axis(self, axis, vmin, vmax, name):
         """Return a list[float] for the given axis, validated against [vmin, vmax].
@@ -2012,6 +2081,13 @@ class InstrumentControlGUI:
             return
         if self.sweeping:
             return
+        # A typed file that exists is asked about first, so a No changes
+        # nothing (not even the continuous poll). A blank field gets a new
+        # file at each Start, made just before the claim and never written
+        # back into the field.
+        typed = self.sw_output.get().strip()
+        if typed and not csv_overwrite_ok(typed):
+            return
         # The 200 ms continuous poller shares the LCR session; running both
         # interleaved write/read pairs on one wire (audit 2026-07-25).
         self.lcr_stop_continuous()
@@ -2029,8 +2105,6 @@ class InstrumentControlGUI:
             messagebox.showerror("Invalid sweep parameters", str(e))
             return
 
-        out_path = self.sw_output.get().strip() or self._default_sweep_path()
-        self.sw_output.set(out_path)
         mode = self.lcr_mode.get()
         order = self.sw_order.get()
 
@@ -2055,6 +2129,12 @@ class InstrumentControlGUI:
                 text="LCR still busy (a read, Apply, correction or the "
                      "previous sweep) -- press Start Sweep again in a moment",
                 foreground=uc.TEXT_ALERT)
+            return
+        try:
+            out_path = typed or self._default_sweep_path()
+        except OSError as e:
+            messagebox.showerror("Sweep error", f"Could not make the log "
+                                                f"folder for the CSV: {e}")
             return
         self._bg_busy.add('lcr-io')
         self._sweep_holds_lcr = True
@@ -2251,6 +2331,8 @@ class InstrumentControlGUI:
         # copies onto the shared drive runs save to. See _sldea_run_blocks.
         if self._sldea_run_blocks('update'):
             return
+        if self._sg_sweep_blocks('update'):
+            return
         script = self._find_update_script()
         if not script:
             messagebox.showerror(
@@ -2371,6 +2453,8 @@ class InstrumentControlGUI:
         line from there reloaded the OLD cached code: the update deploys
         to the share."""
         if self._sldea_run_blocks('restart', parent=parent):
+            return
+        if self._sg_sweep_blocks('restart', parent=parent):
             return
         prog, argv = relaunch.restart_command(
             APP_DIR, os.environ, sys.argv, sys.executable)
@@ -2634,6 +2718,9 @@ class InstrumentControlGUI:
             ch_frame = ttk.Frame(config_notebook)
             config_notebook.add(ch_frame, text=f"Channel {ch}")
             self._sg_build_channel_panel(ch_frame, ch)
+
+        # Stepped sweep (#65)
+        self._create_sg_sweep_section(sg_frame)
 
         # Presets
         preset_frame = ttk.LabelFrame(sg_frame, text="Presets", padding=10)
@@ -4647,6 +4734,34 @@ class InstrumentControlGUI:
                 "the Webcam tab. It "
                 "rewrites the camera settings this run is about to lock. "
                 "It finishes by itself, usually within seconds."))
+        # The Signal Gen tab's sweep (#65), on the run's own channel, DRY
+        # runs included: it energizes that channel, so a DRY run beside it
+        # would not be dry. The other channel is allowed, the line the LIVE
+        # lock draws. It owns the channel until its last event is drained,
+        # after its output-off.
+        sweep_ch = getattr(self, '_sg_sweep_ch', None)
+        if sweep_ch is not None and sweep_ch == sgch:
+            if self.sg_sweeping:
+                reasons.append((
+                    f"the Signal Gen tab's sweep is stepping SG CH{sgch}, "
+                    f"the run's channel",
+                    f"The Signal Gen tab's stepped sweep is stepping SG "
+                    f"CH{sgch}, the channel this run "
+                    + ("is set to drive the Trek with. A DRY run started now "
+                       "would not be dry: the sweep energizes that channel."
+                       if dry else
+                       "drives the Trek with. It would overwrite the drive "
+                       "mid-run.")
+                    + f" Press Stop Sweep on the Signal Gen tab first; it "
+                      f"switches CH{sgch} OFF."))
+            else:
+                reasons.append((
+                    f"the Signal Gen tab's sweep on SG CH{sgch} is still "
+                    f"stopping",
+                    f"The Signal Gen tab's stepped sweep on SG CH{sgch}, the "
+                    f"run's channel, is still stopping: it finishes its "
+                    f"write and switches CH{sgch} OFF first. That usually "
+                    f"takes a moment."))
         if not dry and 'sg-io' in self._bg_busy:
             reasons.append((
                 "a Signal Gen tab command is still being sent",
@@ -5068,6 +5183,11 @@ class InstrumentControlGUI:
             # it ends (user decision 2026-07-25: lock the active channel,
             # leave the other usable, loud note on any attempt).
             self._sldea_live_ch = sgch if not dry else None
+            # A DRY run writes no SG channel, but the Signal Gen tab's sweep
+            # must not energize the one it is set to either, or the run
+            # would not be dry (#65, owner 2026-10-27). Only that sweep
+            # reads this; it clears with the run, in _sldea_finished.
+            self._sldea_dry_ch = sgch if dry else None
             self._sldea_sg_dc_ch = None      # the worker sets it (#460)
             # ...and the scope channels its watchdog, telemetry and setup.txt
             # readback depend on, with the settings every channel shares
@@ -5740,6 +5860,7 @@ class InstrumentControlGUI:
     def _sldea_finished(self):
         self._sldea_running = False
         self._sldea_live_ch = None
+        self._sldea_dry_ch = None
         self._sldea_sg_dc_ch = None
         self._sldea_scope_chs = None
         # runs after the worker's final finally-block logs, so the SG
@@ -7982,6 +8103,17 @@ class InstrumentControlGUI:
                 w.pack(side=tk.LEFT, padx=4)
             applied = tk.Label(row, text='--', fg=MUTED, width=14, anchor='w')
             applied.pack(side=tk.LEFT, padx=4)
+            if key == 'offset':
+                # Offset = Vpp/2 (#498): packed before the readout, and
+                # shown or hidden with the waveform by _sg_update_visibility
+                half = add_tooltip(
+                    ttk.Button(row, text="Set to Vpp/2",
+                               command=lambda c=ch: self.sg_offset_half_vpp(c)),
+                    "Set DC Offset to half the Amplitude, so the waveform "
+                    "runs from 0 V to Vpp and never goes below 0 V. Fills "
+                    "the field only: Apply sends it.")
+                half.pack(side=tk.LEFT, padx=4, before=applied)
+                widgets['offset_half'] = half
             if key in SG_FIELD_TOOLTIPS:
                 add_tooltip(w, SG_FIELD_TOOLTIPS[key])
             widgets[key] = w
@@ -8087,6 +8219,37 @@ class InstrumentControlGUI:
             if key in SG_ADVANCED_FIELDS and not advanced:
                 continue
             widgets['rows'][key].pack(fill='x', pady=2)
+        # Set to Vpp/2 needs an amplitude: shown wherever Amplitude is, so
+        # not for DC (its offset row shows alone)
+        half = widgets.get('offset_half')
+        if half is not None:
+            if wave in SG_FIELD_WAVEFORMS['amp']:
+                half.pack(side=tk.LEFT, padx=4,
+                          before=widgets['applied']['offset'])
+            else:
+                half.pack_forget()
+
+    def sg_offset_half_vpp(self, ch):
+        """Set to Vpp/2 (#498): fill DC Offset with half the Amplitude, so
+        the waveform runs from 0 V to Vpp. It edits the field only and
+        sends nothing; Apply sends it like a typed value, so the LIVE-run
+        lock and the Apply-then-Output rule are untouched."""
+        widgets = self.sg_channel_widgets[ch]
+        text = widgets['amp'].get()
+        try:
+            offset = unipolar_offset(text)
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Set to Vpp/2",
+                f"CH{ch} Amplitude must be a number of volts, 0 or more, to "
+                f"halve. It reads {str(text).strip() or '(blank)'!r}.")
+            return
+        self._set_entry(widgets['offset'], f'{offset:.12g}')
+        self._sg_redraw_preview(ch)
+        self.status_bar.config(
+            text=f"CH{ch} DC Offset set to {offset:.12g} V: the waveform "
+                 f"runs 0 V to {2 * offset:.12g} V. Press Apply CH{ch} "
+                 f"Settings to send it.")
 
     def _sg_get_float(self, ch, key, default):
         """Float value of a channel entry, or default if unparsable."""
@@ -8319,6 +8482,10 @@ class InstrumentControlGUI:
             if _then:
                 _then()          # keep preset chains moving past the lock
             return
+        if self._sg_sweep_locked(channel):
+            if _then:
+                _then()
+            return
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             if _then:
@@ -8402,6 +8569,8 @@ class InstrumentControlGUI:
         # LIVE run owns its channel (2026-09-24: Fire used to skip the lock).
         if self._sg_live_locked(channel):
             return
+        if self._sg_sweep_locked(channel):
+            return
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             return
@@ -8415,6 +8584,10 @@ class InstrumentControlGUI:
             messagebox.showerror("Error", "Signal generator not connected")
             return
         if self._sg_live_locked(channel):
+            return
+        # The sweep's channel: this click means Stop, and the sweep's
+        # worker switches the output OFF (#65)
+        if self._sg_sweep_locked(channel, stop=True):
             return
         widgets = self.sg_channel_widgets[channel]
         new_state = not widgets['output'].get()
@@ -8446,6 +8619,764 @@ class InstrumentControlGUI:
 
         self._run_bg(lambda: self.sg.set_output(channel, new_state), done,
                      busy='sg-io')
+
+    # ---- Signal Gen stepped sweep (#65) ------------------------------------
+    # Steps one channel through a frequency axis x an amplitude axis, like
+    # the LCR sweep, and writes one CSV row per point with what the box read
+    # back. Through the Trek 1 V = 1 kV, so: one confirmation before the
+    # start, the channel switched OFF before point 1 is set and ON only
+    # after it, OFF again at the end, on Stop and on any error, and every
+    # other writer of that channel refused until the sweep's last event is
+    # drained (_sg_sweep_locked). The worker never touches Tk.
+
+    def _create_sg_sweep_section(self, parent):
+        """The Stepped sweep box on the Signal Gen tab."""
+        frame = ttk.LabelFrame(parent,
+                               text="Stepped sweep (frequency × amplitude)",
+                               padding=10)
+        frame.pack(fill='x', padx=10, pady=10)
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+
+        self._build_sweep_axis(
+            frame, axis='sgfreq', title="Frequency axis", unit='Hz',
+            default_start='1', default_stop='100', default_points='5',
+            default_scale='log', default_list='1, 10, 100', column=0)
+        self._build_sweep_axis(
+            frame, axis='sgamp', title="Amplitude axis", unit='Vpp',
+            default_start='0.5', default_stop='2.5', default_points='5',
+            default_scale='linear', default_list='0.5, 1.0, 1.5', column=1)
+
+        opts = ttk.Frame(frame)
+        opts.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(10, 4))
+        ttk.Label(opts, text="Channel:").grid(row=0, column=0, sticky='w')
+        self.sgsw_ch = ttk.Combobox(opts, width=4, state='readonly',
+                                    values=['1', '2'])
+        self.sgsw_ch.set('1')
+        self.sgsw_ch.grid(row=0, column=1, padx=(4, 16))
+        ttk.Label(opts, text="Waveform:").grid(row=0, column=2, sticky='w')
+        self.sgsw_wave = ttk.Combobox(opts, width=8, state='readonly',
+                                      values=list(SG_SWEEP_WAVES))
+        self.sgsw_wave.set(SG_SWEEP_WAVES[0])
+        self.sgsw_wave.grid(row=0, column=3, padx=(4, 16))
+        self.sgsw_wave.bind('<<ComboboxSelected>>',
+                            lambda e: self._sg_sweep_field_state())
+        ttk.Label(opts, text="Duty (%):").grid(row=0, column=4, sticky='w')
+        self.sgsw_duty = ttk.Entry(opts, width=6)
+        self.sgsw_duty.insert(0, '50')
+        self.sgsw_duty.grid(row=0, column=5, padx=(4, 16))
+        add_tooltip(self.sgsw_duty, "SQUARE only: high time as a percentage "
+                                    "of the period (0-100).")
+        ttk.Label(opts, text="Order:").grid(row=0, column=6, sticky='w')
+        self.sgsw_order = ttk.Combobox(opts, width=22, state='readonly',
+                                       values=list(sweep_plan.SG_ORDERS))
+        self.sgsw_order.set(sweep_plan.SG_ORDER_AMP_OUTER)
+        self.sgsw_order.grid(row=0, column=7, padx=(4, 16))
+        add_tooltip(self.sgsw_order, "Vpp outer holds each amplitude across "
+                                     "every frequency. With the amplitudes "
+                                     "in rising order (the default range), "
+                                     "the levels only rise and the highest "
+                                     "comes last.")
+        ttk.Label(opts, text="Dwell (s):").grid(row=0, column=8, sticky='w')
+        self.sgsw_dwell = ttk.Entry(opts, width=7)
+        self.sgsw_dwell.insert(0, '2')
+        self.sgsw_dwell.grid(row=0, column=9, padx=(4, 0))
+        add_tooltip(self.sgsw_dwell, "Seconds each point is held, counted "
+                                     "from its writes.")
+
+        self.sgsw_unipolar = tk.BooleanVar(value=True)
+        self.sgsw_unipolar_cb = add_tooltip(
+            ttk.Checkbutton(opts, text="0 V to Vpp (offset = Vpp/2)",
+                            variable=self.sgsw_unipolar,
+                            command=self._sg_sweep_field_state),
+            "Every point's offset is half its amplitude, so the waveform "
+            "runs from 0 V to Vpp and never goes below 0 V. Untick to use "
+            "the fixed Offset instead.")
+        self.sgsw_unipolar_cb.grid(row=1, column=0, columnspan=4, sticky='w',
+                                   pady=(6, 0))
+        ttk.Label(opts, text="Offset (V):").grid(row=1, column=4, sticky='w',
+                                                 pady=(6, 0))
+        self.sgsw_offset = ttk.Entry(opts, width=6)
+        self.sgsw_offset.insert(0, '0')
+        self.sgsw_offset.grid(row=1, column=5, padx=(4, 16), pady=(6, 0))
+        add_tooltip(self.sgsw_offset, "Fixed DC offset for every point, used "
+                                      "only when 0 V to Vpp is unticked.")
+
+        out = ttk.Frame(frame)
+        out.grid(row=2, column=0, columnspan=2, sticky='ew', pady=4)
+        out.columnconfigure(1, weight=1)
+        ttk.Label(out, text="Output CSV:").grid(row=0, column=0, sticky='w')
+        self.sgsw_output = tk.StringVar()
+        self.sgsw_output_entry = ttk.Entry(out, textvariable=self.sgsw_output)
+        self.sgsw_output_entry.grid(row=0, column=1, sticky='ew', padx=4)
+        self.sgsw_browse_btn = ttk.Button(out, text="Browse...",
+                                          command=self._browse_sg_sweep_output)
+        self.sgsw_browse_btn.grid(row=0, column=2)
+        ttk.Label(out, text="(blank → <log dir>/sg_sweep_<timestamp>.csv)",
+                  foreground=MUTED).grid(row=1, column=1, sticky='w', padx=4)
+
+        ctrl = ttk.Frame(frame)
+        ctrl.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+        ctrl.columnconfigure(2, weight=1)
+        self.sgsw_start_btn = add_tooltip(
+            ttk.Button(ctrl, text="Start Sweep", command=self.sg_start_sweep),
+            "Asks first (Enter = No). Switches the channel OFF, sets point "
+            "1 and reads it back, switches it ON only if it matches, steps "
+            "through every point, then switches it OFF.")
+        self.sgsw_start_btn.grid(row=0, column=0, padx=(0, 6))
+        self.sgsw_stop_btn = add_tooltip(
+            ttk.Button(ctrl, text="Stop Sweep", command=self.sg_stop_sweep,
+                       state='disabled'),
+            "Stops after the write or read in progress (a read can take a "
+            "few seconds) and switches the channel OFF.")
+        self.sgsw_stop_btn.grid(row=0, column=1, padx=(0, 12))
+        self.sgsw_progress = ttk.Progressbar(ctrl, mode='determinate')
+        self.sgsw_progress.grid(row=0, column=2, sticky='ew')
+        self.sgsw_status = ttk.Label(frame, text="Idle.", foreground=MUTED)
+        self.sgsw_status.grid(row=4, column=0, columnspan=2, sticky='w',
+                              pady=(4, 0))
+
+        self._update_sweep_mode_state('sgfreq')
+        self._update_sweep_mode_state('sgamp')
+        self._sg_sweep_field_state()
+
+    def _sg_sweep_field_state(self):
+        """Duty only for SQUARE, the fixed Offset only with 0 V to Vpp
+        unticked; everything locked while a sweep owns a channel."""
+        idle = getattr(self, '_sg_sweep_ch', None) is None
+        self.sgsw_duty.configure(
+            state='normal' if idle and self.sgsw_wave.get() == 'SQUARE'
+            else 'disabled')
+        self.sgsw_offset.configure(
+            state='normal' if idle and not self.sgsw_unipolar.get()
+            else 'disabled')
+
+    def _sg_sweep_ui_state(self, running):
+        """Lock the sweep's inputs while it runs, and give them back."""
+        for axis in ('sgfreq', 'sgamp'):
+            for w in getattr(self, f'sw_{axis}_range_widgets'):
+                w.configure(state='disabled')
+            getattr(self, f'sw_{axis}_list_widget').configure(
+                state='disabled')
+            # a Range/List click would re-enable that axis' entries mid-run
+            for w in getattr(self, f'sw_{axis}_radios'):
+                w.configure(state='disabled' if running else 'normal')
+        for w in (self.sgsw_ch, self.sgsw_wave, self.sgsw_order):
+            w.configure(state='disabled' if running else 'readonly')
+        for w in (self.sgsw_dwell, self.sgsw_output_entry,
+                  self.sgsw_browse_btn, self.sgsw_unipolar_cb):
+            w.configure(state='disabled' if running else 'normal')
+        self.sgsw_start_btn.configure(
+            state='disabled' if running else 'normal')
+        self.sgsw_stop_btn.configure(state='normal' if running else 'disabled')
+        if not running:
+            self._update_sweep_mode_state('sgfreq')
+            self._update_sweep_mode_state('sgamp')
+        self._sg_sweep_field_state()
+
+    def _browse_sg_sweep_output(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"sg_sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        f".csv")
+        if path:
+            self.sgsw_output.set(path)
+
+    def _default_sg_sweep_path(self):
+        log_dir = self.log_dir.get() if hasattr(self, 'log_dir') else './logs'
+        return new_csv_path(log_dir, 'sg_sweep')
+
+    def _sg_sweep_read_plan(self):
+        """Read and check the sweep's fields -> a plan dict. Raises
+        ValueError with a message for the operator."""
+        ch = int(self.sgsw_ch.get())
+        if ch not in (1, 2):
+            raise ValueError(f"Channel must be 1 or 2, got {ch}")
+        wave = self.sgsw_wave.get()
+        if wave not in SG_SWEEP_WAVES:
+            raise ValueError(f"Waveform must be one of {SG_SWEEP_WAVES}")
+        duty = None
+        if wave == 'SQUARE':
+            duty = float(self.sgsw_duty.get())
+            if not 0.0 <= duty <= 100.0:
+                raise ValueError(f"Duty must be between 0 and 100 %, got "
+                                 f"{duty:g}")
+        # A huge Points field would build its list here, on the Tk thread
+        for axis, name in (('sgfreq', 'Frequency'), ('sgamp', 'Amplitude')):
+            if getattr(self, f'sw_{axis}_mode').get() != 'list':
+                try:
+                    n_axis = int(getattr(self, f'sw_{axis}_points_entry').get())
+                except ValueError:
+                    continue                # plan_axis says what is wrong
+                if n_axis > SG_SWEEP_MAX_POINTS:
+                    raise ValueError(f"{name} points must be at most "
+                                     f"{SG_SWEEP_MAX_POINTS}")
+        freqs = self._parse_sweep_axis('sgfreq', 0.0, math.inf, 'Frequency')
+        amps = self._parse_sweep_axis('sgamp', 0.0, math.inf, 'Amplitude')
+        if not all(math.isfinite(f) and f > 0 for f in freqs):
+            raise ValueError("Every frequency must be above 0 Hz")
+        if not all(math.isfinite(a) and a > 0 for a in amps):
+            raise ValueError("Every amplitude must be above 0 Vpp")
+        unipolar = bool(self.sgsw_unipolar.get())
+        offset_v = 0.0
+        if not unipolar:
+            offset_v = float(self.sgsw_offset.get())
+            if not math.isfinite(offset_v):
+                raise ValueError("Offset must be a number of volts")
+        dwell = float(self.sgsw_dwell.get())
+        if not (math.isfinite(dwell) and dwell >= 0):
+            raise ValueError("Dwell must be 0 s or more")
+        order = self.sgsw_order.get()
+        if len(freqs) * len(amps) > SG_SWEEP_MAX_POINTS:
+            raise ValueError(f"{len(freqs)} × {len(amps)} points is more than "
+                             f"the {SG_SWEEP_MAX_POINTS} a sweep may have")
+        points = sweep_plan.sg_points(freqs, amps, order, unipolar, offset_v)
+        # High-Z and NOR only (adversarial review, 2026-10-27). The volts
+        # below are checked against the 4055B's High-Z limit; at another
+        # load a box that clamps one setting of a pair can move the trough
+        # below 0 V, and whether INVT also inverts the offset is unknown
+        # (BENCH_TEST §T). The SLDEA run forces HZ / NOR the same way.
+        load = self._sg_load_to_wire(ch)
+        if load != 'HZ':
+            raise ValueError(
+                f"The sweep runs only with CH{ch}'s Load at {SG_LOAD_HIGHZ} "
+                f"(Advanced mode, Channel {ch} tab). Its volts are checked "
+                f"against the 4055B's High-Z limit; at other loads the box "
+                f"can clamp one setting and move the waveform below 0 V.")
+        polarity = self.sg_channel_widgets[ch]['polarity'].get()
+        if polarity != 'NOR':
+            raise ValueError(
+                f"The sweep runs only with CH{ch}'s Polarity at NOR "
+                f"(Advanced mode, Channel {ch} tab). Whether INVT also "
+                f"inverts the offset is not bench-checked yet, so the volts "
+                f"the sweep would state could be wrong.")
+        lo, hi = sweep_plan.sg_extremes(points)
+        if lo < -SG_MAX_V_HIGHZ or hi > SG_MAX_V_HIGHZ:
+            raise ValueError(
+                f"The sweep reaches {lo:g} V to {hi:g} V, beyond the "
+                f"4055B's ±{SG_MAX_V_HIGHZ:g} V into High-Z. Lower the "
+                f"amplitude or the offset.")
+        return {'ch': ch, 'wave': wave, 'duty': duty, 'points': points,
+                'unipolar': unipolar, 'offset_v': offset_v, 'dwell': dwell,
+                'load': load, 'polarity': polarity, 'lo': lo, 'hi': hi}
+
+    def _sg_sweep_start_refused(self, ch):
+        """True (+ a note saying why) when a sweep on SG CH`ch` must not
+        start now. Asked before the confirmation and again after it."""
+        if not self.sg:
+            messagebox.showerror("SG sweep", "Signal generator not connected")
+            return True
+        owner = getattr(self, '_sg_sweep_ch', None)
+        if owner is not None:
+            messagebox.showinfo(
+                "SG sweep",
+                f"The sweep on SG CH{owner} is still "
+                + ("running" if self.sg_sweeping else
+                   "stopping: it finishes its write and switches the "
+                   "output OFF first")
+                + ". One sweep at a time.")
+            return True
+        if self._sg_live_locked(ch):
+            return True
+        # The other order of the run gate's DRY refusal (owner 2026-10-27):
+        # a DRY run is set to this channel, until _sldea_finished
+        if getattr(self, '_sldea_dry_ch', None) == ch:
+            messagebox.showwarning(
+                "SG sweep",
+                f"A DRY run on the SLDEA tab is set to drive the Trek with SG "
+                f"CH{ch}. A sweep started now would energize that channel, "
+                f"so the run would not be dry. ■ Abort the run on the SLDEA "
+                f"tab (or let it finish), or sweep the other channel.")
+            return True
+        if (self._cam_worker_alive() and self._cam_seq_kind == 'sweep'
+                and self._cam_seq_ch == ch):
+            messagebox.showwarning(
+                "SG sweep",
+                f"The Webcam tab's stepped capture is writing SG CH{ch}. "
+                f"Stop it first (Webcam tab → Stop sweep), or sweep the "
+                f"other channel.")
+            return True
+        if 'sg-io' in self._bg_busy:
+            messagebox.showinfo(
+                "SG sweep",
+                "A Signal Gen tab command (Apply, Output, Fire or Read "
+                "Instrument) is still being sent. It finishes by itself, "
+                "usually within seconds; press Start Sweep again then.")
+            return True
+        return False
+
+    def sg_start_sweep(self):
+        """Start Sweep: check, ask about a typed CSV that exists, ask once
+        (default No), claim the channel, and hand the points to the
+        worker."""
+        if getattr(self, '_sg_sweep_ch', None) is not None:
+            return
+        try:
+            plan = self._sg_sweep_read_plan()
+        except ValueError as e:
+            messagebox.showerror("Invalid sweep parameters", str(e))
+            return
+        ch = plan['ch']
+        if self._sg_sweep_start_refused(ch):
+            return
+        # A typed file that exists is asked about before the HV question; a
+        # blank field gets a new file at each Start, made just before the
+        # claim and never written back into the field
+        typed = self.sgsw_output.get().strip()
+        if typed and not csv_overwrite_ok(typed):
+            return
+        n = len(plan['points'])
+        est = n * (plan['dwell'] + 0.5)   # ~0.5 s of writes + read-back each
+        est_txt = (f"{est / 60.0:.1f} min" if est >= 120 else f"{est:.0f} s")
+        wave = plan['wave'] + (f" ({plan['duty']:g} % duty)"
+                               if plan['duty'] is not None else "")
+        level = ("0 V to Vpp at every point" if plan['unipolar']
+                 else f"offset {plan['offset_v']:g} V at every point")
+        load_ui = SG_LOAD_HIGHZ if plan['load'] == 'HZ' else \
+            f"{plan['load']} Ω"
+        if not messagebox.askyesno(
+                "Start SG sweep",
+                f"Sweep SG CH{ch}: {wave}, {n} points, {plan['dwell']:g} s "
+                f"each, about {est_txt}.\n"
+                f"Lowest {plan['lo']:g} V, highest {plan['hi']:g} V "
+                f"({level}).\n"
+                f"Load {load_ui}, polarity {plan['polarity']}.\n\n"
+                f"If this channel feeds the Trek, 1 V = 1 kV at the DEA (the "
+                f"SLDEA bench's Trek inverts: there it is 0 to minus kV).\n\n"
+                f"The sweep switches CH{ch} OFF, sets point 1, reads it "
+                f"back, switches CH{ch} ON only if it matches, and switches "
+                f"it OFF at the end, on Stop Sweep or on any error.\n\n"
+                f"Start the sweep?", default='no'):
+            return
+        # The dialog yielded to Tk: whatever it refused for may have started
+        if self._sg_sweep_start_refused(ch):
+            return
+        try:
+            out_path = typed or self._default_sg_sweep_path()
+        except OSError as e:
+            messagebox.showerror("SG sweep", f"Could not make the log "
+                                             f"folder for the CSV: {e}")
+            return
+
+        self._sg_sweep_ch = ch
+        self.sg_sweeping = True
+        tok = self._sg_sweep_gen = object()
+        try:
+            while not self.sg_sweep_queue.empty():
+                try:
+                    self.sg_sweep_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._sg_sweep_ui_state(running=True)
+            self.sgsw_progress.configure(maximum=n, value=0)
+            self.sgsw_status.config(
+                text=f"Starting: SG CH{ch}, {n} points → {out_path}",
+                foreground='black')
+            self.status_bar.config(text=f"SG CH{ch} sweep running...")
+            self.sg_sweep_thread = threading.Thread(
+                target=self._sg_sweep_worker,
+                args=(ch, plan['wave'], plan['duty'], plan['points'],
+                      plan['dwell'], plan['load'], plan['polarity'],
+                      out_path, tok),
+                daemon=True)
+            self.sg_sweep_thread.start()
+        except Exception as e:
+            # No worker, so no final event would ever release the channel
+            # (and with it Reconnect, Restart and the SLDEA run gate)
+            self._sg_sweep_ch = None
+            self.sg_sweeping = False
+            self._sg_sweep_ui_state(running=False)
+            messagebox.showerror("SG sweep", f"The sweep could not start: "
+                                             f"{e}")
+            return
+        self.root.after(50, self._drain_sg_sweep_queue)
+
+    def sg_stop_sweep(self):
+        """Stop Sweep: the worker finishes the write it is on, then
+        switches the channel OFF."""
+        if self.sg_sweeping:
+            self.sg_sweeping = False
+            self._sg_sweep_gen = object()   # retire the worker
+            self.sgsw_status.config(
+                text=f"Stop requested: switching SG CH{self._sg_sweep_ch} "
+                     f"OFF...", foreground=uc.TEXT_ALERT)
+
+    def _sg_sweep_worker(self, ch, wave, duty, points, dwell, load, polarity,
+                         out_path, tok):
+        """Background thread: step SG CH`ch` through `points`, a list of
+        (frequency, amplitude, offset), one CSV row per point. Queue only,
+        never Tk.
+
+        The set-up and each point's writes are made holding the SG's I/O
+        lock, with `alive` checked again under it (the #471/#492 pattern):
+        window close sets _app_closing before its outputs-off writes, which
+        take the same lock, so a close either finds the lock free and the
+        worker then writes nothing, or queues its OFF behind these writes.
+        Nothing under the lock hands work to the Tk thread.
+
+        A LIVE SLDEA run on this channel is refused at its start while the
+        sweep owns the channel, so `live()` should never turn true here. If
+        it does, the run owns the channel: no write at all from then on,
+        the output-off included.
+        """
+        sg = self.sg
+        q = self.sg_sweep_queue
+
+        def alive():
+            return (self.sg_sweeping and self._sg_sweep_gen is tok
+                    and not getattr(self, '_app_closing', False))
+
+        def live():
+            return getattr(self, '_sldea_live_ch', None) == ch
+
+        touched = False
+        done = mismatches = 0
+        approved = sweep_plan.sg_extremes(points)   # what the question named
+        prev = None          # the last point written in full: the box holds it
+        mixed = False        # a point's writes began and did not all land
+        error = None
+        try:
+            # The CSV first: a bad path costs no SG write
+            with open(out_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(SG_SWEEP_CSV_HEADER)
+                f.flush()
+                for n, point in enumerate(points, 1):
+                    if not alive() or live():
+                        break
+                    freq, amp, offset = point
+                    with _io_lock(sg):
+                        if not alive() or live():
+                            break
+                        touched = mixed = True
+                        if prev is None:
+                            # A reply left behind by an earlier query would
+                            # be read as this sweep's first read-back
+                            sg._drain()
+                            # OFF first, then everything the output depends
+                            # on, then point 1. ON waits for its read-back.
+                            sg.set_output(ch, False)
+                            sg.set_load_polarity(ch, load=load,
+                                                 polarity=polarity)
+                            sg.set_burst(ch, False)
+                            shape = {'WVTP': wave}
+                            if wave == 'SQUARE':
+                                shape['DUTY'] = duty
+                            sg.set_basic_wave(ch, **shape)
+                            sg.set_basic_wave(ch, FRQ=freq, AMP=amp,
+                                              OFST=offset)
+                        else:
+                            for params in sweep_plan.level_writes(prev,
+                                                                  point):
+                                sg.set_basic_wave(ch, **params)
+                        mixed = False
+                    written = time.monotonic()
+                    first = prev is None
+                    prev = point
+                    # BSWV? right after a write is slow (README): settle,
+                    # then read back. A read that fails, or answers for
+                    # another query (check_echo), stops the sweep: a late
+                    # reply would shift every later row (#495 on the LCR).
+                    self._interruptible_sleep(0.2, alive=alive)
+                    if not alive():
+                        break
+                    # Drained and asked under one hold of the lock, so a
+                    # late reply to another thread's identical query cannot
+                    # pass the echo check as this one's
+                    with _io_lock(sg):
+                        sg._drain()
+                        got = sg.get_basic_wave_dict(ch, check_echo=True)
+                    ok = sweep_plan.readback_matches(point, got)
+                    if first:
+                        # ...and the shape it was given: a refused WVTP or
+                        # DUTY would leave another waveform in its place
+                        ok = ok and sweep_plan.readback_shape_matches(
+                            wave, duty, got)
+                    # Counted before either stop below can raise, so the
+                    # status never says every read-back matched beside it
+                    mismatches += 0 if ok else 1
+
+                    def row():
+                        writer.writerow([
+                            datetime.now().strftime(
+                                '%Y-%m-%d %H:%M:%S.%f')[:-3],
+                            n, ch, wave, '' if duty is None else duty,
+                            freq, amp, offset,
+                            offset - amp / 2.0, offset + amp / 2.0,
+                            got.get('FRQ', ''), got.get('AMP', ''),
+                            got.get('OFST', ''), 'yes' if ok else 'no'])
+                        f.flush()
+                    if first:
+                        # Point 1 is read back with the output still OFF:
+                        # a box that clamped or refused a setting never
+                        # gets switched ON at a level nobody approved
+                        if not ok:
+                            row()            # the evidence, marked no
+                            prev = None      # the box holds what it read
+                            raise RuntimeError(
+                                f"point 1 read back as {got.get('WVTP')}, "
+                                f"FRQ {got.get('FRQ')}, AMP {got.get('AMP')}, "
+                                f"OFST {got.get('OFST')}"
+                                + (f", DUTY {got.get('DUTY')}"
+                                   if duty is not None else "")
+                                + f", not the {wave} {freq:g} Hz, {amp:g} Vpp, "
+                                f"{offset:g} V asked; the output was never "
+                                f"switched on")
+                        with _io_lock(sg):
+                            if not alive() or live():
+                                break
+                            sg.set_output(ch, True)
+                        written = time.monotonic()
+                        q.put(('on', ch))
+                    row()
+                    # A read-back that differs is counted; one whose band
+                    # leaves the band the operator approved stops the sweep
+                    band = sweep_plan.readback_band(got)
+                    if band is not None and not (
+                            band[0] >= approved[0] - SG_SWEEP_BAND_SLACK_V
+                            and band[1] <= approved[1]
+                            + SG_SWEEP_BAND_SLACK_V):
+                        raise RuntimeError(
+                            f"point {n} read back as {band[0]:g} V to "
+                            f"{band[1]:g} V, outside the {approved[0]:g} V "
+                            f"to {approved[1]:g} V approved")
+                    done += 1
+                    q.put(('point', n, len(points), point, ok))
+                    remaining = dwell - (time.monotonic() - written)
+                    if remaining > 0:
+                        self._interruptible_sleep(remaining, alive=alive)
+        except Exception as e:
+            error = str(e) or type(e).__name__
+        finally:
+            off_ok = None                  # None: nothing to switch off
+            if touched and not live():
+                try:
+                    sg.set_output(ch, False)
+                    if getattr(self, '_app_closing', False):
+                        # The close's own OFF covers the channel and its
+                        # session is closing: no read to hang it, and no
+                        # one left to tell
+                        raise RuntimeError("window closed")
+                    # A wedged 4055B accepts writes into the void (README),
+                    # so OFF is believed only when the box reads it back,
+                    # drained and asked under one hold of the lock
+                    with _io_lock(sg):
+                        sg._drain()
+                        off_ok = not sg.get_output_dict(
+                            ch, check_echo=True)['state']
+                    if not off_ok and error is None:
+                        error = "the output still reads ON after the OFF"
+                except Exception as e:
+                    off_ok = False
+                    if error is None:
+                        error = f"switching the output OFF was not " \
+                                f"confirmed: {e}"
+            q.put(('final', {
+                'ch': ch, 'wave': wave, 'duty': duty, 'touched': touched,
+                'off_ok': off_ok, 'live': touched and live(), 'done': done,
+                'total': len(points), 'mismatches': mismatches,
+                'last': None if mixed else prev, 'mixed': mixed,
+                'error': error, 'path': out_path,
+                'stopped': not alive()}))
+
+    def _drain_sg_sweep_queue(self):
+        """Main-thread poller for the sweep worker's events."""
+        final = None
+        try:
+            while final is None:
+                event = self.sg_sweep_queue.get_nowait()
+                if event[0] == 'on':
+                    ch = event[1]
+                    self.sg_channel_widgets[ch]['output'].set(True)
+                    self._sg_set_output_button(ch, True)
+                elif event[0] == 'point':
+                    _, n, total, (freq, amp, offset), ok = event
+                    self.sgsw_progress.configure(value=n)
+                    self.sgsw_status.config(
+                        text=f"Point {n}/{total}: {freq:g} Hz, {amp:g} Vpp, "
+                             f"offset {offset:g} V"
+                             + ("" if ok else " (read-back differs)"),
+                        foreground='black' if ok else uc.TEXT_ALERT)
+                elif event[0] == 'final':
+                    final = event[1]
+        except queue.Empty:
+            pass
+        if final is None:
+            self.root.after(50, self._drain_sg_sweep_queue)
+            return
+        self._sg_sweep_finished(final)
+
+    def _sg_sweep_finished(self, r):
+        """The worker's last event: release the channel, say what the
+        output is, then bring the channel panel in line with the box. The
+        NOT SWITCHED OFF alarm comes before anything that could fail."""
+        ch = r['ch']
+        self._sg_sweep_ch = None
+        self.sg_sweeping = False
+        widgets = self.sg_channel_widgets[ch]
+        diff = (f"{r['mismatches']} read-back(s) differ"
+                if r['mismatches'] else "every read-back matches")
+        head = (f"SG sweep CH{ch}: {r['done']}/{r['total']} points, {diff}. "
+                f"CSV: {r['path']}")
+        not_off = r['touched'] and r['off_ok'] is False
+        if not_off:
+            # Red whatever it showed before: the ON may have landed even if
+            # its confirmation never came back
+            widgets['output'].set(True)
+            self._sg_set_output_button(ch, True)
+            msg = head + f" CH{ch} output NOT confirmed off."
+            bad = True
+        else:
+            if r['off_ok']:
+                widgets['output'].set(False)
+                self._sg_set_output_button(ch, False)
+            if r['live']:
+                msg = (head + f" A LIVE SLDEA run took CH{ch}, so the sweep "
+                              f"stopped and left the channel to it.")
+            elif r['error']:
+                msg = head + f" Stopped by an error: {r['error']}"
+            elif r['stopped'] and r['done'] < r['total']:
+                msg = head + (" Stopped; output OFF." if r['touched']
+                              else " Stopped before any write.")
+            else:
+                msg = head + " Output OFF."
+            bad = r['error'] or r['mismatches'] or r['live']
+        if r['mixed']:
+            msg += (f" A point's writes did not all land, so CH{ch}'s panel "
+                    f"may not match the box until it is read back.")
+        self._sgsw_msg = msg
+        self.sgsw_status.config(text=msg,
+                                foreground=uc.TEXT_ALERT if bad
+                                else uc.TEXT_OK)
+        self.status_bar.config(text=msg)
+        if not_off:
+            messagebox.showerror(
+                f"SG CH{ch} NOT SWITCHED OFF",
+                f"The sweep could not confirm SG CH{ch} is off"
+                + (f" ({r['error']})" if r['error'] else "") + ".\n\n"
+                f"It may still be driving its last point: {head}\n\n"
+                f"Turn the output OFF on the generator's front panel now, "
+                f"then press Read Instrument on the Channel {ch} tab.")
+        try:
+            self._sg_sweep_ui_state(running=False)
+            # Output ON's confirmation quotes the panel's offset, so the
+            # panel must hold what the box holds: the last point written in
+            # full, then a read of the box
+            if r['last'] is not None:
+                freq, amp, offset = r['last']
+                widgets['waveform'].set(r['wave'])
+                self._set_entry(widgets['freq'], f'{freq:.12g}')
+                self._set_entry(widgets['amp'], f'{amp:.12g}')
+                self._set_entry(widgets['offset'], f'{offset:.12g}')
+                if r['duty'] is not None:
+                    self._set_entry(widgets['duty'], f"{r['duty']:.12g}")
+                self._sg_update_visibility(ch)
+                self._sg_redraw_preview(ch)
+        except Exception as e:      # the words above are out already
+            self.status_bar.config(text=f"{msg} (Updating the CH{ch} panel "
+                                        f"failed: {e})")
+        # Not after an unconfirmed OFF: a stale reply could read OFF and
+        # turn the alarm's red button back to OFF (re-review, 2026-10-27)
+        if r['touched'] and not not_off:
+            self._sg_sweep_refresh(ch)
+        if r['error'] and not not_off:
+            messagebox.showerror("SG sweep error",
+                                 f"{r['error']}\n\n{head}")
+
+    def _sg_sweep_refresh(self, ch, tries=20):
+        """After a sweep, read CH`ch` back into its panel, so Output ON's
+        question quotes what the box holds. An SG command already in flight
+        is waited for (every 0.5 s, `tries` times) rather than skipped; a
+        read that fails, or never gets its turn, is said on the status
+        line."""
+        if not self.sg:
+            return
+
+        def note(why):
+            self.sgsw_status.config(
+                text=f"{getattr(self, '_sgsw_msg', '')} CH{ch} was not read "
+                     f"back ({why}): press Read Instrument before Output ON.",
+                foreground=uc.TEXT_ALERT)
+
+        sg = self.sg
+
+        def work():
+            # Drained and echo-checked like the sweep's own reads, so a late
+            # reply is refused rather than shown as the box's state
+            with _io_lock(sg):
+                sg._drain()
+                bswv = sg.get_basic_wave_dict(ch, check_echo=True)
+                outp = sg.get_output_dict(ch, check_echo=True)
+            return self._sg_fetch_channel(ch, bswv=bswv, outp=outp)
+
+        def fetched(data, error):
+            if error:
+                note(error)
+            else:
+                self._sg_populate_inputs(ch, data)
+
+        if self._run_bg(work, fetched, busy='sg-io', quiet=True):
+            return
+        if tries > 0:
+            self.root.after(500, self._sg_sweep_refresh, ch, tries - 1)
+        else:
+            note("another Signal Gen command kept it busy")
+
+    def _sg_sweep_locked(self, channel=None, parent=None, stop=False):
+        """True (+ a note) when the Signal Gen tab's sweep owns this SG
+        channel (any channel when `channel` is None), from Start until the
+        worker's last event is drained, so after Stop too.
+
+        Shaped like _sg_live_locked and asked beside it by every writer of
+        the channel. With `stop` (the channel's Output button) the click
+        means Stop: no box, a status note, and the worker switches the
+        output OFF."""
+        ch = getattr(self, '_sg_sweep_ch', None)
+        if ch is None or (channel is not None and channel != ch):
+            return False
+        if stop:
+            self.sg_stop_sweep()
+            self.status_bar.config(
+                text=f"SG CH{ch}: the sweep is stopping and switches the "
+                     f"output OFF")
+            return True
+        state = ("is being stepped by the sweep" if self.sg_sweeping
+                 else "is still stopping its sweep")
+        messagebox.showwarning(
+            "Channel in use — SG sweep",
+            f"SG CH{ch} {state} on the Signal Gen tab.\n\n"
+            f"Nothing else may write CH{ch} until the sweep ends (the other "
+            f"channel stays available). Stop Sweep, or the channel's Output "
+            f"button, stops it and switches CH{ch} OFF.",
+            **({} if parent is None else {'parent': parent}))
+        return True
+
+    def _sg_sweep_blocks(self, action, parent=None):
+        """True (+ a warning) while the SG sweep owns a channel, so
+        `action` ('restart' or 'update') must wait. A restart re-execs the
+        process at once: the worker's output-off would never run, and the
+        window-close outputs-off is not part of a restart."""
+        ch = getattr(self, '_sg_sweep_ch', None)
+        if ch is None:
+            return False
+        if action == 'restart':
+            title = "Restart refused — SG sweep running"
+            why = (f"Restarting now would end the sweep before it switches "
+                   f"SG CH{ch} OFF, leaving the output on at its last "
+                   f"point.")
+            then = "then press Restart now again."
+        else:
+            title = "Update refused — SG sweep running"
+            why = "Restart now would be refused until the sweep ends anyway."
+            then = "then choose Tools → Update Software… again."
+        messagebox.showwarning(
+            title,
+            f"The Signal Gen tab's sweep owns SG CH{ch}.\n\n{why}\n\n"
+            f"Press Stop Sweep on the Signal Gen tab (or let it finish), "
+            f"{then}",
+            **({} if parent is None else {'parent': parent}))
+        return True
 
     def _sg_collect_state(self):
         """Read both channels' widgets into a {1|2 -> ChannelState} mapping."""
@@ -10754,6 +11685,9 @@ class InstrumentControlGUI:
                     "Signal generator not connected, so the burst trigger "
                     "can't fire. Pick 'on Start click' instead.")
                 return
+        # A burst trigger on the Signal Gen tab sweep's channel (#65)
+        if trigger_ch is not None and self._sg_sweep_locked(trigger_ch):
+            return
         idx = self.cam_index_var.get().strip()
         if not idx.isdigit():
             messagebox.showerror("Timed capture", "Select a camera first.")
@@ -10907,6 +11841,10 @@ class InstrumentControlGUI:
             return
         if not self.sg:
             messagebox.showerror("Stepped capture", "Signal generator not connected")
+            return
+        # The Signal Gen tab's sweep owns its channel (#65); asked before
+        # the preview is stopped, so a refusal leaves the camera alone
+        if self._sg_sweep_locked(int(self.cam_sg_ch.get())):
             return
         if self._cam_worker_alive():       # one worker at a time
             messagebox.showinfo("Stepped capture",

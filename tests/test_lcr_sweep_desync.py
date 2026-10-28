@@ -21,7 +21,10 @@ sample was the previous one's reading, silently. What is pinned here:
 * the sweep holds the 'lcr-io' busy key from Start to its last event, so
   Apply-style jobs are refused meanwhile, a Start while the key is held
   starts nothing, a correction is refused, and the key is let go on both
-  the done and the error paths.
+  the done and the error paths;
+* the CSV path (#65's review): a blank Output CSV gets a new file at every
+  Start and stays blank, and a typed file that exists is asked about first
+  (default No), where No changes nothing, not even the continuous poll.
 
 The meter is a fake pyvisa resource under the REAL `BK894` driver (`ask`,
 `_drain`, `measure`), and the sweep runs the REAL `lcr_start_sweep`,
@@ -34,6 +37,7 @@ import collections as _collections
 import csv as _csv
 import os as _os
 import queue as _queue
+import re as _re
 import sys as _sys
 import tempfile as _tempfile
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
@@ -267,6 +271,7 @@ class _App:
     _run_bg = G._run_bg
     lcr_run_correction = G.lcr_run_correction
     lcr_stop_continuous = G.lcr_stop_continuous
+    _default_sweep_path = G._default_sweep_path
 
     def __init__(self, meter, out_path, freqs, volts):
         self.lcr = _lcr(meter)
@@ -282,6 +287,7 @@ class _App:
         self.sw_samples = _Var('2')
         self.sw_isd = _Var('0')
         self.sw_output = _Var(out_path)
+        self.log_dir = _Var(_os.path.dirname(out_path))
         self.lcr_mode = _Var('CPD')
         self.sw_order = _Var('Freq outer, V inner')
         self.sw_progress = _Widget()
@@ -417,6 +423,93 @@ def test_correction_is_refused_while_a_sweep_holds_the_meter():
     assert boxes.calls[0][1][0] == 'LCR busy'
     assert 'lcr-corr' not in app._bg_busy
     assert meter.sent == []
+
+
+# ---- CSV path -------------------------------------------------------------
+
+class _Asks(_Boxes):
+    """_Boxes, with every question recorded as ('askyesno', (title,
+    message, kw)) and answered from `answers` by title."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def __enter__(self):
+        super().__enter__()
+
+        def ask(title, message, **kw):
+            self.calls.append(('askyesno', (title, message, kw)))
+            return self.answers[title]
+        gui.messagebox.askyesno = ask
+        return self
+
+
+def _written_to(app):
+    """The CSV the done message names."""
+    text = app.sw_status.text
+    assert 'Sweep complete' in text, text
+    return text.split(' written to ', 1)[1]
+
+
+def test_two_starts_with_a_blank_field_write_two_files():
+    """The made-up name is never written back into the field, so the next
+    Start makes a new file instead of overwriting the last one. Both run
+    in the same second here, so the second name gets _2."""
+    meter = FakeMeter()
+    app, out = _sweep(meter)
+    tmp = _os.path.dirname(out)
+    app.sw_output.set('')
+    with _Boxes() as boxes:
+        app.run()
+        first = _written_to(app)
+        assert app.sw_output.get() == '', app.sw_output.get()
+        app.run()
+        second = _written_to(app)
+    assert not boxes.calls, boxes.calls
+    assert app.sw_output.get() == '', app.sw_output.get()
+    assert second != first, first
+    for path in (first, second):
+        assert _os.path.dirname(path) == tmp, path
+        assert _re.match(r'^sweep_\d{8}_\d{6}(_\d+)?\.csv$',
+                         _os.path.basename(path)), path
+        assert len(_rows(path)) == 12, path
+    assert sorted(_os.listdir(tmp)) == sorted(
+        _os.path.basename(p) for p in (first, second))
+
+
+def test_an_existing_typed_csv_is_asked_about_first_and_no_changes_nothing():
+    meter = FakeMeter()
+    app, out = _sweep(meter)
+    with open(out, 'w') as f:
+        f.write('keep\n')
+    app.lcr_continuous = True
+    with _Asks({gui.CSV_OVERWRITE_Q: False}) as boxes:
+        app.run()
+    [(kind, (title, msg, kw))] = boxes.calls
+    assert (kind, title, kw) == ('askyesno', gui.CSV_OVERWRITE_Q,
+                                 {'default': 'no'}), boxes.calls
+    assert out in msg and 'already exists' in msg, msg
+    with open(out) as f:
+        assert f.read() == 'keep\n', "the CSV was touched"
+    assert app.sweep_thread is None and not app.sweeping
+    assert app._bg_busy == set() and not app._sweep_holds_lcr
+    assert meter.sent == [], meter.sent
+    assert app.lcr_continuous is True, "a No stopped the continuous poll"
+    assert app.sw_status.text is None, app.sw_status.text
+
+
+def test_yes_overwrites_an_existing_typed_csv():
+    meter = FakeMeter()
+    app, out = _sweep(meter)
+    with open(out, 'w') as f:
+        f.write('keep\n')
+    with _Asks({gui.CSV_OVERWRITE_Q: True}) as boxes:
+        app.run()
+    assert [c[1][0] for c in boxes.calls] == [gui.CSV_OVERWRITE_Q], \
+        boxes.calls
+    assert _written_to(app) == out
+    assert len(_rows(out)) == 12, _rows(out)
+    assert app.sw_output.get() == out
 
 
 def _run():

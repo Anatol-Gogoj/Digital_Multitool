@@ -2,7 +2,7 @@
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
 self-contained file (all screenshots embedded as base64). It was last built
-from the **live app** at v1.4.6+90e3d6e on 2026-10-21 (69 pages incl. Part II; captured in a Windows 11 VM at 175 % display, 2880 x 1800, with Tk at 96 dpi and `SCPI_SLDEA_DIR` set to an empty `C:\SLDEA`; the Edge Review figure re-shot on run P3_6_2.5mL_20260729, frame 23 of 81, copied into the VM from the share): every
+from the **live app** at v1.4.8+2f195e2 on 2026-10-27 (72 pages incl. Part II; captured in a Windows 11 VM at 175 % display, 2880 x 1800, with Tk at 96 dpi and `SCPI_SLDEA_DIR` set to an empty `C:\SLDEA`; the Edge Review figure re-shot on run P3_6_2.5mL_20260729, frame 23 of 81, from the VM's own copy of the run; the Signal Gen tab is 52 px taller than the 1000 px capture window, so capture.py also takes tab_siggen_bottom, which the manual leaves out because it adds only Show Usage Tips): every
 screenshot is a real capture and every red callout is anchored to the actual
 widget's on-screen coordinates. When the GUI changes visibly, regenerate
 rather than hand-edit. This line is easy to forget — check it against the

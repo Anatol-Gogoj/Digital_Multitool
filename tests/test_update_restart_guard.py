@@ -17,6 +17,10 @@ The owner's decision (2026-09-24): refuse, and send the operator to
   destroys the window nor re-execs;
 * Update Software refuses to start during a run, before any other dialog;
 * `_sldea_finished` releases both, including after an aborted run;
+* both are refused the same way while the Signal Gen tab's stepped sweep
+  (#65) owns a channel, running or still stopping: a re-exec would end
+  the sweep before its worker switches the channel OFF. Both work again
+  once the sweep's last event has released the channel;
 * the flag the gate reads is honest, on the REAL run worker: a LIVE run
   holds it until its SG has been set to 0 V and switched off -- when the
   run completes, is aborted, or loses its SG link -- and sldea_run claims
@@ -169,6 +173,7 @@ class _App:
     # getattr so that, against code without the gate, the suite still
     # imports and fails test by test instead of not running at all
     _sldea_run_blocks = getattr(G, '_sldea_run_blocks', None)
+    _sg_sweep_blocks = getattr(G, '_sg_sweep_blocks', None)   # #65
     _sldea_finished = G._sldea_finished
     sldea_abort = G.sldea_abort
     # Never called by the code under test. Bound so that a restart turned
@@ -570,6 +575,106 @@ def test_update_after_the_run_finishes_is_allowed_again():
         ('showwarning', UPDATE_REFUSED),
         ('askyesno', 'Update Software')], mb.calls
     assert app.lookups == 1
+
+
+# --------------------------------------------------------------------------
+# The Signal Gen tab's stepped sweep (#65): its worker switches its channel
+# OFF at the end, and a re-exec would end it before that
+# --------------------------------------------------------------------------
+
+SWEEP_RESTART_REFUSED = 'Restart refused — SG sweep running'
+SWEEP_UPDATE_REFUSED = 'Update refused — SG sweep running'
+
+
+def _sweeping(app, ch=2, running=True):
+    """Leave the app as Start Sweep does (`running` False: Stop pressed,
+    the worker's last event not yet drained)."""
+    app._sg_sweep_ch = ch
+    app.sg_sweeping = running
+
+
+def test_restart_is_refused_while_an_sg_sweep_owns_a_channel():
+    for running in (True, False):
+        app = _App(run=None)
+        _sweeping(app, running=running)
+        mb = _MB()
+        dialog = object()
+        with _patched(mb, app.events) as fake_os:
+            app._restart_app(parent=dialog)
+        _refused(app, fake_os)
+        msg, kw = _one_warning(mb, SWEEP_RESTART_REFUSED)
+        assert 'owns SG CH2' in msg and 'before it switches' in msg, msg
+        assert 'Stop Sweep' in msg and 'press Restart now again' in msg, msg
+        assert kw == {'parent': dialog}, kw
+        assert app._sg_sweep_ch == 2 and app.sg_sweeping is running
+
+
+def test_the_sweep_restart_refusal_looks_for_no_launcher():
+    """As during a run: refused before the launcher is looked for."""
+    looked = []
+    real = relaunch.restart_command
+    relaunch.restart_command = lambda *a, **k: looked.append(a) or real(
+        *a, **k)
+    try:
+        app = _App(run=None)
+        _sweeping(app)
+        with _patched(_MB(), app.events) as fake_os, _launcher('desktop'):
+            app._restart_app()
+        _refused(app, fake_os)
+        assert looked == [], "looked for the launcher during a sweep"
+    finally:
+        relaunch.restart_command = real
+
+
+def test_update_is_refused_while_an_sg_sweep_owns_a_channel():
+    for running in (True, False):
+        app = _App(run=None)
+        _sweeping(app, running=running)
+        mb = _MB()
+        with _patched(mb, app.events) as fake_os:
+            app.open_update_software()
+        _refused(app, fake_os)
+        assert app.lookups == 0, "refused before the script lookup"
+        assert app.status_bar.cfg is None, app.status_bar.cfg
+        msg, kw = _one_warning(mb, SWEEP_UPDATE_REFUSED)
+        assert 'owns SG CH2' in msg and 'Stop Sweep' in msg, msg
+        assert 'Tools → Update Software… again' in msg, msg
+        assert kw == {}, kw
+
+
+def test_a_run_and_a_sweep_together_give_one_warning_the_runs():
+    app = _App(run=1)
+    _sweeping(app)
+    mb = _MB()
+    with _patched(mb, app.events) as fake_os:
+        app._restart_app()
+        app.open_update_software()
+    _refused(app, fake_os)
+    assert [(k, t) for k, t, _, _ in mb.calls] == [
+        ('showwarning', RESTART_REFUSED),
+        ('showwarning', UPDATE_REFUSED)], mb.calls
+
+
+def test_restart_and_update_work_again_once_the_sweep_has_ended():
+    """The sweep's last event clears _sg_sweep_ch (_sg_sweep_finished);
+    from then on Update asks and Restart re-execs, with no warning."""
+    app = _App(run=None)
+    _sweeping(app)
+    mb = _MB({'Update Software': False})
+    with _patched(mb, app.events) as fake_os:
+        app._restart_app()
+        app.open_update_software()
+        assert fake_os.execs == [] and app.lookups == 0
+        app._sg_sweep_ch, app.sg_sweeping = None, False
+        app.open_update_software()
+        app._restart_app()
+    assert [(k, t) for k, t, _, _ in mb.calls] == [
+        ('showwarning', SWEEP_RESTART_REFUSED),
+        ('showwarning', SWEEP_UPDATE_REFUSED),
+        ('askyesno', 'Update Software')], mb.calls
+    assert app.lookups == 1
+    _reexeced(app, fake_os)
+    assert not app.touched(), app.touched()
 
 
 # --------------------------------------------------------------------------

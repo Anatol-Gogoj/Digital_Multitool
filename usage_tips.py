@@ -124,31 +124,30 @@ SIGGEN = Page(
             "A LIVE SLDEA run locks the channel driving the Trek. End the "
             "run with ■ Abort on the SLDEA tab, never by closing the "
             "window.",
+            "Start Sweep asks first, then switches its channel ON; Stop "
+            "Sweep, that channel's Output button, or the sweep's end "
+            "switches it OFF.",
         ), ALERT),
         ("Apply, then Output", (
-            "Apply CH1 Settings sends settings only; it never switches "
-            "the output.",
-            "Gray values beside the fields are what the instrument "
-            "accepted; believe them.",
-            "The preview draws what you typed, not a measurement.",
-            "Read Instrument copies the front panel's settings into the "
-            "fields.",
-        )),
-        ("Amplitude and Load", (
-            "Amplitude is peak to peak (Vpp), for the Load in Advanced "
-            "mode. 50 Ω into a High-Z input gives about twice the voltage.",
-            "For a steady level, pick DC and set DC Offset.",
+            "Apply CH1 Settings never switches the output.",
+            "Gray values are what the instrument accepted; believe them, "
+            "not the preview.",
+            "Read Instrument copies the box's settings into the fields.",
+            "Amplitude is Vpp for the Load (Advanced mode); 50 Ω into "
+            "High-Z gives about twice the voltage.",
+            "Set to Vpp/2 sets DC Offset to half the Amplitude (0 V to "
+            "Vpp); Apply sends it.",
         )),
         ("Burst", (
-            "Burst sends exactly Cycles periods per trigger, then idles.",
-            "Tick Burst, Apply, Output ON, then Fire (Trigger MAN). INT "
-            "repeats every Interval; EXT uses the rear Aux In.",
+            "Burst sends Cycles periods per trigger: tick Burst, Apply, "
+            "Output ON, Fire (Trigger MAN). INT repeats every Interval; EXT "
+            "uses rear Aux In.",
         )),
         ("ARB and presets", (
             "USB cannot carry waveform data. Draw it in Waveform Editor... "
             "and use its flash-drive export; Upload & Select needs LAN.",
-            "Load Preset sends both channels' settings. It never switches "
-            "an output.",
+            "Load Preset applies both channels; it never switches an "
+            "output.",
         )),
     ),
     manual=_manual("Signal Generator — BK 4055B"),
@@ -251,8 +250,9 @@ NAMED_CONTROLS = {
               "Single", "Reconnect", "Get CH1 Measurements",
               "Capture CH1 Waveform"),
     'siggen': ("Output: OFF", "Apply CH1 Settings", "Read Instrument",
-               "Advanced mode", "Burst", "Fire", "Waveform Editor...",
-               "Load Preset", "■ Abort"),
+               "Advanced mode", "Set to Vpp/2", "Burst", "Fire",
+               "Waveform Editor...", "Load Preset", "■ Abort",
+               "Start Sweep", "Stop Sweep"),
     'psu': ("Output: OFF", "Set Protection", "Apply V / I limit",
             "Live readout"),
     'dmm': ("Reconnect", "Read once", "Live reading", "Start Logging"),

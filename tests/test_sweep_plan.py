@@ -2,9 +2,18 @@
 """Headless tests for sweep_plan.py (no Tk, no instruments).
 
 This maths used to live inside gui.InstrumentControlGUI._parse_sweep_axis,
-where nothing could reach it. It plans the LCR tab's sweep today and the
-signal-generator sweep of `#65` next, so the numbers it produces are what
-gets written to an instrument -- these pin them.
+where nothing could reach it. It plans the LCR tab's sweep and the
+signal-generator sweep of `#65`, so the numbers it produces are what gets
+written to an instrument -- these pin them.
+
+For the Signal Gen sweep that means the visiting order of both Order
+choices, the 0 V to Vpp offset, the extremes the start check uses, the
+read-back tolerance (a clamped amplitude must fail it), the read-back's
+band that the worker holds to those extremes (None when it cannot be
+read, so it never stops a sweep on a bad field alone), and the order
+level_writes sends each change in: brute-forced over seeded random pairs,
+no in-between state the box holds may reach beyond the two settings it
+sits between, and a 0 V to Vpp sweep may never dip below 0 V.
 
 Run: .venv/bin/python tests/test_sweep_plan.py
 """
@@ -282,6 +291,244 @@ def test_gui_wrapper_delegates():
         assert 'outside' in str(e), e
     else:
         raise AssertionError("out-of-range list should raise")
+
+
+# -- Signal Gen sweep (#65): the points, their extremes, the read-back -----
+# and the order each level change is sent in. Through the Trek 1 V = 1 kV,
+# so the level-write order is pinned by brute force, not by example.
+
+def test_sg_points_amplitude_outer_holds_each_amplitude_across_every_freq():
+    got = sp.sg_points([1, 10, 100], [0.5, 2], sp.SG_ORDER_AMP_OUTER)
+    assert got == [(1.0, 0.5, 0.25), (10.0, 0.5, 0.25), (100.0, 0.5, 0.25),
+                   (1.0, 2.0, 1.0), (10.0, 2.0, 1.0), (100.0, 2.0, 1.0)], got
+    # and it is the default order
+    assert sp.sg_points([1, 10, 100], [0.5, 2]) == got
+
+
+def test_sg_points_frequency_outer_steps_every_amplitude_per_freq():
+    got = sp.sg_points([1, 10], [0.5, 1, 2], sp.SG_ORDER_FREQ_OUTER)
+    assert [(f, a) for f, a, _ in got] == [
+        (1.0, 0.5), (1.0, 1.0), (1.0, 2.0),
+        (10.0, 0.5), (10.0, 1.0), (10.0, 2.0)], got
+
+
+def test_sg_points_unipolar_offset_is_half_of_each_amplitude():
+    for order in sp.SG_ORDERS:
+        got = sp.sg_points([5, 50], [0.3, 1.7, 4], order, unipolar=True,
+                           offset_v=-3.0)          # ignored when unipolar
+        assert len(got) == 6, got
+        for f, a, o in got:
+            assert o == a / 2.0, (f, a, o)
+            assert isinstance(f, float) and isinstance(a, float), got
+
+
+def test_sg_points_bipolar_uses_the_fixed_offset_for_every_point():
+    for order in sp.SG_ORDERS:
+        got = sp.sg_points([5, 50], [0.3, 1.7], order, unipolar=False,
+                           offset_v='-1.25')       # a Tk string is fine
+        assert [o for _, _, o in got] == [-1.25] * 4, got
+
+
+def test_sg_points_rejects_an_unknown_order():
+    for bad in ('', 'Freq outer', None, 'vpp outer, freq inner'):
+        try:
+            got = sp.sg_points([1], [1], bad)
+        except ValueError as e:
+            assert 'Order must be one of' in str(e), e
+        else:
+            raise AssertionError(f"order {bad!r} accepted: {got}")
+
+
+def test_sg_extremes_are_the_lowest_trough_and_the_highest_peak():
+    pts = [(1.0, 2.0, 1.0), (1.0, 4.0, -1.0), (1.0, 1.0, 1.5)]
+    # troughs 0, -3, 1; peaks 2, 1, 2
+    assert sp.sg_extremes(pts) == (-3.0, 2.0)
+    assert sp.sg_extremes(sp.sg_points([1, 2], [0.5, 2.5])) == (0.0, 2.5)
+
+
+def test_sg_extremes_of_no_points_raises():
+    try:
+        got = sp.sg_extremes([])
+    except ValueError:
+        return
+    raise AssertionError(f"expected ValueError, got {got}")
+
+
+def _bswv(f, a, o, **extra):
+    """A read-back as BK4055B.get_basic_wave_dict returns one."""
+    d = {'WVTP': 'SINE', 'FRQ': f, 'AMP': a, 'OFST': o}
+    d.update(extra)
+    return d
+
+
+def test_readback_matches_an_exact_echo():
+    assert sp.readback_matches((1000.0, 2.0, 1.0), _bswv(1000.0, 2.0, 1.0))
+
+
+def test_readback_matches_within_a_tenth_of_a_percent():
+    asked = (1000.0, 2.0, 1.0)
+    assert sp.readback_matches(asked, _bswv(1000.9, 2.0019, 1.0009))
+    assert sp.readback_matches(asked, _bswv(999.1, 1.9981, 0.9991))
+    # but not a different setting
+    assert not sp.readback_matches(asked, _bswv(1002.0, 2.0, 1.0))
+    assert not sp.readback_matches(asked, _bswv(1000.0, 2.0, 1.003))
+
+
+def test_readback_fails_a_clamped_amplitude():
+    # 25 Vpp asked, the box held 20
+    assert not sp.readback_matches((100.0, 25.0, 12.5),
+                                   _bswv(100.0, 20.0, 12.5))
+
+
+def test_readback_fails_a_missing_or_unreadable_field():
+    asked = (1000.0, 2.0, 1.0)
+    good = _bswv(1000.0, 2.0, 1.0)
+    for key in ('FRQ', 'AMP', 'OFST'):
+        missing = dict(good)
+        del missing[key]
+        assert not sp.readback_matches(asked, missing), key
+        for junk in (None, 'abc', '', float('nan')):
+            bad = dict(good, **{key: junk})
+            assert not sp.readback_matches(asked, bad), (key, junk)
+    assert not sp.readback_matches(asked, None)
+    assert not sp.readback_matches(asked, {})
+
+
+def test_readback_near_zero_offset_uses_the_absolute_tolerance():
+    asked = (1000.0, 2.0, 0.0)
+    assert sp.readback_matches(asked, _bswv(1000.0, 2.0, 0.0))
+    assert sp.readback_matches(asked, _bswv(1000.0, 2.0, 0.0005))
+    assert sp.readback_matches(asked, _bswv(1000.0, 2.0, -0.0005))
+    assert not sp.readback_matches(asked, _bswv(1000.0, 2.0, 0.002))
+    assert not sp.readback_matches(asked, _bswv(1000.0, 2.0, -0.002))
+
+
+def test_readback_shape_matches_checks_the_waveform_and_a_squares_duty():
+    assert sp.readback_shape_matches('SINE', None, {'WVTP': 'SINE'})
+    assert sp.readback_shape_matches('SINE', None, {'WVTP': ' sine '})
+    assert not sp.readback_shape_matches('SINE', None, {'WVTP': 'DC'})
+    assert not sp.readback_shape_matches('SINE', None, {})
+    sq = {'WVTP': 'SQUARE', 'DUTY': 50.0}
+    assert sp.readback_shape_matches('SQUARE', 50.0, sq)
+    assert sp.readback_shape_matches('SQUARE', 50.0, dict(sq, DUTY=50.05))
+    assert not sp.readback_shape_matches('SQUARE', 50.0, dict(sq, DUTY=49.5))
+    assert not sp.readback_shape_matches('SQUARE', 50.0, {'WVTP': 'SQUARE'})
+    for junk in (None, 'abc', ''):
+        assert not sp.readback_shape_matches('SQUARE', 50.0,
+                                             dict(sq, DUTY=junk)), junk
+    assert not sp.readback_shape_matches('SQUARE', 50.0,
+                                         dict(sq, WVTP='SINE'))
+
+
+def test_readback_band_is_offset_minus_and_plus_half_the_amplitude():
+    assert sp.readback_band(_bswv(1000.0, 2.0, 1.0)) == (0.0, 2.0)
+    assert sp.readback_band(_bswv(1000.0, 4.0, -1.0)) == (-3.0, 1.0)
+    assert sp.readback_band(_bswv(1000.0, 0.0, 0.5)) == (0.5, 0.5)
+    # numeric strings are read as numbers, as readback_matches reads them
+    assert sp.readback_band({'AMP': '2', 'OFST': '-0.5'}) == (-1.5, 0.5)
+    # FRQ plays no part
+    assert sp.readback_band({'AMP': 1.0, 'OFST': 0.0}) == (-0.5, 0.5)
+
+
+def test_readback_band_is_none_without_a_usable_amp_and_offset():
+    good = _bswv(1000.0, 2.0, 1.0)
+    for key in ('AMP', 'OFST'):
+        missing = dict(good)
+        del missing[key]
+        assert sp.readback_band(missing) is None, key
+        for junk in (None, 'abc', '', float('nan'), float('inf'),
+                     float('-inf')):
+            assert sp.readback_band(dict(good, **{key: junk})) is None, \
+                (key, junk)
+    assert sp.readback_band(None) is None
+    assert sp.readback_band({}) is None
+
+
+def test_readback_band_of_an_exact_echo_equals_the_asked_extremes():
+    pts = sp.sg_points([1, 10], [0.5, 1.5, 2.5])
+    for f, a, o in pts:
+        assert sp.readback_band(_bswv(f, a, o)) == sp.sg_extremes(
+            [(f, a, o)]), (f, a, o)
+
+
+def test_level_writes_send_frequency_first():
+    # amplitude growing: FRQ, then the offset, then the amplitude
+    assert sp.level_writes((1.0, 1.0, 0.5), (10.0, 2.0, 1.0)) == [
+        {'FRQ': 10.0}, {'OFST': 1.0}, {'AMP': 2.0}]
+    # amplitude shrinking: FRQ, then the amplitude, then the offset
+    assert sp.level_writes((1.0, 2.0, 1.0), (10.0, 0.5, 0.25)) == [
+        {'FRQ': 10.0}, {'AMP': 0.5}, {'OFST': 0.25}]
+
+
+def test_level_writes_send_only_what_changed():
+    prev = (100.0, 1.0, 0.5)
+    assert sp.level_writes(prev, (200.0, 1.0, 0.5)) == [{'FRQ': 200.0}]
+    assert sp.level_writes(prev, (100.0, 3.0, 0.5)) == [{'AMP': 3.0}]
+    assert sp.level_writes(prev, (100.0, 1.0, -0.5)) == [{'OFST': -0.5}]
+    assert sp.level_writes(prev, (200.0, 1.0, -0.5)) == [
+        {'FRQ': 200.0}, {'OFST': -0.5}]
+
+
+def test_level_writes_nothing_changed_is_nothing_sent():
+    assert sp.level_writes((100.0, 1.0, 0.5), (100.0, 1.0, 0.5)) == []
+
+
+def _random_pair(rng):
+    """One (prev, new, unipolar) pair: amplitudes above 0, offsets of any
+    sign, and a fair share of equal frequencies, amplitudes and offsets."""
+    def amp():
+        return rng.choice((rng.uniform(0.001, 20.0),
+                           float(rng.randint(1, 20)) / 2.0))
+
+    f0 = rng.choice((1.0, 10.0, rng.uniform(0.1, 1e5)))
+    f1 = f0 if rng.random() < 0.4 else rng.uniform(0.1, 1e5)
+    a0 = amp()
+    a1 = a0 if rng.random() < 0.25 else amp()
+    unipolar = rng.random() < 0.35
+    if unipolar:
+        o0, o1 = a0 / 2.0, a1 / 2.0
+    else:
+        o0 = rng.uniform(-10.0, 10.0)
+        o1 = o0 if rng.random() < 0.25 else rng.uniform(-10.0, 10.0)
+    return (f0, a0, o0), (f1, a1, o1), unipolar
+
+
+def test_level_writes_never_leave_the_hull_of_the_two_settings_brute_force():
+    """Every in-between state the box holds while the writes land one at a
+    time stays inside [lowest trough, highest peak] of the two settings;
+    a 0 V to Vpp pair never dips below 0 V; the last state is `new`."""
+    import random
+    rng = random.Random(65)
+    seen = {'equal_amp': 0, 'equal_off': 0, 'unipolar': 0, 'both': 0}
+    for _ in range(5000):
+        prev, new, unipolar = _random_pair(rng)
+        writes = sp.level_writes(prev, new)
+        state = {'FRQ': prev[0], 'AMP': prev[1], 'OFST': prev[2]}
+        lo = min(prev[2] - prev[1] / 2.0, new[2] - new[1] / 2.0)
+        hi = max(prev[2] + prev[1] / 2.0, new[2] + new[1] / 2.0)
+        keys = [k for w in writes for k in w]
+        assert len(keys) == len(set(keys)), (prev, new, writes)
+        if 'FRQ' in keys:
+            assert writes[0] == {'FRQ': new[0]}, (prev, new, writes)
+        for w in writes:
+            for k, v in w.items():
+                assert state[k] != v, ("sent an unchanged value", prev, new,
+                                       writes)
+            state.update(w)
+            a, o = state['AMP'], state['OFST']
+            assert lo - 1e-12 <= o - a / 2.0 and o + a / 2.0 <= hi + 1e-12, (
+                "left the hull", prev, new, writes, state)
+            if unipolar:
+                assert o - a / 2.0 >= -1e-12, ("dipped below 0 V", prev, new,
+                                               writes, state)
+        assert (state['FRQ'], state['AMP'], state['OFST']) == new, (
+            prev, new, writes, state)
+        seen['equal_amp'] += prev[1] == new[1]
+        seen['equal_off'] += prev[2] == new[2]
+        seen['unipolar'] += unipolar
+        seen['both'] += prev[1] != new[1] and prev[2] != new[2]
+    # the generator really did cover the cases it claims
+    assert min(seen.values()) > 500, seen
 
 
 def _run():

@@ -1,4 +1,4 @@
-# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate and override (§S, gates its PR)
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate and override (§S, gates its PR) + Signal Gen stepped sweep and Set to Vpp/2 (§T)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -926,6 +926,77 @@ What the bench has to answer before it ships:
 - With the S5 setup, is the pre-flight picture now the flat one, and does the `NO PICTURE` gate fire in the dialog?
 - After **✖ Cancel** the device is left at the run's exposure until the next grab or preview re-stamps the lock. Is that acceptable, or must the lock be re-applied (`webcam.apply_locked(dev)`) on the way out? Repeat S6 with the change in.
 - Does the `gain` control behave across the extra stamp (firmware auto-gain, bench 2026-07-24)?
+
+## T. Signal Gen stepped sweep (#65) and Set to Vpp/2 (#498): every point, a 0 V trough, OFF on every exit — Trek HV OFF (2026-10-27)
+
+> **Keep the Trek's HV output OFF, or the Trek disconnected, for this whole
+> section.** The sweep really drives the generator's output, and through an
+> enabled Trek 1 V is 1 kV at the DEA. Everything here is headless-tested
+> (`tests/test_sg_sweep.py`, `tests/test_sweep_plan.py`,
+> `tests/test_sg_offset_half_vpp.py`) against a fake generator; what only
+> the bench can show is the real box: the waveform between points, the
+> read-back, and the output going OFF.
+
+**Setup:** generator on **USB** (step 3 checks the new read drain on the
+transport that has wedged before). BNC from SG **CH1 → scope CH1** (1 MΩ,
+DC coupling). Scope: **Peak Detect** acquisition, 1 V/div, 0 V one
+division above the bottom, about 1 s/div (roll mode if offered), trigger
+Auto. Signal Gen tab, CH1 panel: **Advanced mode** on, Load **High-Z**,
+Polarity **NOR**. ~20 min.
+
+> **Bench-unverified I/O: the read drain.** The sweep reads and discards
+> any stale reply (60 ms time-out per read, up to 20 reads,
+> `VisaInstrument._drain`) at its start, before every point's `BSWV?`,
+> before the `OUTP?` after the final OFF, and before the panel's read-back
+> at the end. Until this PR only the LCR meter got that drain;
+> the 4055B never has, and over USB it has wedged on unusual traffic before
+> (README, the 52-byte cap). Step 3 must pass before anyone sweeps with the
+> Trek connected. **If the box wedges** (reads time out, the front panel stops
+> following, writes do nothing): power-cycle it at the front panel, then
+> report it on #65 with the status line, the CSV and `launch.log`.
+
+1. **Set to Vpp/2.** CH1: SINE, 10 Hz, Amplitude `2` → **Set to Vpp/2**
+   - [ ] DC Offset reads `1`, the preview caption ends `2 Vpp  +1 V`, and the status bar says to press Apply. Nothing on the scope changes (nothing was sent)
+   - [ ] **Apply CH1 Settings**, then **Output: OFF** → Yes: the scope shows 0 V to 2 V. Output OFF again
+   - [ ] Waveform DC: the button is gone. Back to SINE: it is back, between the offset field and its gray readout
+2. **A full sweep.** Stepped sweep box, the defaults: CH 1, SINE, 1 to 100 Hz log 5 points, 0.5 to 2.5 Vpp linear 5 points, **0 V to Vpp** ticked, **Vpp outer, Freq inner**, dwell 2 → **Start Sweep**
+   - [ ] the question names CH1, 25 points, lowest 0 V, highest 2.5 V, Load High-Z, polarity NOR and `1 V = 1 kV`. **Enter** answers No, and the front panel does not change
+   - [ ] **Start Sweep** again → Yes: CH1's Output button turns red and the front panel shows CH1 on, after a short pause (point 1 is read back with the output still off)
+   - [ ] the trough sits on 0 V at every point **and through every change**, in particular when the amplitude steps up and the frequency drops from 100 Hz back to 1 Hz (points 5→6, 10→11, ...). Peak Detect keeps a short dip visible at this timebase; a dip below 0 V is a fail, whatever its size
+   - [ ] at the end the front panel shows CH1 off, the scope is flat at 0 V, the Output button reads OFF, and the CH1 panel holds the last point (100 Hz, 2.5 Vpp, offset 1.25)
+   - [ ] the CSV named in the status line has 25 rows, its read-back columns match the asked ones, and its last column is `yes` throughout
+3. **The read drain over USB, back to back.** Step 2's settings with dwell `0`, so each drain follows the last write as fast as the app allows, and the **Output CSV** field blank. Start → Yes, and start the next sweep as soon as the last one ends: **three sweeps in a row**
+   - [ ] every sweep runs all 25 points and ends with CH1 off and the Output button OFF. No sweep stops with a time-out (`VI_ERROR_TMO`) or `got a reply that is not its own`, and the status bar shows no run of time-out errors afterwards
+   - [ ] the Output CSV field is still blank after each sweep, and the log folder holds three new `sg_sweep_*.csv` files (step 2's makes four), each named in its sweep's status line, each with 25 rows and `yes` throughout
+   - [ ] the front-panel display follows every point (frequency and amplitude change on it) and never freezes
+   - [ ] then, on the Channel 1 tab, **Read Instrument**: the panel fills without a time-out and matches the front panel (100 Hz, 2.5 Vpp, offset 1.25, output OFF)
+   - [ ] then Amplitude `1` → **Set to Vpp/2** → **Apply CH1 Settings**: the front panel shows 1 Vpp at offset 0.5 V and the gray readouts match. Output stays OFF
+   - **If anything here hangs or times out**, stop the section: power-cycle the 4055B at its front panel, then report it on #65 (the box above). Do not run the Trek with the sweep until this step passes
+4. **Stop Sweep.** Start → Yes, and after 3 points press **Stop Sweep**
+   - [ ] CH1 goes off within about a second; the status line says stopped and the CSV holds the finished points
+5. **The channel's Output button stops it.** Start → Yes, then press CH1's red **Output: ON**
+   - [ ] no box; CH1 goes off and the sweep ends
+6. **Refused set-ups.** On the Channel 1 tab set Load `50`, then **Start Sweep**: refused, naming High-Z. Back to High-Z, Polarity **INVT**: refused, naming NOR. Back to NOR
+7. **The lock.** Start → Yes, then on the CH1 panel press **Apply CH1 Settings**
+   - [ ] a box titled **Channel in use — SG sweep**, and nothing changes on the front panel
+   - [ ] CH2's **Apply CH2 Settings** still works; the tab's **Reconnect** shows the box
+   - [ ] SLDEA tab, SG CH 1, DRY RUN → **▶ Run**: refused, naming the Signal Gen tab's sweep. With SG CH 2 the run gets to the camera pre-flight (**✖ Cancel** it). Then **Stop Sweep**
+   - [ ] the other order: start a DRY run on SG CH 1 (any short profile), then **Start Sweep** on CH 1: a box says the DRY run would not be dry, and nothing is sent. CH 2 still sweeps. **■ Abort** the run
+8. **Window close.** Start → Yes, and close the app window mid-sweep
+   - [ ] the front panel shows CH1 off. Relaunch: **Read Instrument** shows CH1 output OFF
+9. **Link pulled.** Start → Yes, and pull the generator's USB cable mid-sweep
+   - [ ] within a few seconds the sweep stops with an error. With the link gone the output-off cannot be sent either, so expect the box **SG CH1 NOT SWITCHED OFF** and a red Output button: switch CH1 off on the front panel, plug the cable back, **Reconnect**
+
+**Questions only the bench can answer** (note what you saw):
+
+- Does the first sweep get past point 1? The sweep checks that each reply starts with `C1:BSWV` / `C1:OUTP`, an echo taken from the driver's docstrings, not from a dated bench capture. If the firmware answers otherwise, every sweep stops at point 1 with `got a reply that is not its own` and every end raises **NOT SWITCHED OFF** (safe, but unusable): copy the reply it quotes.
+
+- With Polarity **INVT** (set on the Channel 1 tab and applied by hand, since the sweep refuses it), does the 4055B invert the offset as well (a 1 Vpp sine at +0.5 V offset then reads 0 V to minus 1 V on the scope), or only the waveform around the offset? The sweep allows INVT only once this is known.
+- Do the read-backs ever lag a point behind (a `no` row whose read-back equals the row above)? That would mean the 0.2 s settle before `BSWV?` is too short.
+- How long does one point's writes plus read-back take (the CSV timestamps minus the dwell)? The start question estimates 0.5 s.
+- The sweep switches burst off but leaves modulation, the box's own sweep and any channel coupling or tracking as they are. With one of those on (front panel), what does the output do during a sweep?
+
+**Send back:** the CSV from step 2, the three CSVs from step 3, a scope capture across the 5→6 change, and anything that differed.
 
 ---
 

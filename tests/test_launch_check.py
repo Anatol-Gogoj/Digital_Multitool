@@ -20,7 +20,8 @@ and what it printed went to the bench app's own output. Pinned here:
 * the look goes on after "opened" (#473): a program that dies before
   launch_check.WATCH_MS is said the same way, once, and its box waits for
   a run too; one that closes normally then is not said; the window's
-  close ends the look and lets go of the program;
+  close ends the look and lets go of the program, and stands a held box
+  down, so none opens inside the close (#481);
 * each look is one poll() on the Tk thread, and the launcher returns
   without waiting for its program;
 * a healthy program starts as before: the same arguments, working folder
@@ -961,6 +962,160 @@ def test_a_held_box_waits_for_an_open_hv_alarm():
         in src, "HV NOT ZEROED is not shown through sldea_alarm"
     assert 'sldea_alarm( self, messagebox.showwarning, stop_box' in src
     assert 'lambda: messagebox.show' not in src
+
+
+def test_the_window_close_stands_a_held_box_down():
+    """#481, Tk-free. A held box is kept on the app while it waits
+    (_sldea_held_boxes), so the window's close can stand it down before
+    its wait for a run pumps Tk: sldea_held_stop cancels its timer, and
+    one whose timer still fires (the cancel failed) never shows. Once the
+    close has begun (_app_closing) no box opens at all, held or not.
+    Without a close, a held box waits and then shows as before."""
+    gui = _gui()
+
+    class _A:
+        pass
+
+    def held_app():
+        a = _A()
+        a.root = _FakeRoot()
+        a._sldea_running = True
+        return a
+
+    def waiting(a):
+        return [h for h in getattr(a, '_sldea_held_boxes', [])
+                if not h['done']]
+    boxes = _Boxes()
+    saved = gui.messagebox
+    gui.messagebox = boxes
+    try:
+        # no close: held while the run goes, kept, then shown once
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+        assert len(app.root.jobs) == 1 and len(waiting(app)) == 1
+        app.root.run_next()
+        assert len(app.root.jobs) == 1 and len(waiting(app)) == 1
+        assert boxes.errors == []
+        app._sldea_running = False
+        app.root.run_next()
+        assert boxes.errors == [('Edge tuner', 'x')], boxes.errors
+        assert app.root.jobs == [] and waiting(app) == []
+
+        # the close stands two held boxes down: both timers cancelled
+        del boxes.errors[:]
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+        gui.sldea_box_after_run(app, 'Plot window', 'y')
+        jobs = list(app.root.ids)
+        assert len(jobs) == 2 and len(waiting(app)) == 2
+        gui.sldea_held_stop(app)
+        assert app.root.jobs == [] and sorted(app.root.canceled) == jobs
+        assert app._sldea_held_boxes == []
+        gui.sldea_held_stop(app)            # twice is harmless
+
+        # a cancel that fails: the timer fires, and still no box
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+
+        def refuse(job):
+            raise RuntimeError('after_cancel failed (fake)')
+        app.root.after_cancel = refuse
+        gui.sldea_held_stop(app)
+        app._sldea_running = False
+        app.root.run_next()
+        assert boxes.errors == [] and app.root.jobs == [], boxes.errors
+
+        # the close has begun: no box, held or not, and no timer
+        for running in (True, False):
+            app = held_app()
+            app._sldea_running = running
+            app._app_closing = True
+            gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+            assert boxes.errors == [] and app.root.jobs == [], running
+        # a held box whose close begins while it waits
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+        app._app_closing = True
+        app._sldea_running = False
+        app.root.run_next()
+        assert boxes.errors == [] and app.root.jobs == [], boxes.errors
+    finally:
+        gui.messagebox = saved
+
+
+def test_the_window_close_prints_what_it_stands_down_and_cancels_every_look():
+    """#481 review, Tk-free. A box the close keeps from opening is printed
+    instead, once, so on the Linux bench its words stay in launch.log:
+    one stood down while it waits (sldea_held_stop) and one that falls due
+    once the close has begun. A box already shown is not printed again.
+    And sldea_launch_stop cancels every look even when one look's cancel
+    raises."""
+    import contextlib
+    import io
+    gui = _gui()
+
+    class _A:
+        pass
+
+    def held_app():
+        a = _A()
+        a.root = _FakeRoot()
+        a._sldea_running = True
+        return a
+    boxes = _Boxes()
+    saved = gui.messagebox
+    gui.messagebox = boxes
+    try:
+        # stood down while waiting: printed once, even when stood down twice
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'died (code 1)')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gui.sldea_held_stop(app)
+            gui.sldea_held_stop(app)
+        assert out.getvalue().count('Edge tuner: died (code 1)') == 1, \
+            out.getvalue()
+        assert boxes.errors == []
+
+        # falls due once the close has begun: printed, no box
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Plot window', 'Could not launch')
+        app._app_closing = True
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            app.root.run_next()
+        assert 'Plot window: Could not launch' in out.getvalue(), \
+            out.getvalue()
+        assert boxes.errors == [] and app.root.jobs == []
+
+        # shown before the close: not printed by the stand-down
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+        app._sldea_running = False
+        app.root.run_next()
+        assert boxes.errors == [('Edge tuner', 'x')], boxes.errors
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gui.sldea_held_stop(app)
+        assert out.getvalue() == '', out.getvalue()
+    finally:
+        gui.messagebox = saved
+
+    # one look whose cancel raises does not keep the next one going
+    class _Look:
+        def __init__(self, fails):
+            self.fails, self.cancelled = fails, False
+
+        def cancel(self):
+            self.cancelled = True
+            if self.fails:
+                raise RuntimeError('cancel failed (fake)')
+    app = _A()
+    looks = [_Look(True), _Look(False)]
+    app._sldea_launch_watches = list(looks)
+    gui.sldea_launch_stop(app)
+    assert [lk.cancelled for lk in looks] == [True, True]
+    assert app._sldea_launch_watches == []
 
 
 def test_a_signal_is_said_as_a_signal():

@@ -39,7 +39,12 @@ Trek. What is pinned here:
   channel or another SG handle, zeroed only after the run's own zero had
   failed, or only switched off a channel the run had marked, and a
   failed zero with no close at all. With no close begun, the run's zero
-  is made as before: unlocked, reading no record.
+  is made as before: unlocked, reading no record;
+* no launch-check box and no held box opens inside the close (#481):
+  the launch looks and the held boxes are stood down before the wait, a
+  stand-down that fails cannot skip the outputs-off, and with nothing
+  pending the close is as before; nor can an update() in the wait that
+  raises skip the zero and the outputs-off.
 
 The close-handler cases run the REAL _on_app_close on a Tk-free stub app,
 against a fake SG that records every call in order. The end-to-end cases
@@ -585,6 +590,297 @@ def test_a_write_queued_behind_the_close_lands_on_the_closed_session():
             > sg.writes.index(('close',))), sg.writes
     rec = app._sldea_close_zeroed
     assert rec is not None and rec[0] is sg and rec[1:] == (1, True), rec
+
+
+# --------------------------------------------------------------------------
+# No launch-check box or held box inside the close (#481)
+# --------------------------------------------------------------------------
+
+class _TimedRoot(_Root):
+    """The suite's root with Tk's timer order, for the box cases (#481):
+    after(ms, fn) falls due `ms` after `now` (ms), after_cancel() drops
+    it, and each update() first moves `now` on by one wait tick, then
+    plays every callback due by then in due order, ties in the order they
+    were queued, as Tcl serves its timers. With `cancel_fails`,
+    after_cancel() raises."""
+    TICK_MS = 100
+
+    def __init__(self):
+        super().__init__()
+        self.now = 0
+        self.timers = []                # (due, seq, job, fn, args)
+        self.seq = 0
+        self.cancel_fails = False
+
+    def after(self, ms, fn=None, *args):
+        if self.guard is not None:
+            self.guard('root.after')
+        self.seq += 1
+        job = f'after#{self.seq}'
+        if fn is not None:
+            self.timers.append((self.now + int(ms), self.seq, job, fn, args))
+        return job
+
+    def after_cancel(self, job):
+        if self.cancel_fails:
+            raise RuntimeError('after_cancel failed (fake)')
+        self.timers = [t for t in self.timers if t[2] != job]
+
+    def due_names(self):
+        return sorted(getattr(t[3], '__name__', '?') for t in self.timers)
+
+    def update(self):
+        self.updates += 1
+        if self.on_update is not None:
+            self.on_update()
+        self.now += self.TICK_MS
+        while True:
+            ready = [t for t in self.timers if t[0] <= self.now]
+            if not ready:
+                return
+            t = min(ready, key=lambda t: (t[0], t[1]))
+            self.timers.remove(t)
+            t[3](*t[4])
+
+
+class _Bar(L._Label):
+    """The status bar, with what the launch look also calls on it."""
+
+    def cget(self, _key):
+        return self.text
+
+    def bind(self, *_a, **_k):
+        pass
+
+
+class _BoxLog:
+    """gui.messagebox stand-in: notes every box as (kind, title, how many
+    SG writes had been made when it opened)."""
+
+    def __init__(self, sg):
+        self.sg = sg
+        self.opened = []
+
+    def _note(self, kind, title):
+        self.opened.append((kind, title, len(self.sg.writes)))
+
+    def showerror(self, title=None, message=None, **_k):
+        self._note('error', title)
+
+    def showwarning(self, title=None, message=None, **_k):
+        self._note('warning', title)
+
+    def showinfo(self, title=None, message=None, **_k):
+        self._note('info', title)
+
+
+class _DiesWithTheRun:
+    """A started program's Popen that exits with code 3 as the run ends:
+    running while the app's run flag is set."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def poll(self):
+        return None if self.app._sldea_running else 3
+
+
+@contextlib.contextmanager
+def _box_bench(app):
+    """gui.messagebox -> a _BoxLog, and launch_check.start -> a Launch of
+    a _DiesWithTheRun with no log file, for the box cases. CHECK_MS is
+    pushed out of reach, so the look stays in its first stretch (POLL_MS)
+    however slow the PC."""
+    lc = gui.launch_check
+    saved = gui.messagebox, lc.start, lc.CHECK_MS
+    boxes = _BoxLog(app.sg)
+    gui.messagebox = boxes
+    lc.start = lambda cmd, program, popen=None: lc.Launch(
+        _DiesWithTheRun(app), program, None, why='test, no log')
+    lc.CHECK_MS = 10 ** 9
+    try:
+        yield boxes
+    finally:
+        gui.messagebox, lc.start, lc.CHECK_MS = saved
+
+
+def _box_app():
+    """The stub app on a _TimedRoot, with a run going on CH1."""
+    app = _App()
+    app.root = _TimedRoot()
+    app.root.guard = app._tk_guard
+    app.status_bar = _Bar()
+    _stuck_run(app, ch=1)
+    return app
+
+
+def _pend_boxes(app):
+    """Inside _box_bench: the run's end, which the close's wait plays at
+    450 ms, and two boxes that fall due at 500 ms, in the same update()
+    right after it: a held box from a program that died during the run
+    (looking again every SLDEA_LAUNCH_HOLD_MS, from 0 ms), and the launch
+    look of a program started at 100 ms (looking every POLL_MS) that dies
+    as the run ends. That is the window #481 describes."""
+    assert gui.SLDEA_LAUNCH_HOLD_MS == 500, gui.SLDEA_LAUNCH_HOLD_MS
+    assert gui.launch_check.POLL_MS == 200, gui.launch_check.POLL_MS
+    gui.sldea_box_after_run(app, 'Edge tuner', 'it stopped (exit code 3)')
+    app.root.now = 100
+    gui.sldea_launch(app, 'Plot window', ['plot'], 'run_folder')
+    assert app.status_bar.text.startswith(
+        'Plot window starting on run_folder'), app.status_bar.text
+    [look] = app._sldea_launch_watches
+    assert not look.done and look.job is not None, (look.done, look.job)
+    app.root.after(350, app._sldea_finished)
+    assert app.root.due_names() == ['_sldea_finished', 'look', 'show'], \
+        app.root.due_names()
+
+
+def test_a_close_opens_no_launch_box_or_held_box_before_outputs_off():
+    """#481. The close's wait pumps Tk. Before #481 the launch looks were
+    stood down only by <Destroy>, at the final root.destroy(), and nothing
+    kept the held boxes at all, so a held box or a look falling due in the
+    update() that plays the run's end opened a box there, before any SG
+    write. Now
+    both are stood down before the wait: no box opens, the SCPI is that of
+    a run that finished within the wait, and the window goes."""
+    app = _box_app()
+    pending = []
+    app.root.on_update = lambda: pending.append(app.root.due_names())
+    with _box_bench(app) as boxes, _fast_clock():
+        _pend_boxes(app)
+        assert boxes.opened == []
+        app._on_app_close()
+    assert boxes.opened == [], (
+        f"a box opened inside the close, as (kind, title, SG writes made "
+        f"by then): {boxes.opened}")
+    assert app.sg.writes == OUTPUTS_OFF + SESSION_END, app.sg.writes
+    assert not app._sldea_running and app.root.destroyed
+    # stood down before the wait: at its first update() only the run's
+    # end is pending, no look and no held box
+    assert pending and pending[0] == ['_sldea_finished'], pending
+    assert app._sldea_launch_watches == [] and app._sldea_held_boxes == []
+
+
+@contextlib.contextmanager
+def _stand_downs(wrap):
+    """gui.sldea_launch_stop and gui.sldea_held_stop -> wrap(name, real),
+    `real` being the module's own function (None where it has none, as on
+    origin/main for the held boxes); put back as they were after."""
+    names = ('sldea_launch_stop', 'sldea_held_stop')
+    saved = {n: gui.__dict__[n] for n in names if n in gui.__dict__}
+    for n in names:
+        setattr(gui, n, wrap(n, saved.get(n)))
+    try:
+        yield
+    finally:
+        for n in names:
+            if n in saved:
+                setattr(gui, n, saved[n])
+            else:
+                delattr(gui, n)
+
+
+def test_the_close_stand_down_cannot_raise_past_the_outputs_off():
+    """#481. Standing the boxes down is best effort: a stand-down that
+    raises, or a timer that cannot be cancelled, must not skip the SG's
+    outputs-off or the window's close, and still no box opens, because
+    once the close has begun sldea_box_after_run opens none."""
+    raises = {'launch looks raise': {'sldea_launch_stop'},
+              'held boxes raise': {'sldea_held_stop'},
+              'both raise': {'sldea_launch_stop', 'sldea_held_stop'},
+              'no cancel works': set()}
+    for name, broken in raises.items():
+        calls = []
+
+        def wrap(n, real):
+            def stand_down(a):
+                calls.append(n)
+                if n in broken:
+                    raise RuntimeError(f'{n} broken (fake)')
+                return real(a)
+            return stand_down
+        app = _box_app()
+        app.root.cancel_fails = name == 'no cancel works'
+        with _stand_downs(wrap), _box_bench(app) as boxes, _fast_clock():
+            _pend_boxes(app)
+            app._on_app_close()
+        assert calls == ['sldea_launch_stop', 'sldea_held_stop'], \
+            (name, calls)
+        assert app.sg.writes == OUTPUTS_OFF + SESSION_END, (name,
+                                                             app.sg.writes)
+        assert app.root.destroyed, name
+        assert boxes.opened == [], (name, boxes.opened)
+
+
+def test_a_close_with_nothing_pending_is_unchanged():
+    """#481. With no look and no held box pending, the stand-down still
+    runs, once, before the wait, and changes nothing: the same SCPI in the
+    same order, the same wait, the window goes. No run; then a LIVE run
+    that never finishes within the wait (its channel zeroed, then both
+    outputs off)."""
+    for live in (False, True):
+        calls = []
+
+        def wrap(n, real):
+            def stand_down(a):
+                calls.append(n)
+                return real(a)
+            return stand_down
+        app = _App()
+        if live:
+            _stuck_run(app, ch=2)
+        app.root.on_update = lambda: calls.append('update')
+        with _stand_downs(wrap), _fast_clock() as clock:
+            app._on_app_close()
+        calls = [c.replace('sldea_', '').replace('_stop', '')
+                 for c in calls]
+        assert calls[:2] == ['launch', 'held'], (live, calls)
+        assert calls.count('launch') == calls.count('held') == 1, calls
+        if live:
+            assert app.sg.writes == ([('set_offset', 2, 0.0)] + OUTPUTS_OFF
+                                     + SESSION_END), app.sg.writes
+            assert len(clock.sleeps) == WAIT_TICKS, clock.sleeps
+            assert calls.count('update') == WAIT_TICKS, calls
+        else:
+            assert app.sg.writes == OUTPUTS_OFF + SESSION_END, app.sg.writes
+            assert clock.sleeps == [] and app.root.updates == 0
+        assert app.root.destroyed, live
+        # nothing to stand down: a never-kept look list stays unset, so a
+        # launch in the close's wait still binds <Destroy>
+        assert '_sldea_launch_watches' not in vars(app), live
+        assert app._sldea_held_boxes == [], live
+
+
+def test_an_update_that_raises_in_the_wait_still_zeroes_and_switches_off():
+    """#481 review. Should root.update() in the close's wait raise (a
+    TclError; Tk 8.6.15 was measured not to, even after destroy(), so
+    this guard is defensive), it must not skip the zero. Before #481 it
+    would have raised out of
+    _on_app_close and skipped the zero and the outputs-off. Now the wait
+    stops at once and the close goes on as for a run still flagged: a
+    LIVE run's channel zeroed, then both outputs off, the session handed
+    back, the window gone. A DRY run gets the outputs-off only."""
+    import tkinter
+
+    def torn():
+        raise tkinter.TclError('can\'t invoke "update" command: '
+                               'application has been destroyed')
+    for live, want in (
+            (True, [('set_offset', 2, 0.0)] + OUTPUTS_OFF + SESSION_END),
+            (False, OUTPUTS_OFF + SESSION_END)):
+        app = _App(sg=_SessionSG())
+        _stuck_run(app, ch=2, live=live)
+        app.root.on_update = torn
+        with _fast_clock() as clock:
+            app._on_app_close()
+        assert app.sg.writes == want, (live, app.sg.writes)
+        assert app.root.updates == 1 and clock.sleeps == [], \
+            (live, app.root.updates, clock.sleeps)
+        assert app.root.destroyed, live
+        if live:
+            rec = app._sldea_close_zeroed
+            assert (rec is not None and rec[0] is app.sg
+                    and rec[1:] == (2, True)), rec
 
 
 # --------------------------------------------------------------------------

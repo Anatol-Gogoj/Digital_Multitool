@@ -2356,6 +2356,38 @@ def test_a_close_during_a_live_run_opens_no_sweep_box_before_its_off():
                                      ('set_output', 2, False)], close
 
 
+def test_a_sweep_that_ended_on_its_own_still_alarms_when_drained_in_a_close():
+    """#481 re-review. Only an OFF the close itself left unread may go
+    without a box. A sweep that ended on its own before the close, whose
+    OFF read back ON or whose OUTP? read failed, is a real NOT SWITCHED
+    OFF: drained inside the close's wait, it still opens the alarm."""
+    import contextlib
+    import io
+
+    def outp_on(app):
+        app.sg.outp_says_on = True
+
+    def outp_fail(app):
+        app.sg.outp_fail = True
+    for setup in (outp_on, outp_fail):
+        with _tmpdir() as tmp:
+            app = _App(tmp)
+            setup(app)
+            events = _run_worker(app, _os.path.join(tmp, 'out.csv'))
+            r = _final(events)
+            assert r['off_ok'] is False and not r.get('off_sent'), r
+            app._sg_sweep_refresh = lambda ch, tries=20: None
+            app._app_closing = True      # drained inside the close's wait
+            for e in events:
+                app.sg_sweep_queue.put(e)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                mb = _finish(app)
+            assert mb.kinds_titles() == [
+                ('showerror', 'SG CH1 NOT SWITCHED OFF')], (
+                setup.__name__, mb.kinds_titles(), out.getvalue())
+
+
 def test_a_sweep_error_drained_inside_a_close_opens_no_box_and_reads_nothing():
     """#481. A sweep that ended on an error with its OFF confirmed, its last
     event drained only once the window's close has begun (the close's wait

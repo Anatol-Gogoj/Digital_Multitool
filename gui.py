@@ -399,7 +399,7 @@ def sldea_box_after_run(app, title, text):
             if getattr(app, '_app_closing', False):
                 hold['done'] = True
                 # inside the window's close: no box (#481), only the words
-                print(f"Window closing, no box: {hold['words']}", flush=True)
+                sldea_say(f"Window closing, no box: {hold['words']}")
                 return
             if sldea_run_going(app) or getattr(app, '_sldea_alarms_open', 0):
                 hold['job'] = app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
@@ -411,6 +411,17 @@ def sldea_box_after_run(app, title, text):
         hold['done'] = True
         messagebox.showerror(title, text)
     show()
+
+
+def sldea_say(text):
+    """Print `text` to this app's own output (launch.log on the Linux
+    bench) in place of a box the window's close keeps from opening (#481).
+    Never raises: on Windows a redirected stdout is cp1252, and a launch
+    report quotes program output that may not encode."""
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
 
 
 def sldea_held_keep(app, hold):
@@ -441,8 +452,7 @@ def sldea_held_stop(app):
         try:
             was_done, hold['done'] = hold['done'], True
             if not was_done:
-                print(f"Window closing, no box: {hold.get('words', '')}",
-                      flush=True)
+                sldea_say(f"Window closing, no box: {hold.get('words', '')}")
             job, hold['job'] = hold['job'], None
             if job is not None:
                 app.root.after_cancel(job)
@@ -9158,12 +9168,12 @@ class InstrumentControlGUI:
             error = str(e) or type(e).__name__
         finally:
             off_ok = None                  # None: nothing to switch off
-            off_sent = False               # the OFF write itself went out
+            off_sent = False               # sent, left unread only by a close
             if touched and not live():
                 try:
                     sg.set_output(ch, False)
-                    off_sent = True
                     if getattr(self, '_app_closing', False):
+                        off_sent = True    # sent; unread only for the close
                         # The close's own OFF covers the channel and its
                         # session is closing: no read to hang it, and no
                         # one left to tell
@@ -9268,7 +9278,7 @@ class InstrumentControlGUI:
         closing = getattr(self, '_app_closing', False)
         quiet = closing and r.get('off_sent')
         if not_off and quiet:
-            print(f"SG sweep, window closing: {msg}", flush=True)
+            sldea_say(f"SG sweep, window closing: {msg} ({r['error']})")
         elif not_off:
             messagebox.showerror(
                 f"SG CH{ch} NOT SWITCHED OFF",
@@ -9303,7 +9313,7 @@ class InstrumentControlGUI:
         if r['error'] and not not_off:
             if closing:
                 # no box inside the window's close either (#481)
-                print(f"SG sweep, window closing: {msg}", flush=True)
+                sldea_say(f"SG sweep, window closing: {msg}")
             else:
                 messagebox.showerror("SG sweep error",
                                      f"{r['error']}\n\n{head}")

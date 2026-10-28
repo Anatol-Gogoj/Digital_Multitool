@@ -384,10 +384,12 @@ def sldea_box_after_run(app, title, text):
     is going anyway. What survives a box stood down this way: for a
     program that started and then stopped (launch_check.report's box),
     its output stays in its launch_check log file, unless no log could be
-    made, when it went to this app's own output; the exit code is not
-    kept. A "Could not launch" box (Popen itself failed) has no log at
-    all, so one stood down by a close is not recorded anywhere."""
-    hold = {'job': None, 'done': False}
+    made, when it went to this app's own output. In place of the box, its
+    title and text are printed to this app's own output (on the Linux
+    bench the launcher keeps that in launch.log), whether it falls due
+    once the close has begun or is stood down while it waits, so its exit
+    code or its "Could not launch" reason is kept there."""
+    hold = {'job': None, 'done': False, 'words': f"{title}: {text}"}
 
     def show():
         hold['job'] = None
@@ -396,7 +398,9 @@ def sldea_box_after_run(app, title, text):
         try:
             if getattr(app, '_app_closing', False):
                 hold['done'] = True
-                return          # inside the window's close: no box (#481)
+                # inside the window's close: no box (#481), only the words
+                print(f"Window closing, no box: {hold['words']}", flush=True)
+                return
             if sldea_run_going(app) or getattr(app, '_sldea_alarms_open', 0):
                 hold['job'] = app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
                 sldea_held_keep(app, hold)
@@ -425,8 +429,9 @@ def sldea_held_keep(app, hold):
 def sldea_held_stop(app):
     """Window close: stand every held box down (#481), as sldea_launch_stop
     does the launch looks. Each is marked done before its timer is
-    cancelled, so one whose cancel fails still never opens. No waits, and
-    never raises."""
+    cancelled, so one whose cancel fails still never opens. A box still
+    waiting has its words printed instead (see sldea_box_after_run). No
+    waits, and never raises."""
     try:
         held = getattr(app, '_sldea_held_boxes', None) or []
         app._sldea_held_boxes = []
@@ -434,7 +439,10 @@ def sldea_held_stop(app):
         return
     for hold in held:
         try:
-            hold['done'] = True
+            was_done, hold['done'] = hold['done'], True
+            if not was_done:
+                print(f"Window closing, no box: {hold.get('words', '')}",
+                      flush=True)
             job, hold['job'] = hold['job'], None
             if job is not None:
                 app.root.after_cancel(job)
@@ -9150,9 +9158,11 @@ class InstrumentControlGUI:
             error = str(e) or type(e).__name__
         finally:
             off_ok = None                  # None: nothing to switch off
+            off_sent = False               # the OFF write itself went out
             if touched and not live():
                 try:
                     sg.set_output(ch, False)
+                    off_sent = True
                     if getattr(self, '_app_closing', False):
                         # The close's own OFF covers the channel and its
                         # session is closing: no read to hang it, and no
@@ -9177,7 +9187,7 @@ class InstrumentControlGUI:
                 'off_ok': off_ok, 'live': touched and live(), 'done': done,
                 'total': len(points), 'mismatches': mismatches,
                 'last': None if mixed else prev, 'mixed': mixed,
-                'error': error, 'path': out_path,
+                'error': error, 'path': out_path, 'off_sent': off_sent,
                 'stopped': not alive()}))
 
     def _drain_sg_sweep_queue(self):
@@ -9250,7 +9260,16 @@ class InstrumentControlGUI:
                                 foreground=uc.TEXT_ALERT if bad
                                 else uc.TEXT_OK)
         self.status_bar.config(text=msg)
-        if not_off:
+        # Window close (#481): an OFF that went out, unconfirmed only because
+        # the close skips its read-back, gets no box. The close's wait pumps
+        # Tk, a box there would hold up the close's own OFF on both channels,
+        # and that OFF is no more confirmed than this one. An OFF write that
+        # failed still alarms: on a dead link it is the only warning.
+        closing = getattr(self, '_app_closing', False)
+        quiet = closing and r.get('off_sent')
+        if not_off and quiet:
+            print(f"SG sweep, window closing: {msg}", flush=True)
+        elif not_off:
             messagebox.showerror(
                 f"SG CH{ch} NOT SWITCHED OFF",
                 f"The sweep could not confirm SG CH{ch} is off"
@@ -9277,12 +9296,17 @@ class InstrumentControlGUI:
             self.status_bar.config(text=f"{msg} (Updating the CH{ch} panel "
                                         f"failed: {e})")
         # Not after an unconfirmed OFF: a stale reply could read OFF and
-        # turn the alarm's red button back to OFF (re-review, 2026-10-27)
-        if r['touched'] and not not_off:
+        # turn the alarm's red button back to OFF (re-review, 2026-10-27).
+        # Not inside the window's close: its session is closing (#481).
+        if r['touched'] and not not_off and not closing:
             self._sg_sweep_refresh(ch)
         if r['error'] and not not_off:
-            messagebox.showerror("SG sweep error",
-                                 f"{r['error']}\n\n{head}")
+            if closing:
+                # no box inside the window's close either (#481)
+                print(f"SG sweep, window closing: {msg}", flush=True)
+            else:
+                messagebox.showerror("SG sweep error",
+                                     f"{r['error']}\n\n{head}")
 
     def _sg_sweep_refresh(self, ch, tries=20):
         """After a sweep, read CH`ch` back into its panel, so Output ON's

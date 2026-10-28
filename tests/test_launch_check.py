@@ -1043,6 +1043,81 @@ def test_the_window_close_stands_a_held_box_down():
         gui.messagebox = saved
 
 
+def test_the_window_close_prints_what_it_stands_down_and_cancels_every_look():
+    """#481 review, Tk-free. A box the close keeps from opening is printed
+    instead, once, so on the Linux bench its words stay in launch.log:
+    one stood down while it waits (sldea_held_stop) and one that falls due
+    once the close has begun. A box already shown is not printed again.
+    And sldea_launch_stop cancels every look even when one look's cancel
+    raises."""
+    import contextlib
+    import io
+    gui = _gui()
+
+    class _A:
+        pass
+
+    def held_app():
+        a = _A()
+        a.root = _FakeRoot()
+        a._sldea_running = True
+        return a
+    boxes = _Boxes()
+    saved = gui.messagebox
+    gui.messagebox = boxes
+    try:
+        # stood down while waiting: printed once, even when stood down twice
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'died (code 1)')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gui.sldea_held_stop(app)
+            gui.sldea_held_stop(app)
+        assert out.getvalue().count('Edge tuner: died (code 1)') == 1, \
+            out.getvalue()
+        assert boxes.errors == []
+
+        # falls due once the close has begun: printed, no box
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Plot window', 'Could not launch')
+        app._app_closing = True
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            app.root.run_next()
+        assert 'Plot window: Could not launch' in out.getvalue(), \
+            out.getvalue()
+        assert boxes.errors == [] and app.root.jobs == []
+
+        # shown before the close: not printed by the stand-down
+        app = held_app()
+        gui.sldea_box_after_run(app, 'Edge tuner', 'x')
+        app._sldea_running = False
+        app.root.run_next()
+        assert boxes.errors == [('Edge tuner', 'x')], boxes.errors
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gui.sldea_held_stop(app)
+        assert out.getvalue() == '', out.getvalue()
+    finally:
+        gui.messagebox = saved
+
+    # one look whose cancel raises does not keep the next one going
+    class _Look:
+        def __init__(self, fails):
+            self.fails, self.cancelled = fails, False
+
+        def cancel(self):
+            self.cancelled = True
+            if self.fails:
+                raise RuntimeError('cancel failed (fake)')
+    app = _A()
+    looks = [_Look(True), _Look(False)]
+    app._sldea_launch_watches = list(looks)
+    gui.sldea_launch_stop(app)
+    assert [lk.cancelled for lk in looks] == [True, True]
+    assert app._sldea_launch_watches == []
+
+
 def test_a_signal_is_said_as_a_signal():
     """POSIX: a program a signal ended (a segfault, a kill) has a negative
     return code, said as the signal."""

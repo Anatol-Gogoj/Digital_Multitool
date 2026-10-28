@@ -736,10 +736,11 @@ def _pend_boxes(app):
 
 
 def test_a_close_opens_no_launch_box_or_held_box_before_outputs_off():
-    """#481. The close's wait pumps Tk. On origin/main the launch looks and
-    the held boxes were stood down only by <Destroy>, at the final
-    root.destroy(), so a held box or a look falling due in the update()
-    that plays the run's end opened a box there, before any SG write. Now
+    """#481. The close's wait pumps Tk. Before #481 the launch looks were
+    stood down only by <Destroy>, at the final root.destroy(), and nothing
+    kept the held boxes at all, so a held box or a look falling due in the
+    update() that plays the run's end opened a box there, before any SG
+    write. Now
     both are stood down before the wait: no box opens, the SCPI is that of
     a run that finished within the wait, and the window goes."""
     app = _box_app()
@@ -851,8 +852,10 @@ def test_a_close_with_nothing_pending_is_unchanged():
 
 
 def test_an_update_that_raises_in_the_wait_still_zeroes_and_switches_off():
-    """#481 review. root.update() in the close's wait can raise (a
-    TclError once Tk is torn). On origin/main that raised out of
+    """#481 review. Should root.update() in the close's wait raise (a
+    TclError; Tk 8.6.15 was measured not to, even after destroy(), so
+    this guard is defensive), it must not skip the zero. Before #481 it
+    would have raised out of
     _on_app_close and skipped the zero and the outputs-off. Now the wait
     stops at once and the close goes on as for a run still flagged: a
     LIVE run's channel zeroed, then both outputs off, the session handed

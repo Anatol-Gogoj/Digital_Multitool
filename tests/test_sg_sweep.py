@@ -2290,6 +2290,100 @@ def test_restart_and_update_wait_for_the_sweep():
         assert mb.calls == []
 
 
+def test_a_close_during_a_live_run_opens_no_sweep_box_before_its_off():
+    """#481. A sweep on CH1 beside a LIVE run on CH2 (the other channel is
+    allowed): window close pumps Tk while the run stops, and the sweep's
+    last event is drained there. Its OFF went out and was left unconfirmed
+    only because the close skips the read-back, so no box may open: one
+    would hold up the close's own zero and outputs-off until dismissed.
+    An OFF write that failed still alarms (a dead link's only warning)."""
+    for dead in (False, True):
+        with _tmpdir() as tmp:
+            app = _App(tmp)
+            sg = app.sg
+            sg.set_offset = lambda ch, v: sg._rec('set_offset', ch, v)
+            if dead:
+                sg.fail = lambda e: (e == ('set_output', 1, False)
+                                     and app._app_closing)
+
+            def close_arrives(n):
+                if n == 2:                  # the close's first lines
+                    app._app_closing = True
+                    app.sg_sweeping = False
+            app.sleep_hook = close_arrives
+            _run_worker(app, _os.path.join(tmp, 'out.csv'), ch=1,
+                        drain=False)
+            n_sweep = len(sg.writes)
+            app.root.after(50, app._drain_sg_sweep_queue)   # the poller
+            # a LIVE run on CH2 that outlasts the close's wait
+            app.cam_seq_running = False
+            app.cam_stop_preview = lambda: None
+            app.cam = app.lcr = app.scope = app.psu = app.dmm = None
+            app._sldea_running, app._sldea_stop = True, False
+            app._sldea_live_ch = app._sldea_sg_dc_ch = 2
+            app._sldea_close_zeroed = None
+            boxes = []
+            app.root.update = lambda: app.root.run_pending()
+            app.root.after_cancel = lambda job: None
+            app.root.destroy = lambda: None
+            mb = _MB()
+            mb._record = lambda kind, title, message, kw: boxes.append(
+                (title, len(sg.writes)))
+            saved = gui.time
+
+            class _T:
+                def sleep(self, s):
+                    pass
+
+                def __getattr__(self, n):
+                    return getattr(saved, n)
+            gui.time = _T()
+            try:
+                with _patched(mb):
+                    _types.MethodType(G._on_app_close, app)()
+            finally:
+                gui.time = saved
+            close = [w for w in sg.writes[n_sweep:] if w[0] != 'go_local']
+            if dead:
+                assert [b[0] for b in boxes] == ['SG CH1 NOT SWITCHED OFF'], \
+                    boxes
+            else:
+                assert boxes == [], (
+                    f"a box opened inside the close, as (title, SG writes "
+                    f"made by then; the sweep made {n_sweep}): {boxes}")
+                assert close[:3] == [('set_offset', 2, 0.0),
+                                     ('set_output', 1, False),
+                                     ('set_output', 2, False)], close
+
+
+def test_a_sweep_error_drained_inside_a_close_opens_no_box_and_reads_nothing():
+    """#481. A sweep that ended on an error with its OFF confirmed, its last
+    event drained only once the window's close has begun (the close's wait
+    pumps Tk): no "SG sweep error" box, which would stand in the close's
+    way, and no read-back of the channel into its panel, whose session the
+    close is about to end. Outside a close both still happen."""
+    for closing in (False, True):
+        with _tmpdir() as tmp:
+            app = _App(tmp)
+            app.sg.fail = lambda e: (e[0] == 'set_basic_wave'
+                                     and e[2].get('AMP') == 2.0)
+            events = _run_worker(app, _os.path.join(tmp, 'out.csv'))
+            r = _final(events)
+            assert r['error'] and r['off_ok'] is True and r['touched'], r
+            refreshed = []
+            app._sg_sweep_refresh = lambda ch, tries=20: refreshed.append(ch)
+            app._app_closing = closing
+            for e in events:
+                app.sg_sweep_queue.put(e)
+            mb = _finish(app)
+            if closing:
+                assert mb.calls == [] and refreshed == [], (mb.calls,
+                                                            refreshed)
+            else:
+                assert mb.kinds_titles() == [('showerror', 'SG sweep error')]
+                assert refreshed == [1], refreshed
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

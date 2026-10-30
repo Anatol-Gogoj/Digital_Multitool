@@ -24,7 +24,12 @@ sample was the previous one's reading, silently. What is pinned here:
   the done and the error paths;
 * the CSV path (#65's review): a blank Output CSV gets a new file at every
   Start and stays blank, and a typed file that exists is asked about first
-  (default No), where No changes nothing, not even the continuous poll.
+  (default No), where No changes nothing, not even the continuous poll;
+* a read that RAISES (#503: a bench sweep ended on one "[Errno 32] Pipe
+  error") is retried once after a realign, so a reply that arrives late
+  does not put later readings one behind; the done message counts the
+  retries; a halted endpoint fails after one probe, naming both errors;
+  and the sweep's error names the exception type.
 
 The meter is a fake pyvisa resource under the REAL `BK894` driver (`ask`,
 `_drain`, `measure`), and the sweep runs the REAL `lcr_start_sweep`,
@@ -44,7 +49,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
 import gui  # noqa: E402
-from instruments import BK894  # noqa: E402
+from instruments import BK894, LcrReplyError, LcrTransportError  # noqa: E402
 
 G = gui.InstrumentControlGUI
 
@@ -510,6 +515,185 @@ def test_yes_overwrites_an_existing_typed_csv():
     assert _written_to(app) == out
     assert len(_rows(out)) == 12, _rows(out)
     assert app.sw_output.get() == out
+
+
+# ---- a read that raises (#503) --------------------------------------------
+
+PIPE = 'USBError: [Errno 32] Pipe error'
+
+
+class USBError(OSError):
+    """Stand-in for usb.core.USBError (an IOError) carrying pyusb's text
+    for LIBUSB_ERROR_PIPE, so messages read as they did on the bench."""
+
+    def __init__(self):
+        super().__init__(32, 'Pipe error')
+
+
+class StallingMeter(FakeMeter):
+    """FakeMeter whose `fail_at`-th :FETC? query raises USBError. `reply`
+    says what becomes of that query's answer: 'lost' never comes; 'late'
+    lands after the drain (it is queued at the next write, as a reply
+    arriving between a drain and the next query would be); 'stuck' is a
+    halted endpoint, where every later write and read raises too."""
+
+    def __init__(self, fail_at, reply='lost', **kw):
+        super().__init__(**kw)
+        self.fail_at, self.reply = fail_at, reply
+        self.fetches = 0
+        self.held = None
+        self.stuck = False
+
+    def write(self, command):
+        if self.stuck:
+            self.sent.append(command)
+            raise USBError()
+        if self.held is not None:
+            self.out.append(self.held)
+            self.held = None
+        super().write(command)
+
+    def read(self):
+        if self.stuck:
+            raise USBError()
+        return super().read()
+
+    def query(self, command):
+        if command == ':FETC?':
+            self.fetches += 1
+            if self.fetches == self.fail_at:
+                self.write(command)         # the meter takes the query
+                answer = self.out.pop()     # and its answer goes astray
+                if self.reply == 'late':
+                    self.held = answer
+                elif self.reply == 'stuck':
+                    self.stuck = True
+                raise USBError()
+        return super().query(command)
+
+
+def test_measure_retries_a_read_that_raised_and_counts_it():
+    meter = StallingMeter(fail_at=1)
+    lcr = _lcr(meter)
+    lcr.set_frequency(100)
+    lcr.set_voltage(0.1)
+    assert lcr.measure() == BK894.parse_fetch(_reading(100, 0.1))
+    assert meter.sent[-3:] == [':FETC?', ':FREQ?', ':FETC?'], meter.sent
+    assert not meter.out, meter.out
+    assert (lcr.recovered, lcr.last_recovered) == (1, PIPE)
+    assert BK894.recovered == 0, "the count leaked onto the class"
+
+
+def test_a_late_reply_after_a_failed_read_does_not_shift_later_readings():
+    # The failed query's answer turns up after the drain. It is a valid
+    # :FETC? reading, so a drain-and-retry alone would read it and leave
+    # the retry's own answer queued: every later reading one behind. The
+    # :FREQ? probe reads the late answer instead and drains again.
+    meter = StallingMeter(fail_at=1, reply='late')
+    lcr = _lcr(meter)
+    lcr.set_frequency(100)
+    lcr.set_voltage(0.1)
+    assert lcr.measure() == BK894.parse_fetch(_reading(100, 0.1))
+    assert meter.sent.count(':FREQ?') == 2, meter.sent
+    for f in (200, 300):
+        lcr.set_frequency(f)
+        assert lcr.measure() == BK894.parse_fetch(_reading(f, 0.1)), f
+    assert not meter.out, meter.out
+    assert lcr.recovered == 1
+
+
+def test_a_timed_out_read_is_retried_too():
+    # The fake's timeout leaves the reply queued, so the drain takes it.
+    meter = FakeMeter(late=':FETC?')
+    lcr = _lcr(meter)
+    lcr.set_frequency(100)
+    assert lcr.measure() == BK894.parse_fetch(_reading(100, 1.0))
+    assert lcr.recovered == 1
+    assert lcr.last_recovered.startswith('TimeoutError: '), \
+        lcr.last_recovered
+    assert not meter.out, meter.out
+
+
+def test_a_halted_endpoint_raises_naming_both_errors_after_one_probe():
+    meter = StallingMeter(fail_at=1, reply='stuck')
+    lcr = _lcr(meter)
+    try:
+        lcr.measure()
+    except LcrTransportError as e:
+        msg = str(e)
+    else:
+        raise AssertionError("a halted endpoint read was accepted")
+    assert msg.startswith(f"LCR read failed twice: {PIPE}, then {PIPE} "
+                          "on the retry."), msg
+    assert 'Single Measurement' in msg and 'Reconnect' in msg, msg
+    assert meter.sent == [':FETC?', ':FREQ?'], meter.sent
+    assert lcr.recovered == 0
+
+
+def test_realign_gives_up_on_a_meter_that_only_answers_fetch():
+    meter = StallingMeter(fail_at=1)
+    meter.REPLIES = dict(FakeMeter.REPLIES, **{':FREQ?': _reading(1, 1)})
+    lcr = _lcr(meter)
+    try:
+        lcr.measure()
+    except LcrReplyError as e:
+        msg = str(e)
+    else:
+        raise AssertionError("an unaligned meter was read")
+    assert 'out of step' in msg and repr(_reading(1, 1)) in msg, msg
+    assert meter.sent.count(':FREQ?') == 3, meter.sent
+    assert lcr.recovered == 0
+
+
+def test_sweep_through_a_stalled_read_completes_and_says_so():
+    meter = StallingMeter(fail_at=3, reply='late')
+    app, out = _sweep(meter)
+    with _Boxes() as boxes:
+        app.run()
+    assert not boxes.calls, boxes.calls
+    rows = _rows(out)
+    assert len(rows) == 12, len(rows)
+    for r in rows:
+        want = BK894.parse_fetch(_reading(float(r['Frequency (Hz)']),
+                                          float(r['Voltage (V)'])))
+        got = (float(r['Primary']), float(r['Secondary']), int(r['Status']))
+        assert got == want, (r, want)
+    text = app.sw_status.text
+    assert text.startswith(f"Sweep complete: 12 samples written to {out}"), \
+        text
+    assert text.endswith(f". 1 read retried after a failed query "
+                         f"(last: {PIPE})"), text
+
+
+def test_sweep_on_a_halted_endpoint_fails_naming_the_error_type():
+    meter = StallingMeter(fail_at=3, reply='stuck')
+    app, out = _sweep(meter)
+    with _Boxes() as boxes:
+        app.run()
+    [(name, (title, msg))] = boxes.calls
+    assert (name, title) == ('showerror', 'Sweep error'), boxes.calls
+    assert msg.startswith(f"LcrTransportError: LCR read failed twice: "
+                          f"{PIPE}"), msg
+    assert len(_rows(out)) == 2
+    assert app.sw_status.text.startswith("Sweep failed after 2 samples"), \
+        app.sw_status.text
+    assert 'lcr-io' not in app._bg_busy and not app.sweeping
+
+
+def test_sweep_error_names_the_type_of_a_failed_write():
+    # pyvisa-py re-raises a Bulk-OUT stall as ValueError(str(USBError))
+    # (protocols/usbtmc.py:280-283), the same text a read stall carries.
+    class WriteStall(FakeMeter):
+        def write(self, command):
+            if command.startswith(':FREQ '):
+                raise ValueError(str(USBError()))
+            super().write(command)
+
+    app, _out = _sweep(WriteStall())
+    with _Boxes() as boxes:
+        app.run()
+    [(_name, (_title, msg))] = boxes.calls
+    assert msg.startswith('ValueError: [Errno 32] Pipe error\n'), msg
 
 
 def _run():

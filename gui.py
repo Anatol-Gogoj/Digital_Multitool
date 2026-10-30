@@ -2213,6 +2213,9 @@ class InstrumentControlGUI:
         alive = (lambda: self.sweeping and self._sweep_gen is tok) \
             if tok is not None else (lambda: self.sweeping)
         sample_count = 0
+        # measure() retries once after a read raises (#503); the done
+        # message says how many reads this run retried.
+        recovered0 = getattr(self.lcr, 'recovered', 0)
         try:
             # Realign first: a reply left over from earlier traffic (a
             # timed-out query) would put every sample one reading behind,
@@ -2263,11 +2266,17 @@ class InstrumentControlGUI:
                             if isd > 0 and s < n_samples - 1 and alive():
                                 self._interruptible_sleep(isd, alive=alive)
         except Exception as e:
-            self.sweep_queue.put(('error', str(e), out_path, sample_count))
+            # The type names the layer: pyvisa-py raises "[Errno 32] Pipe
+            # error" as a ValueError from a write and a USBError from a
+            # read, and the bare text hid which (#503).
+            self.sweep_queue.put(('error', f"{type(e).__name__}: {e}",
+                                  out_path, sample_count))
             return
 
         cancelled = not self.sweeping
-        self.sweep_queue.put(('done', out_path, sample_count, total_samples, cancelled))
+        retried = getattr(self.lcr, 'recovered', 0) - recovered0
+        self.sweep_queue.put(('done', out_path, sample_count, total_samples, cancelled,
+                              retried, getattr(self.lcr, 'last_recovered', None)))
 
     def _drain_sweep_queue(self):
         """Main-thread poller: drain events from the worker and update UI."""
@@ -2285,8 +2294,9 @@ class InstrumentControlGUI:
                         foreground='black',
                     )
                 elif kind == 'done':
-                    _, out_path, written, total, cancelled = event
-                    self._sweep_finished_ui(out_path, written, total, cancelled)
+                    _, out_path, written, total, cancelled, retried, last = event
+                    self._sweep_finished_ui(out_path, written, total, cancelled,
+                                            retried, last)
                     final = True
                 elif kind == 'error':
                     _, err, out_path, written = event
@@ -2303,17 +2313,23 @@ class InstrumentControlGUI:
             self._bg_busy.discard('lcr-io')
             self._sweep_holds_lcr = False
 
-    def _sweep_finished_ui(self, out_path, samples_written, total_samples, cancelled):
+    def _sweep_finished_ui(self, out_path, samples_written, total_samples, cancelled,
+                           retried=0, last=None):
         self.sweeping = False
         self._sweep_release_lcr()
         self._set_sweep_ui_state(running=False)
         if cancelled:
             msg = (f"Sweep cancelled after {samples_written}/{total_samples} samples. "
                    f"Partial data: {out_path}")
-            self.sw_status.config(text=msg, foreground=uc.TEXT_ALERT)
         else:
             msg = f"Sweep complete: {samples_written} samples written to {out_path}"
-            self.sw_status.config(text=msg, foreground=uc.TEXT_OK)
+        if retried:
+            # A retried read is a good reading, but a meter that needs
+            # retries is worth knowing about (#503).
+            msg += (f". {retried} read{'s' if retried != 1 else ''} retried "
+                    f"after a failed query (last: {last})")
+        self.sw_status.config(text=msg, foreground=uc.TEXT_ALERT if cancelled
+                              else uc.TEXT_OK)
         self.status_bar.config(text=msg)
 
     def _sweep_failed_ui(self, err, out_path, samples_written):

@@ -268,6 +268,23 @@ class VisaInstrument:
 # B&K Precision 894 LCR Meter (USB-TMC)
 # --------------------------------------------------------------------------
 
+class LcrReplyError(ValueError):
+    """The 894's replies stay out of step with its queries after a drain:
+    a reply has the wrong shape for the query that asked for it."""
+
+
+class LcrTransportError(RuntimeError):
+    """An 894 read raised at the USB/VISA layer, was retried once after a
+    realign, and raised again (#503)."""
+
+
+def _named(exc):
+    """'USBError: [Errno 32] Pipe error' -- the type tells which layer
+    failed; pyvisa-py raises the same text as a ValueError from a write
+    and as a USBError from a read (#503)."""
+    return f"{type(exc).__name__}: {exc}"
+
+
 class BK894(VisaInstrument):
     """B&K Precision 894 LCR Meter.
 
@@ -329,6 +346,12 @@ class BK894(VisaInstrument):
             raise ValueError("Voltage must be 0.01 to 2.0 V")
         self.write(f':VOLT {voltage}')
 
+    # Reads that raised and then succeeded on measure()'s retry, and the
+    # last first error, for a sweep to report (#503). Class defaults keep
+    # test fakes that skip __init__ working.
+    recovered = 0
+    last_recovered = None
+
     def measure(self):
         """Return (primary, secondary, status). status 0 = good.
 
@@ -338,21 +361,72 @@ class BK894(VisaInstrument):
         queries, whose bare '1' then landed in an LCR sweep's first sample
         as "expected 3, got 1" (#495). On a bad reply it DRAINS the input
         buffer (which realigns the meter, see get_config) and asks once
-        more; a reply that is still bad raises, quoting it. A desync whose
-        stale reply happens to be another :FETC? answer cannot be told
-        apart by its format -- callers that need clean data drain first
-        (the sweep does)."""
+        more; a reply that is still bad raises LcrReplyError, quoting it.
+        A desync whose stale reply happens to be another :FETC? answer
+        cannot be told apart by its format -- callers that need clean data
+        drain first (the sweep does).
+
+        A query that RAISES is retried once (#503): a sweep on 2026-10-30
+        ended on one "[Errno 32] Pipe error", pyusb's text for a USB stall,
+        which pyvisa-py 0.8.1 also raises in place of a read timeout when
+        the meter stalls its abort request. The failed query's reply may
+        still arrive late, and a late :FETC? answer passes the format
+        check, so the retry comes after _realign. A second exception
+        raises LcrTransportError naming both. A recovered read counts in
+        `recovered`."""
         with _io_lock(self):
-            for attempt in range(2):
-                if attempt:
-                    self._drain()
-                result = self.ask(':FETC?')
-                parsed = self.parse_fetch(result)
-                if parsed is not None:
-                    return parsed
-        raise ValueError(
+            try:
+                return self._fetch()
+            except LcrReplyError:
+                raise
+            except Exception as e:      # whatever the transport raised
+                first = e
+            try:
+                self._realign()
+                reading = self._fetch()
+            except LcrReplyError:
+                raise
+            except Exception as e:
+                raise LcrTransportError(
+                    f"LCR read failed twice: {_named(first)}, then "
+                    f"{_named(e)} on the retry. Press Single Measurement: "
+                    "if it reads, start again; if it fails the same way, "
+                    "replug or power-cycle the 894, then press "
+                    "Reconnect.") from e
+            self.recovered += 1
+            self.last_recovered = _named(first)
+            return reading
+
+    def _fetch(self):
+        """:FETC? with the #495 check: on a reply that is not three fields,
+        drain and ask once more; a reply still bad raises LcrReplyError."""
+        for attempt in range(2):
+            if attempt:
+                self._drain()
+            result = self.ask(':FETC?')
+            parsed = self.parse_fetch(result)
+            if parsed is not None:
+                return parsed
+        raise LcrReplyError(
             f"LCR :FETC? reply {result!r} is not primary,secondary,status "
             "-- the meter's replies are out of step with its queries")
+
+    def _realign(self, tries=3):
+        """Drain, then ask :FREQ? until its reply is not a :FETC? answer
+        (#503). A late :FETC? reply is a valid reading, so only a query
+        with a different answer shows that one was queued; the next drain
+        takes that query's own reply. A stale reply of any other shape is
+        caught by _fetch's format check. Exceptions propagate."""
+        raw = None
+        for _ in range(tries):
+            self._drain()
+            raw = self.ask(':FREQ?')
+            if self.parse_fetch(raw) is None:
+                return
+        raise LcrReplyError(
+            f"LCR :FREQ? still read a :FETC? answer ({raw!r}) after "
+            f"{tries} drains -- the meter's replies are out of step with "
+            "its queries")
 
     @staticmethod
     def parse_fetch(raw):

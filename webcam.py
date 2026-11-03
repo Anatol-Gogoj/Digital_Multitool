@@ -381,7 +381,7 @@ def _run_bounded(cmd, timeout, device=None, text=False):
 
 def _v4l2(*args, device=None, timeout=10):
     """Run v4l2-ctl and return stdout ('' on any failure, a timeout, or a
-    device on hold -- see _run_bounded)."""
+    device on hold; see _run_bounded)."""
     cmd = ['v4l2-ctl']
     if device:
         cmd += ['-d', device]
@@ -1059,7 +1059,7 @@ class V4L2BayerCamera:
 
     def read(self, timeout=None):
         """The newest BGR frame, or None when no complete frame arrived
-        within `timeout` s (READ_WAIT_S when None) -- see _read_frame."""
+        within `timeout` s (READ_WAIT_S when None); see _read_frame."""
         proc = self._proc
         if proc is None or proc.stdout is None:
             return None

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Camera stall probe -- the DFK 37BUX250 on the Linux bench, NO HV, ~1 min.
+Camera stall probe: the DFK 37BUX250 on the Linux bench, NO HV, ~1 min.
 
-Bench findings 2026-11-03 (BENCH_TEST §U, SLDEA_DECISIONS.md 2026-11-03):
+Bench findings 2026-11-03 (BENCH_TEST section U, SLDEA_DECISIONS.md
+2026-11-03):
 after uvcvideo -71 errors the DFK's v4l2-ctl stream went silent WITHOUT
 exiting. The Webcam preview read it on the Tk thread with a blocking pipe
 read and froze the window for good; the killed app left its v4l2-ctl

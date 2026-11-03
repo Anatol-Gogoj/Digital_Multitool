@@ -1416,6 +1416,56 @@ def test_refresh_asks_a_held_off_camera_again():
             _close(root, app)
 
 
+def test_a_capture_on_a_held_camera_says_so_and_gives_the_preview_back():
+    """Timed and stepped capture resolve the camera on the Tk thread. A
+    camera on hold raises CameraUnresponsive there, which had no handler:
+    the click stopped the preview and ended in a traceback with no message
+    (#506 review). Each now shows the reason in a box, starts no worker,
+    and the preview it stopped comes back once, with no further box."""
+    saved_resolve = webcam.resolve_camera
+
+    def held(index):
+        raise webcam.CameraUnresponsive(
+            f"/dev/video{index} is not answering (test)")
+
+    def start_timed(app):
+        app.cam_tm_delays.set('0')
+        app.cam_tm_focus.set(False)
+        app.cam_toggle_timed()
+
+    def start_stepped(app):
+        app.sg = object()                     # connected, never written
+        app._sg_sweep_locked = lambda ch: False
+        app.cam_seq_focus.set(False)
+        app.cam_toggle_sequence()
+
+    for title, start in (("Timed capture", start_timed),
+                         ("Stepped capture", start_stepped)):
+        with _Patched() as p:
+            webcam.resolve_camera = held
+            root, app = _app()
+            if root is None:
+                webcam.resolve_camera = saved_resolve
+                return
+            try:
+                _select_webcam(app)
+                assert _pump_until(root, lambda: app.cam_previewing)
+                start(app)
+                assert [(k, t) for k, t, _ in p.mb.calls] == [
+                    ('showerror', title)], p.mb.calls
+                assert 'not answering' in p.mb.calls[0][2]
+                assert not app.cam_seq_running
+                assert not app._cam_worker_alive()
+                assert _pump_until(root, lambda: app.cam_previewing,
+                                   secs=3.0), (title, app.cam_splash)
+                _pump(root, WATCH)
+                assert _opens() == [('open', 0)] * 2, (title, _FakeCam.log)
+                assert len(p.mb.calls) == 1, p.mb.calls
+            finally:
+                webcam.resolve_camera = saved_resolve
+                _close(root, app)
+
+
 def test_an_adjustment_resumes_the_preview_only_on_the_tab():
     """Stabilize, Auto-WB once and Auto-expose restart a preview they
     paused. Off the tab, the leave-tab rule wins; the next visit starts it."""

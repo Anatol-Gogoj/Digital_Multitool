@@ -11795,7 +11795,15 @@ class InstrumentControlGUI:
             except Exception:
                 pass
             self.cam = None
-        spec = webcam.resolve_camera(int(idx))
+        # A camera on hold raises CameraUnresponsive here, on the Tk thread:
+        # say why and stop. The preview stopped above is owed its quiet
+        # start (cam_stop_preview), which the reason watch makes once the
+        # box closes (#506 review: it ended in a bare traceback).
+        try:
+            spec = webcam.resolve_camera(int(idx))
+        except webcam.CameraUnresponsive as e:
+            messagebox.showerror("Timed capture", str(e))
+            return
 
         csv_path = None
         if self.cam_tm_focus.get():
@@ -11970,7 +11978,12 @@ class InstrumentControlGUI:
             except Exception:
                 pass
             self.cam = None
-        spec = webcam.resolve_camera(int(idx))
+        # a camera on hold: say why and stop, as Timed capture does
+        try:
+            spec = webcam.resolve_camera(int(idx))
+        except webcam.CameraUnresponsive as e:
+            messagebox.showerror("Stepped capture", str(e))
+            return
         ch = int(self.cam_sg_ch.get())
         key = 'OFST' if self.cam_sg_param.get().startswith('DC') else 'AMP'
         csv_path = None

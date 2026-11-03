@@ -32,6 +32,21 @@ W, H = 16, 8                     # a tiny Bayer frame: 128 bytes
 N = W * H
 
 
+class _Skip(Exception):
+    """A case that cannot run on this platform; _run counts it skipped."""
+
+
+def _needs_pipe_select():
+    """The stream read waits in select() on the v4l2-ctl pipe. Windows'
+    select() takes sockets only (WinError 10093 on a pipe), so there the
+    read fails at once and a timing or alignment check would test
+    nothing. The Bayer stream is Linux-bench-only, so these cases run on
+    POSIX and skip on Windows."""
+    if _sys.platform.startswith('win'):
+        raise _Skip("select() on a pipe needs POSIX; the Bayer stream "
+                    "is Linux-only")
+
+
 class _PipeProc:
     """A stand-in for the v4l2-ctl Popen: stdout is the read end of a real
     pipe, the test writes the other end. `stuck` makes it ignore SIGTERM
@@ -89,6 +104,7 @@ def _timed(fn):
 
 def test_a_silent_stream_read_returns_within_its_timeout():
     """The freeze itself: v4l2-ctl alive, no bytes. read() must come back."""
+    _needs_pipe_select()
     cam = _cam(_PipeProc())
     got, dt = _timed(lambda: cam._read_frame(cam._proc, 0.2))
     assert got is None
@@ -99,6 +115,7 @@ def test_a_partial_frame_waits_its_timeout_then_completes_aligned():
     """The bench's stack: select() saw bytes, then the read waited forever
     for the rest of the frame. The half frame must stay buffered, and the
     frame it completes must be exactly the bytes that were written."""
+    _needs_pipe_select()
     proc = _PipeProc()
     cam = _cam(proc)
     frame = bytes(range(N))
@@ -111,6 +128,7 @@ def test_a_partial_frame_waits_its_timeout_then_completes_aligned():
 
 
 def test_the_newest_complete_frame_is_returned_and_the_rest_kept():
+    _needs_pipe_select()
     proc = _PipeProc()
     cam = _cam(proc)
     proc.write(_frame(1) + _frame(2) + _frame(3)[:N // 4])
@@ -120,6 +138,7 @@ def test_the_newest_complete_frame_is_returned_and_the_rest_kept():
 
 
 def test_a_stream_silent_past_stall_s_is_not_waited_on():
+    _needs_pipe_select()
     cam = _cam(_PipeProc())
     cam._last_frame_at = time.monotonic() - cam.STALL_S - 0.1
     got, dt = _timed(lambda: cam._read_frame(cam._proc, 5.0))
@@ -127,6 +146,7 @@ def test_a_stream_silent_past_stall_s_is_not_waited_on():
 
 
 def test_a_stalled_stream_still_takes_a_frame_that_has_arrived():
+    _needs_pipe_select()
     proc = _PipeProc()
     cam = _cam(proc)
     cam._last_frame_at = time.monotonic() - cam.STALL_S - 0.1
@@ -139,6 +159,7 @@ def test_a_stalled_stream_still_takes_a_frame_that_has_arrived():
 
 
 def test_an_exited_stream_returns_none_at_once():
+    _needs_pipe_select()
     proc = _PipeProc()
     cam = _cam(proc)
     proc.eof()
@@ -179,8 +200,8 @@ def test_end_child_never_waits_past_its_grace():
 
 class _StuckPopen:
     """subprocess.Popen whose child is stuck in the kernel: communicate()
-    times out, and wait() returns only once released -- the call that hung
-    the app inside subprocess.run."""
+    times out, and wait() returns only once released. That is the call
+    that hung the app inside subprocess.run."""
     made = []
 
     def __init__(self, cmd, **kw):
@@ -432,6 +453,7 @@ def test_a_camera_that_answers_resolves_as_before():
 def test_a_resumed_stream_gives_its_frame_in_one_read():
     """Review 2026-11-03: past STALL_S a read took ONE pipe-full, so a 1080p
     frame (32 pipe-fulls) took 32 reads and 31 counted failures."""
+    _needs_pipe_select()
     w, h = 1920, 1080
     proc = _PipeProc()
     cam = webcam.V4L2BayerCamera('/dev/video99', 'RGGB', w, h)
@@ -450,6 +472,7 @@ def test_a_resumed_stream_gives_its_frame_in_one_read():
 def test_the_recorder_does_not_reopen_a_stream_that_comes_back_itself():
     """The same, as the SLDEA recorder saw it: a 3 s dropout that ends by
     itself was cut off by a forced reopen (REOPEN_AFTER_FAILS)."""
+    _needs_pipe_select()
     import tempfile
     import sldea_video as sv
     w, h = 1920, 1080
@@ -527,17 +550,28 @@ def _run():
     # Failures are collected, not fatal (`#280`); see run_tests.py.
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    ran = skipped = 0
     failed = []
     for fn in fns:
         try:
             fn()
+        except _Skip as why:
+            skipped += 1
+            print(f"skip {fn.__name__} ({why})")
+            continue
         except Exception:
+            ran += 1
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")
             continue
+        ran += 1
         print(f"ok  {fn.__name__}")
     if not failed:
-        print(f"\n{len(fns)} tests passed")
+        if skipped:
+            print(f"\n{ran} of {len(fns)} tests ran ({skipped} skipped, "
+                  f"see above)")
+        else:
+            print(f"\n{len(fns)} tests passed")
         return 0
     head = f"{len(failed)} of {len(fns)} tests failed"
     print(f"\n{head}")

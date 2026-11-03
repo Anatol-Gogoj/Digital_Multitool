@@ -420,8 +420,10 @@ def open_stream(spec, fps=STREAM_FPS):
 class VideoRecorder:
     """Owns one camera stream for a run; records it and serves stills.
 
-    open_camera()  -> an object with read() (a BGR frame or None, may
-                      block up to a frame period) and close(). Called on
+    open_camera()  -> an object with read() (a BGR frame or None; the
+                      v4l2-ctl Bayer stream waits at most READ_WAIT_S,
+                      0.5 s, and none at all once silent for STALL_S)
+                      and close(). Called on
                       the reader thread, and again to REOPEN a stream that
                       stopped delivering (REOPEN_AFTER_FAILS).
     out_dir        where video.mkv and video_frames.csv are written.
@@ -671,8 +673,11 @@ class VideoRecorder:
                 self._reader_t.join(max(0.0, min(2.0,
                                                  end - time.monotonic())))
             if self._reader_t.is_alive():
-                # blocked inside the camera's read(): closing the stream
-                # from here is what unblocks it (a v4l2-ctl pipe hits EOF)
+                # still inside a camera call: a control call (10 s
+                # timeouts) or an OpenCV capture's read, which closing
+                # the stream from here unblocks. The v4l2-ctl Bayer
+                # stream's read() is bounded on its own (READ_WAIT_S,
+                # 2026-11-03), so it returns within 0.5 s regardless.
                 self._close_camera()
                 self._reader_t.join(max(0.0, end - time.monotonic()))
             if self._writer_t.is_alive():

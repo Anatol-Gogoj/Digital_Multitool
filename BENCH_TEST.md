@@ -1,4 +1,4 @@
-# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate and override (§S, gates its PR) + Signal Gen stepped sweep and Set to Vpp/2 (§T)
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate and override (§S, gates its PR) + Signal Gen stepped sweep and Set to Vpp/2 (§T) + camera stall bounds (§U)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -997,6 +997,35 @@ Polarity **NOR**. ~20 min.
 - The sweep switches burst off but leaves modulation, the box's own sweep and any channel coupling or tracking as they are. With one of those on (front panel), what does the output do during a sweep?
 
 **Send back:** the CSV from step 2, the three CSVs from step 3, a scope capture across the 5→6 change, and anything that differed.
+
+## U. Camera stall bounds: a silent DFK stream never freezes a window or holds the camera (2026-11-03) — no HV
+
+> **Camera only.** Nothing here touches the generator or the Trek. Linux
+> bench PC, DFK attached, ~5 min. The fix and its evidence are in the
+> 2026-11-03 `SLDEA_DECISIONS.md` entry. Step 1 was run on the bench on
+> 2026-11-03 and passed. Steps 2 and 3 passed that day through the real
+> Webcam tab code on the real DFK, built without the instruments (the
+> autostart suite's `_app()` harness under Xvfb), not yet in the full app on
+> a seat.
+
+**Why.** On 2026-11-03 the DFK's stream went silent after USB -71 errors,
+with `v4l2-ctl` still running. The Webcam preview read it on the Tk thread
+with a blocking read and froze the app until it was killed (robotincubator's
+`tk_stall.log`). The killed app left `v4l2-ctl` holding the camera, so the
+next user had none, and `lsusb` hung.
+
+1. **The probe.** Close the app's Webcam preview, then `.venv/bin/python bench/test_webcam_stall.py`
+   - [ ] it ends `ALL PASS` (it stops the stream with SIGSTOP to make the silent stream, and checks the read, close, parent-death and recorder-reopen bounds)
+   - [ ] afterwards `ps -eo pid,cmd | grep v4l2-ctl` shows nothing left over
+2. **A killed app takes its stream with it.** Launch the app, open the Webcam tab (preview starts), then `kill -9 <the app's pid>`
+   - [ ] `ps -eo pid,cmd | grep v4l2-ctl` shows nothing within a second
+3. **The window stays live on a silent stream.** App running, Webcam preview on. In a terminal: `pkill -STOP -f 'v4l2-ctl.*stream-to=-'`
+   - [ ] within ~2 s the preview shows **NO FRAME**, and the window still repaints, switches tabs and takes clicks
+   - [ ] `~/.cache/scpi_control/tk_stall.log` gets no STALL record longer than ~0.5 s for that time
+   - [ ] `pkill -CONT -f 'v4l2-ctl.*stream-to=-'`: live frames come back and NO FRAME clears
+   - [ ] with the stream stopped again (`-STOP`), switch to another tab and back: each switch answers at once. The preview keeps the same stopped stream (leaving the tab does not close the camera, #375), so it still shows NO FRAME; `-CONT` brings it back
+
+**Send back:** the probe's output, and any STALL record from step 3.
 
 ---
 

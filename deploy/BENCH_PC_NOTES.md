@@ -213,6 +213,16 @@ back the file up first, verify the file still contains its
 logging out of everything. A broken `gdm-password` locks every account out of
 the desktop; recovery is restoring the backup from a text console.
 
+### Camera missing after switching users (2026-11-03)
+
+If the DFK is gone for the new user (no `/dev/video0`, and `lsusb` hangs
+instead of listing it), look for a `v4l2-ctl` the other session left
+behind: `ps -eo user,pid,cmd | grep v4l2-ctl`. A frozen app killed before
+the 2026-11-03 fix left its stream running, and that holds the camera for
+every user, not just its own. `sudo kill <pid>`, then unplug and replug the
+camera. README "Known instrument quirks" has the details. Builds since the
+fix start every `v4l2-ctl` so that it dies with the app.
+
 ## Desktop icons and the "plugin to the panel" error
 
 An **untrusted** `.desktop` file is *opened* rather than executed. The only

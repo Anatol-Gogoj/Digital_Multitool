@@ -105,8 +105,9 @@ class _FakeCam:
         self._open = True
         return self
 
-    def read_rgb(self):
+    def read_rgb(self, timeout=None):
         import numpy as np
+        _FakeCam.log.append(('read', timeout))
         if not self._open or _FakeCam.blank:
             return None
         return np.full((360, 480, 3), _FakeCam.level, dtype=np.uint8)
@@ -353,7 +354,7 @@ class _CameraWork:
             self._hold()
             return None, None        # "could not settle": no field to fill
 
-        def apply_locked(device, exclude=None):
+        def apply_locked(device, exclude=None, keep_going=None):
             # every locked control set, as the real one counts them: a
             # lock that set none is a failure (#400 review)
             self._hold()
@@ -1345,6 +1346,73 @@ def test_a_camera_that_stops_sending_shows_no_frame():
             assert _pump_until(root, lambda: app.cam_splash is None), (
                 "a frame coming back did not clear NO FRAME")
         finally:
+            _close(root, app)
+
+
+def test_the_preview_tick_bounds_its_read_and_relocks_off_the_tk_thread():
+    """Bench 2026-11-03 (tk_stall.log): the preview froze the window for
+    good in a frame read that waited for bytes a dead camera never sent,
+    and its once-a-second re-stamp of the lock made v4l2-ctl calls on the
+    Tk thread that each waited out 10 s. The tick's read now carries
+    CAM_PREVIEW_READ_WAIT_S, and the re-stamp runs on a daemon thread, one
+    at a time, and stops once the preview has."""
+    import threading
+    with _Patched():
+        root, app = _app()
+        if root is None:
+            return
+        stamps = []
+        release = threading.Event()
+
+        def apply_locked(device, exclude=None, keep_going=None):
+            stamps.append((threading.current_thread() is
+                           threading.main_thread(), device, exclude,
+                           keep_going))
+            release.wait(5)              # a slow camera: the tick goes on
+            return 0
+        webcam.apply_locked = apply_locked
+        app._cam_device = lambda: '/dev/video0'
+        try:
+            _select_webcam(app)
+            assert _pump_until(root, lambda: len(stamps) >= 1, secs=4.0), (
+                "the preview never re-stamped the lock")
+            reads = [e for e in _FakeCam.log if e[0] == 'read']
+            assert reads and all(t == gui.CAM_PREVIEW_READ_WAIT_S
+                                 for _, t in reads), reads[:3]
+            on_tk, dev, exclude, keep_going = stamps[0]
+            assert not on_tk, "the re-stamp ran on the Tk thread"
+            assert dev == '/dev/video0' and exclude == {'gain'}
+            # the Tk thread keeps ticking while that stamp is stuck, and
+            # starts no second one beside it
+            n = len(reads)
+            _pump(root, 1.5)
+            assert len([e for e in _FakeCam.log if e[0] == 'read']) > n + 5
+            assert len(stamps) == 1, "a second re-stamp started beside it"
+            assert keep_going() is True
+            app.cam_stop_preview()
+            assert keep_going() is False, (
+                "a stopped preview must stop its re-stamp")
+            release.set()
+            assert _pump_until(root,
+                               lambda: not app._cam_relock_busy, secs=2.0)
+        finally:
+            release.set()
+            _close(root, app)
+
+
+def test_refresh_asks_a_held_off_camera_again():
+    """A camera held off after a timed-out call (webcam.UNRESPONSIVE_HOLD_S)
+    is asked again when the operator presses Refresh."""
+    with _Patched():
+        root, app = _app()
+        if root is None:
+            return
+        try:
+            webcam.mark_unresponsive('/dev/video0')
+            app.cam_refresh_devices()
+            assert webcam.camera_unresponsive('/dev/video0') == 0.0
+        finally:
+            webcam.clear_unresponsive()
             _close(root, app)
 
 

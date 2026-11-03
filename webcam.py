@@ -16,6 +16,9 @@ import re
 import select
 import shutil
 import subprocess
+import sys
+import threading
+import time
 
 # Quiet OpenCV's noisy V4L2/FFMPEG probe warnings (read by cv2 at import time;
 # we import cv2 lazily, after this is set).
@@ -236,18 +239,155 @@ def v4l2_available():
     return shutil.which('v4l2-ctl') is not None
 
 
+# ---- bounded v4l2-ctl calls (stall log 2026-11-03) -------------------------
+# A camera that stops answering over USB (uvcvideo "Non-zero status (-71)",
+# then a disconnect the kernel cannot finish) leaves v4l2-ctl stuck INSIDE
+# the kernel, where SIGKILL cannot land until the ioctl returns. Three
+# things then froze the app, all read off the bench's tk_stall.log:
+#   - subprocess.run(timeout=) kills the child at the timeout and then
+#     waits for it with NO limit (CPython does process.kill(); process.wait()
+#     on POSIX), so a "10 s" call against such a camera never returned;
+#   - every call on a dead camera waited out its whole 10 s, and opening
+#     the preview makes a dozen of them on the Tk thread (stalls of 20.8 and
+#     25.8 s at startup);
+#   - a killed app left its v4l2-ctl stream behind, reparented to the
+#     user's systemd, holding the camera: the kernel's disconnect waited on
+#     it, lsusb hung reading the device, and the next user had no camera.
+# Hence: kill-and-wait is bounded (_end_child), a device whose call timed
+# out is not asked again for UNRESPONSIVE_HOLD_S (each further call
+# returns at once as a failure), and every v4l2-ctl runs under
+# setpriv --pdeathsig KILL, so it dies with the thread that started it.
+
+V4L2_KILL_WAIT_S = 0.5      # after SIGKILL, wait this long, then reap in bg
+UNRESPONSIVE_HOLD_S = 30.0  # a timed-out device is not asked again this long
+_unresponsive = {}          # device -> time.monotonic() its hold ends
+_unresponsive_lock = threading.Lock()
+_PDEATHSIG = None           # cached argv prefix, see _with_pdeathsig
+
+
+def _with_pdeathsig(cmd):
+    """`cmd` run under `setpriv --pdeathsig KILL --` on Linux when setpriv
+    is installed, so the child is killed when the thread that started it
+    goes, a killed app included. setpriv execs the command, which keeps
+    its PID and the death signal (cleared only for set-user-ID programs).
+    The death signal fires when the starting THREAD ends, so a stream must
+    be opened on a thread that outlives it: the preview opens on the Tk
+    thread and the SLDEA recorder's stream lives inside its reader thread.
+    setpriv arms the signal after it starts and before it execs the
+    command, so a parent that dies inside that sub-millisecond window
+    still leaves an orphan; nothing in the app ends that soon after a
+    start. Elsewhere (Windows, no setpriv) the command runs as given."""
+    global _PDEATHSIG
+    if _PDEATHSIG is None:
+        _PDEATHSIG = []
+        if sys.platform.startswith('linux'):
+            setpriv = shutil.which('setpriv')
+            if setpriv:
+                _PDEATHSIG = [setpriv, '--pdeathsig', 'KILL', '--']
+    return _PDEATHSIG + list(cmd)
+
+
+def _reap_in_background(proc):
+    """Wait for `proc` on a daemon thread: one stuck in the kernel exits
+    whenever its ioctl returns, and is reaped then rather than left a
+    zombie."""
+    def reap():
+        try:
+            proc.wait()
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=reap, daemon=True,
+                         name='v4l2-ctl-reaper').start()
+    except Exception:
+        pass
+
+
+def _end_child(proc, grace_s=V4L2_KILL_WAIT_S):
+    """SIGKILL `proc` and wait at most `grace_s` for it. True when it has
+    exited; otherwise it is left to a reaper thread. Never raises and never
+    waits longer."""
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=grace_s)
+        return True
+    except Exception:
+        _reap_in_background(proc)
+        return False
+
+
+def camera_unresponsive(device):
+    """Seconds left on `device`'s hold (a v4l2-ctl call on it timed out
+    within UNRESPONSIVE_HOLD_S), or 0.0 when it may be asked."""
+    if not device:
+        return 0.0
+    with _unresponsive_lock:
+        until = _unresponsive.get(device)
+        if until is None:
+            return 0.0
+        left = until - time.monotonic()
+        if left <= 0:
+            del _unresponsive[device]
+            return 0.0
+        return left
+
+
+def mark_unresponsive(device, hold_s=None):
+    """Hold `device` off for `hold_s` (UNRESPONSIVE_HOLD_S) seconds."""
+    if device:
+        hold = UNRESPONSIVE_HOLD_S if hold_s is None else float(hold_s)
+        with _unresponsive_lock:
+            _unresponsive[device] = time.monotonic() + hold
+
+
+def clear_unresponsive(device=None):
+    """End `device`'s hold, or every hold when `device` is None: the Webcam
+    tab's Refresh, an explicit ask to look at the cameras again."""
+    with _unresponsive_lock:
+        if device is None:
+            _unresponsive.clear()
+        else:
+            _unresponsive.pop(device, None)
+
+
+def _run_bounded(cmd, timeout, device=None, text=False):
+    """subprocess.run(cmd, capture_output=True, timeout=timeout), except
+    that it returns within `timeout` + V4L2_KILL_WAIT_S whatever the child
+    does, and under the parent-death signal. -> CompletedProcess, or None
+    when the command did not start or did not finish in time. A timeout
+    puts `device` on hold, and a call for a device on hold returns None at
+    once, without running anything. Never raises."""
+    if device and camera_unresponsive(device):
+        return None
+    try:
+        proc = subprocess.Popen(_with_pdeathsig(cmd), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=text)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        mark_unresponsive(device)
+        _end_child(proc)
+        return None
+    except Exception:
+        _end_child(proc)
+        return None
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _v4l2(*args, device=None, timeout=10):
-    """Run v4l2-ctl and return stdout ('' on any failure)."""
+    """Run v4l2-ctl and return stdout ('' on any failure, a timeout, or a
+    device on hold -- see _run_bounded)."""
     cmd = ['v4l2-ctl']
     if device:
         cmd += ['-d', device]
     cmd += list(args)
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=timeout)
-        return out.stdout if out.returncode == 0 else ''
-    except (OSError, subprocess.SubprocessError):
-        return ''
+    out = _run_bounded(cmd, timeout, device=device, text=True)
+    return out.stdout if out is not None and out.returncode == 0 else ''
 
 
 def parse_formats(text):
@@ -301,9 +441,34 @@ def choose_size(sizes, max_width=1920):
     return max(usable, key=lambda s: s[0] * s[1])
 
 
+class CameraUnresponsive(RuntimeError):
+    """The camera did not answer: its v4l2-ctl query timed out, or the
+    device is on hold after one that did (see _run_bounded)."""
+
+
+def raise_if_unresponsive(device):
+    """Raise CameraUnresponsive, saying what to do, while `device` is on
+    hold."""
+    left = camera_unresponsive(device)
+    if left:
+        raise CameraUnresponsive(
+            f"{device} is not answering: a v4l2-ctl call on it timed out, "
+            f"so it is not asked again for {left:.0f} s. Replug the "
+            f"camera, or press Refresh on the Webcam tab to ask it now.")
+
+
 def bayer_format(device):
-    """The device's Bayer fourcc when it offers ONLY Bayer, else None."""
-    return choose_bayer(device_formats(device))
+    """The device's Bayer fourcc when it offers ONLY Bayer, else None.
+
+    Raises CameraUnresponsive when the device did not answer the query
+    (it timed out, or the device is on hold). That is NOT a camera that
+    offers no Bayer format: taken for one, the DFK was resolved as an
+    OpenCV webcam, which cannot open it, and a run started during a hold
+    took every still as NO FRAME (review 2026-11-03)."""
+    formats = device_formats(device)
+    if not formats:
+        raise_if_unresponsive(device)
+    return choose_bayer(formats)
 
 
 # ---- full camera-control lock (user knobs) --------------------------------
@@ -337,7 +502,7 @@ def set_locked(controls):
     return dict(LOCKED_CONTROLS)
 
 
-def apply_locked(device, exclude=None):
+def apply_locked(device, exclude=None, keep_going=None):
     """Stamp the locked controls onto the device (autos first). Silent
     no-op when nothing is locked; returns how many controls were set.
 
@@ -345,28 +510,46 @@ def apply_locked(device, exclude=None):
     re-stamp to leave 'gain' alone: the DFK has a firmware auto-gain that
     overrides any written value within ~0.5 s, so re-writing it every second
     only produces visible flicker (bench 2026-07-24). Gain is instead held
-    stable by pinning it at its floor at Apply time, where the AGC clamps."""
+    stable by pinning it at its floor at Apply time, where the AGC clamps.
+
+    `keep_going`, when given, is asked before each control and the stamp
+    stops at the first False (see stamp_controls)."""
     if not LOCKED_CONTROLS:
         return 0
-    return stamp_controls(device, LOCKED_CONTROLS, exclude)
+    return stamp_controls(device, LOCKED_CONTROLS, exclude, keep_going)
 
 
-def stamp_controls(device, controls, exclude=None):
+def stamp_controls(device, controls, exclude=None, keep_going=None):
     """Stamp `controls` ({name: value}) onto the device, autos first, and
     return how many were set. A control the device refuses is skipped.
     apply_locked stamps the lock this way; a camera adjustment's trial
-    picture stamps its own trial values (oneshot_rgb's `controls`)."""
+    picture stamps its own trial values (oneshot_rgb's `controls`).
+
+    `keep_going()`, when given, is asked before each control, and a False
+    ends the stamp there. The preview's background re-stamp passes "is the
+    preview still on", so a run or capture that takes the camera is not
+    overwritten after it has stamped its own lock: at most the one call
+    already under way when the preview stopped still lands, and it lands
+    before any other writer's (_CONTROL_LOCK), so a capture that stamps its
+    own values afterwards has the last word."""
     controls = dict(controls or {})
     exclude = exclude or set()
     n = 0
     for name in list(_CTRL_ORDER) + [k for k in controls
                                      if k not in _CTRL_ORDER]:
-        if name in controls and name not in exclude:
-            try:
-                set_control(device, name, controls[name])
-                n += 1
-            except Exception:
-                pass
+        with _CONTROL_LOCK:
+            if keep_going is not None:
+                try:
+                    if not keep_going():
+                        break
+                except Exception:
+                    break
+            if name in controls and name not in exclude:
+                try:
+                    set_control(device, name, controls[name])
+                    n += 1
+                except Exception:
+                    pass
     return n
 
 
@@ -476,10 +659,21 @@ def get_control(device, name):
     return int(m.group(1)) if m else None
 
 
+# Every control write takes this lock, one write (set + read back) at a
+# time, so the preview's background re-stamp and a capture, run or
+# adjustment stamping its own values cannot interleave. stamp_controls asks
+# keep_going under it too: once a stopped preview's re-stamp lets go, the
+# next writer's values land after its last one (review 2026-11-03). A
+# writer waits at most for one write in flight, which is bounded by its
+# v4l2-ctl timeouts and, after one timeout, by the device's hold.
+_CONTROL_LOCK = threading.RLock()
+
+
 def set_control(device, name, value):
     """Set a V4L2 control; returns True when it took."""
-    _v4l2(f'--set-ctrl={name}={int(value)}', device=device)
-    return get_control(device, name) == int(value)
+    with _CONTROL_LOCK:
+        _v4l2(f'--set-ctrl={name}={int(value)}', device=device)
+        return get_control(device, name) == int(value)
 
 
 def set_manual_exposure(device, exposure=None, gain=None):
@@ -509,10 +703,8 @@ def grab_raw(device, fourcc, width, height, count=3):
            f'--set-fmt-video=width={width},height={height},'
            f'pixelformat={fourcc}',
            '--stream-mmap', f'--stream-count={count}', '--stream-to=-']
-    try:
-        out = subprocess.run(cmd, capture_output=True,
-                             timeout=30 + count * 5)
-    except (OSError, subprocess.SubprocessError):
+    out = _run_bounded(cmd, 30 + count * 5, device=device)
+    if out is None:
         return None
     n = width * height
     return out.stdout[-n:] if len(out.stdout) >= n else None
@@ -729,7 +921,26 @@ class V4L2BayerCamera:
 
     Same read()/read_rgb()/close() surface as Camera, so the GUI does not
     care which backend it got.
+
+    Nothing here waits without a limit (stall log 2026-11-03). The preview
+    read this stream on the Tk thread with a blocking pipe read; a camera
+    that stopped delivering mid-frame (USB -71 errors) left v4l2-ctl alive
+    but silent, and the window froze until it was killed. A read now
+    waits at most its `timeout`, keeps a partial frame buffered for the
+    next read (so a short wait never shifts the stream's frame alignment),
+    and stops waiting at all once the stream has been silent for STALL_S.
     """
+
+    # a read waits at most this long for a frame, unless told otherwise
+    READ_WAIT_S = 0.5
+    # silent this long: reads stop waiting and return None at once, still
+    # taking whatever bytes have arrived (the preview's NO FRAME splash and
+    # the SLDEA recorder's REOPEN_AFTER_FAILS count both run on Nones)
+    STALL_S = 2.0
+    # with a frame in hand, keep draining newer ones for at most this long
+    DRAIN_MAX_S = 0.05
+    # close(): wait this long after SIGTERM before SIGKILL
+    CLOSE_WAIT_S = 1.0
 
     def __init__(self, device, fourcc, width=None, height=None, fps=15):
         self.device = device
@@ -742,6 +953,8 @@ class V4L2BayerCamera:
                 _v4l2('--list-formats-ext', device=device), fourcc)
             self.width, self.height = choose_size(sizes) or (640, 480)
         self._proc = None
+        self._buf = bytearray()          # bytes of a frame not yet complete
+        self._last_frame_at = None       # time.monotonic() of the last one
 
     @property
     def frame_bytes(self):
@@ -765,44 +978,104 @@ class V4L2BayerCamera:
                f'--set-fmt-video=width={self.width},height={self.height},'
                f'pixelformat={self.fourcc}',
                '--stream-mmap', '--stream-count=0', '--stream-to=-']
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+        self._buf = bytearray()
+        self._last_frame_at = time.monotonic()   # the wait starts fresh
+        self._proc = subprocess.Popen(_with_pdeathsig(cmd),
+                                      stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL,
                                       bufsize=0)
         return self
 
-    def _read_exactly(self, n):
-        buf = bytearray()
-        while len(buf) < n:
-            chunk = self._proc.stdout.read(n - len(buf))
-            if not chunk:
-                return None
+    def _read_frame(self, proc, timeout):
+        """The newest complete frame's raw bytes, or None. Waits at most
+        `timeout` s for bytes (READ_WAIT_S when None; not at all once the
+        stream has been silent for STALL_S), reads on without waiting while
+        more are ready, and drains newer frames for at most DRAIN_MAX_S, so
+        the preview does not fall behind the camera. Never longer than the
+        wait + DRAIN_MAX_S. Bytes of a frame not yet complete stay in
+        self._buf for the next call."""
+        n = self.frame_bytes
+        buf = self._buf
+        try:
+            fd = proc.stdout.fileno()
+        except (AttributeError, OSError, ValueError):
+            return None
+        now = time.monotonic()
+        wait = self.READ_WAIT_S if timeout is None else max(0.0,
+                                                            float(timeout))
+        if self._last_frame_at is not None \
+                and now - self._last_frame_at > self.STALL_S:
+            wait = 0.0
+        deadline = now + wait
+        # whatever happens, this call ends by here: the wait for a frame,
+        # plus one drain's worth of reading what is already in the pipe
+        hard_end = deadline + self.DRAIN_MAX_S
+        drain_end = None
+        newest = None
+        arriving = False                 # bytes came in during this call
+        while True:
+            k = len(buf) // n
+            if k:
+                newest = bytes(buf[(k - 1) * n:k * n])
+                del buf[:k * n]
+                if drain_end is None:
+                    drain_end = time.monotonic() + self.DRAIN_MAX_S
+            now = time.monotonic()
+            if now >= hard_end:
+                break
+            if newest is not None:
+                if now >= drain_end:
+                    break
+                left = 0.0
+            else:
+                left = max(0.0, deadline - now)
+                if arriving:
+                    # A frame is coming in: give it until hard_end to
+                    # finish, past the deadline (or a stalled stream's zero
+                    # wait) too. A resumed 1080p frame is 32 pipe-fulls, and
+                    # reading only what was ready at each instant took ten
+                    # reads to assemble one, each counted a failure, which
+                    # forced the recorder to reopen a stream that had come
+                    # back on its own (review 2026-11-03). An empty pipe
+                    # still fails at once.
+                    left = max(left, hard_end - now)
+            try:
+                ready = select.select([fd], [], [], left)[0]
+            except (OSError, ValueError):
+                break
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, max(n, 1 << 16))
+            except OSError:
+                break
+            if not chunk:                # EOF: v4l2-ctl has exited
+                break
             buf += chunk
-        return bytes(buf)
+            arriving = True
+        if newest is not None:
+            self._last_frame_at = time.monotonic()
+        return newest
 
-    def read(self):
-        """Latest BGR frame, or None. Drains the pipe so preview stays live."""
-        if not self.is_open:
+    def read(self, timeout=None):
+        """The newest BGR frame, or None when no complete frame arrived
+        within `timeout` s (READ_WAIT_S when None) -- see _read_frame."""
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return None
+        data = self._read_frame(proc, timeout)
+        if data is None:
             return None
         import cv2
         import numpy as np
-        data = self._read_exactly(self.frame_bytes)
-        if data is None:
-            return None
-        # Skip any frames already queued behind this one, else the preview
-        # falls further and further behind the camera.
-        while select.select([self._proc.stdout], [], [], 0)[0]:
-            nxt = self._read_exactly(self.frame_bytes)
-            if nxt is None:
-                break
-            data = nxt
         raw = np.frombuffer(data, dtype=np.uint8).reshape(self.height,
                                                           self.width)
         code = getattr(cv2, BAYER_CV_CODE.get(self.fourcc, 'COLOR_BayerBG2BGR'))
         return cv2.cvtColor(raw, code)
 
-    def read_rgb(self):
+    def read_rgb(self, timeout=None):
         import cv2
-        frame = self.read()
+        frame = self.read(timeout)
         return None if frame is None else cv2.cvtColor(frame,
                                                        cv2.COLOR_BGR2RGB)
 
@@ -813,13 +1086,26 @@ class V4L2BayerCamera:
         return False if frame is None else bool(cv2.imwrite(path, frame))
 
     def close(self):
-        if self._proc is not None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-            self._proc = None
+        """Stop the stream, waiting at most CLOSE_WAIT_S + V4L2_KILL_WAIT_S:
+        SIGTERM, then SIGKILL, then a reaper thread for a v4l2-ctl stuck in
+        the kernel. The pipe is NOT closed here: a reader on another thread
+        may still be inside read() with it (the SLDEA recorder's stop()),
+        and closing an fd under select() can hand its number to an
+        unrelated file. It closes with the last reference to the process."""
+        proc, self._proc = self._proc, None
+        self._buf = bytearray()
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=self.CLOSE_WAIT_S)
+            return
+        except Exception:
+            pass
+        _end_child(proc)
 
 
 # -- camera wrapper --------------------------------------------------------
@@ -864,19 +1150,21 @@ class Camera:
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         return self
 
-    def read(self):
-        """Return a BGR frame (numpy array) or None on failure."""
+    def read(self, timeout=None):
+        """Return a BGR frame (numpy array) or None on failure. `timeout`
+        bounds the wait on the v4l2-ctl Bayer stream
+        (V4L2BayerCamera.read); an OpenCV capture reads as OpenCV does."""
         if self._bayer is not None:
-            return self._bayer.read()
+            return self._bayer.read(timeout)
         if not self.is_open:
             return None
         ok, frame = self._cap.read()
         return frame if ok else None
 
-    def read_rgb(self):
+    def read_rgb(self, timeout=None):
         """Return an RGB frame (numpy array) or None -- ready for PIL."""
         import cv2
-        frame = self.read()
+        frame = self.read(timeout)
         if frame is None:
             return None
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

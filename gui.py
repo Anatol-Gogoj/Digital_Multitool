@@ -227,6 +227,12 @@ CAM_STOP_PREVIEW_ON_TAB_LEAVE = True
 CAM_AUTOSTART_DELAY_MS = 50   # lets the tab paint its splash before the open
 CAM_SPLASH_POLL_MS = 500      # keeps the reason current while it is on show
 CAM_NO_FRAME_S = 2.0          # preview on, no frame for this long: NO FRAME
+# The preview tick's read waits at most this long on the Tk thread. It
+# blocked until a whole frame arrived, so a camera that went silent
+# mid-frame froze the window for good (bench tk_stall.log 2026-11-03,
+# _cam_preview_tick -> V4L2BayerCamera._read_exactly). A tick that gets
+# no frame just draws nothing; the next one, 50 ms later, tries again.
+CAM_PREVIEW_READ_WAIT_S = 0.03
 CAM_SPLASH_DIM = 0.35         # brightness of the last frame under the splash
 # Splash size with no frame yet: 4:3 at the preview's height budget, so the
 # tab does not jump when the first frame arrives (the label is black around).
@@ -7583,6 +7589,11 @@ class InstrumentControlGUI:
                 if save_failed
                 else "→ NO FRAME (no stream frame after its scheduled "
                      "moment)" if stream
+                else f"→ NO FRAME (the camera is not answering: a "
+                     f"v4l2-ctl call on it timed out, so it is held off "
+                     f"for up to {webcam.UNRESPONSIVE_HOLD_S:g} s)"
+                if spec is not None and webcam.camera_unresponsive(
+                    spec.get('device'))
                 else "→ NO FRAME (camera busy? close the Webcam preview)")
         self._sldea_log(
             f"snap s{snap['step']:02d} {snap['nominal_kv']:.2f} kV "
@@ -10546,6 +10557,10 @@ class InstrumentControlGUI:
             self._cam_status("another camera adjustment is still running; "
                              "press Refresh when it has finished", 'warn')
             return
+        # Refresh is the operator asking to look at the cameras again, so
+        # a camera held off after a timed-out v4l2-ctl call (see
+        # webcam.UNRESPONSIVE_HOLD_S) is asked again now.
+        webcam.clear_unresponsive()
         idxs = webcam.list_cameras()
         vals = [str(i) for i in idxs]
         self.cam_combo['values'] = vals
@@ -11176,7 +11191,11 @@ class InstrumentControlGUI:
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
             return
-        fourcc = webcam.bayer_format(device)
+        try:
+            fourcc = webcam.bayer_format(device)
+        except webcam.CameraUnresponsive as e:
+            messagebox.showerror("Auto-expose", str(e))
+            return
         if not fourcc:
             messagebox.showinfo(
                 "Auto-expose",
@@ -11321,7 +11340,7 @@ class InstrumentControlGUI:
     def _cam_preview_tick(self):
         if not self.cam_previewing or self.cam is None:
             return
-        frame = self.cam.read_rgb()
+        frame = self.cam.read_rgb(timeout=CAM_PREVIEW_READ_WAIT_S)
         if frame is not None:
             self.cam_last_frame = frame
             self.cam_last_frame_at = datetime.now()
@@ -11340,17 +11359,41 @@ class InstrumentControlGUI:
         # (one v4l2-ctl set) and pins every locked knob live.
         self._cam_relock_ctr = getattr(self, '_cam_relock_ctr', 0) + 1
         if self._cam_relock_ctr % 20 == 0:
-            dev = self._cam_device()
-            if dev:
-                try:
-                    # skip 'gain': the firmware AGC overrides it anyway and
-                    # re-writing every second only flickers. Gain is pinned
-                    # at Apply time.
-                    webcam.apply_locked(dev, exclude={'gain'})
-                except Exception:
-                    pass
+            self._cam_relock_async()
         # ~20 fps; light enough for a lab tool
         self.cam_preview_job = self.root.after(50, self._cam_preview_tick)
+
+    def _cam_relock_async(self):
+        """The preview's re-stamp of the lock, on a daemon thread, one at a
+        time. It ran on the Tk thread: two v4l2-ctl calls per control, and
+        on a camera that has stopped answering each waited out its 10 s
+        timeout, so the window froze for a dozen of them. Gain is skipped:
+        the firmware AGC overrides it anyway and re-writing it every second
+        only flickers (gain is pinned at Apply time). The stamp stops at
+        the first control after the preview stops (stamp_controls'
+        keep_going), so a run or capture taking the camera is not
+        re-stamped behind its back."""
+        if getattr(self, '_cam_relock_busy', False):
+            return
+        dev = self._cam_device()
+        if not dev:
+            return
+        self._cam_relock_busy = True
+
+        def work():
+            try:
+                webcam.apply_locked(
+                    dev, exclude={'gain'},
+                    keep_going=lambda: bool(self.cam_previewing))
+            except Exception:
+                pass
+            finally:
+                self._cam_relock_busy = False
+        try:
+            threading.Thread(target=work, daemon=True,
+                             name='cam-preview-relock').start()
+        except Exception:
+            self._cam_relock_busy = False
 
     def _cam_show(self, rgb):
         """Render an RGB numpy frame into the preview label (with optional

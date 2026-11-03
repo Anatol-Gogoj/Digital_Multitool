@@ -13,6 +13,112 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## No camera call waits without a limit, and a killed app takes its v4l2-ctl with it (2026-11-03)
+
+**TL;DR:** when the DFK stops sending frames, the app no longer freezes.
+The Webcam preview shows NO FRAME, the SLDEA video recorder reopens the
+stream, and no camera call can hang a window. Before, the preview hung
+the window until someone killed it, and the `v4l2-ctl` left behind kept
+the camera from every user. Every `v4l2-ctl` now dies with the app that
+started it.
+
+**Observation (bench, 2026-11-03).**
+
+- An SLDEA run (`38disk_Breakdown_10kV_0p25kVstep`, robotincubator) lost
+  the scope at 2 kV (`[Errno 19]` from 15:38:45) and the camera by its
+  end (`NO FRAME` at 15:43:11). Its run.log stops after the shadow line,
+  and the PC was rebooted at about 15:47.
+- After the reboot the DFK logged `uvcvideo 2-4.3:1.4: Non-zero status
+  (-71) in video completion handler` from 15:47:36. A reboot does not
+  power-cycle the camera.
+- robotincubator's `tk_stall.log` names the freezes: 25.8 s and 20.8 s
+  at startup in `_v4l2 -> subprocess.run` (each call waited out its
+  10 s), then a freeze that never ended (STALLING, no STALL after it) in
+  `_cam_preview_tick -> read_rgb -> V4L2BayerCamera.read ->
+  _read_exactly -> stdout.read`. `select()` had seen part of a frame,
+  and the read then waited for the rest, which the camera never sent.
+- The app was killed. Its `v4l2-ctl ... --stream-to=-` lived on under
+  robotincubator's `systemd --user`. When the camera dropped at 15:56:22,
+  the kernel's disconnect hung in `uvc_disconnect -> uvc_queue_release`
+  waiting on it (hung-task traces every 2 min), `/dev/video0` went away,
+  and `lsusb` blocked reading the camera's `product`. The camera came back
+  the moment that process was killed (16:12:18).
+- CPython's `subprocess.run(timeout=)` kills the child at the timeout and
+  then calls `process.wait()` with no limit, so a "10 s" call against a
+  child stuck in the kernel never returns.
+
+**Decision.**
+
+- `V4L2BayerCamera.read(timeout)` waits at most `READ_WAIT_S` (0.5 s)
+  for bytes, plus `DRAIN_MAX_S` (0.05 s) to finish a frame that has started
+  arriving, keeps a partial frame buffered for the next read so the stream
+  never shifts, and once the stream has been silent for `STALL_S` (2 s)
+  stops waiting for bytes that are not there. The preview tick reads with `CAM_PREVIEW_READ_WAIT_S` (0.03 s).
+  `close()` is bounded at ~1.5 s (SIGTERM, SIGKILL, then a reaper thread).
+- Every `v4l2-ctl` call goes through `_run_bounded`: kill-and-wait is
+  bounded, and a device whose call timed out is held off for
+  `UNRESPONSIVE_HOLD_S` (30 s). In that time its control calls and one-shot
+  grabs fail at once instead of each waiting 10-45 s. The Webcam tab's
+  Refresh lifts the hold. A held camera raises `CameraUnresponsive` from
+  `bayer_format`/`resolve_camera` instead of reading as "not Bayer", so a
+  run started during a hold stops at its camera pre-flight rather than
+  resolving the DFK as an OpenCV webcam that cannot open it. A run's
+  one-shot NO FRAME line says the camera is not answering.
+- The preview's once-a-second re-stamp of the lock runs on a daemon
+  thread, one at a time, and stops before its next control once the
+  preview stops (`stamp_controls(keep_going=)`). Control writes take one
+  lock (`_CONTROL_LOCK`), so a capture or run that stamps its own values
+  after the preview stops always has the last write.
+- Every `v4l2-ctl` runs under `setpriv --pdeathsig KILL` (Linux, when
+  setpriv exists), so it dies with the thread that started it.
+
+**What it changes in a run.** A recorder whose stream goes silent without
+EOF now reopens it. Before, its reader waited in the read until `stop()`,
+so the video ended there. Bench, same SIGSTOP 3 s into a recording: old
+code never reopened in 15 s, recorded nothing after 2.0 s, and `stop()`
+took 5.06 s; new code reopened after 5.0 s, kept recording, and `stop()`
+took 0.01 s. Once one control call on the camera has timed out, a
+one-shot still logs NO FRAME at once for up to 30 s instead of holding
+the run thread up to 45 s. Nothing on the SG, Trek, scope or watchdog
+path changed.
+
+**Evidence (bench, DFK 37BUX250, 2026-11-03).** `bench/test_webcam_stall.py`
+passed every check (BENCH_TEST §U). A silent stream's reads give up by
+0.551 s, then return at once. Frames resume after SIGCONT, still aligned
+(correlation 0.979 with the frame before the stall). A stopped stream
+closes in under 0.01 s. A parent killed with SIGKILL takes its stream with
+it. Through the real Webcam tab code (Xvfb, no instruments), a stopped
+stream gave NO FRAME with the longest Tk update at 42 ms, and killing that
+process left no `v4l2-ctl`. A preview read costs the Tk thread 8 ms on
+average, old and new. `tests/test_webcam_bounded_io.py` covers the bounds
+with no camera, including a child that cannot die, a stream that comes
+back by itself after 3 s (no reopen), and a held camera.
+
+**Adversarial review (2026-11-03, before the PR).** It confirmed two
+defects in the first version, both fixed above and covered by tests. (1)
+A held camera read as "not Bayer", which resolved the DFK as an OpenCV
+webcam. (2) A resumed stream's frame was assembled one pipe-full per read,
+which counted failures until the recorder force-reopened a stream that had
+come back on its own (any dropout over ~2.4 s). It also flagged that the
+background re-stamp could land one stale write after a capture's stamp
+(now serialized) and two stale comments in `sldea_video.py`.
+
+**Residuals and follow-ups.**
+
+- Opening the preview still makes its `v4l2-ctl` calls on the Tk thread.
+  On a dead camera the first one costs up to 10 s; the hold makes the rest
+  return at once. Moving the open to a worker would end that, and would let
+  Start Preview reopen a stream that is alive but silent (today it keeps
+  that stream; a replug ends it, and the next start reopens).
+- setpriv arms the death signal just before it execs `v4l2-ctl`. An app
+  that dies in that sub-millisecond window still leaves an orphan.
+- The streaming call's `--set-fmt-video` puts the DFK back at about
+  160-170 fps whatever `--set-parm` asked for (README quirks). It is not
+  wrong, but it is not the rate the code asks for.
+- Why the scope and then the camera dropped off USB during a 10 kV
+  breakdown run, on different hubs, is unknown. The PC's journal is not
+  persistent, so the kernel log of that boot is gone.
+
 ## The SLDEA tab records the film thickness, and the plot can put the nominal electric field on its x axis (2026-10-06)
 
 **TL;DR:** the SLDEA tab has a "Film thickness (µm)" box under
